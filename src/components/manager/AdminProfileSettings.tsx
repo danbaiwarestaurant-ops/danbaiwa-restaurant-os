@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
 import { useAuthStore } from '../../store/useAuthStore';
-import { UserCheck, Mail, KeyRound, CheckCircle2, Shield } from 'lucide-react';
+import { UserCheck, Mail, KeyRound, CheckCircle2, Shield, LogOut } from 'lucide-react';
 
-export const AdminProfileSettings: React.FC = () => {
-  const { users, updateAdminProfile } = useAuthStore();
+interface AdminProfileSettingsProps {
+  onLogoutAdmin?: () => void;
+}
+
+export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = ({ onLogoutAdmin }) => {
+  const { users, updateAdminProfile, logoutUser } = useAuthStore();
   const currentAdmin = users.find(u => u.role === 'admin');
 
   const [name, setName] = useState(currentAdmin ? currentAdmin.name : '');
@@ -53,6 +57,11 @@ export const AdminProfileSettings: React.FC = () => {
     }
   };
 
+  const handleLogout = async () => {
+    await logoutUser();
+    if (onLogoutAdmin) onLogoutAdmin();
+  };
+
   return (
     <div className="bg-white border-2 border-slate-300 p-5 shadow-xs rounded-none space-y-4">
       <div className="flex items-center justify-between border-b-2 border-slate-200 pb-3">
@@ -60,9 +69,19 @@ export const AdminProfileSettings: React.FC = () => {
           <Shield className="w-4 h-4 text-amber-500" />
           <span>Admin Profile & Security Settings</span>
         </h3>
-        <span className="text-[11px] font-mono text-slate-500">
-          Role: PRIMARY ADMIN
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-mono text-slate-500 uppercase">
+            PRIMARY ADMIN
+          </span>
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-1 px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white text-xs font-black uppercase transition border border-rose-700 rounded-none shadow-xs"
+            title="Logout Admin session and exit Manager Mode"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Logout Admin Session</span>
+          </button>
+        </div>
       </div>
 
       {msg && (
@@ -147,10 +166,19 @@ export const AdminProfileSettings: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex justify-end pt-2">
+        <div className="flex justify-end gap-3 pt-2 border-t">
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-900 border border-rose-300 font-bold uppercase text-xs rounded-none flex items-center gap-1.5"
+          >
+            <LogOut className="w-3.5 h-3.5 text-rose-600" />
+            <span>Logout Admin</span>
+          </button>
+
           <button
             type="submit"
-            className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-black uppercase text-xs tracking-wider border border-amber-600 rounded-none shadow-xs transition active:scale-95"
+            className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-black uppercase text-xs tracking-wider border border-amber-600 rounded-none shadow-xs transition active:scale-95"
           >
             Save Admin Profile Changes
           </button>

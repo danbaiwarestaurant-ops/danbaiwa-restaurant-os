@@ -4,7 +4,7 @@ import { useTicketStore } from '../../store/useTicketStore';
 import { useShiftStore } from '../../store/useShiftStore';
 import { useSyncStore } from '../../store/useSyncStore';
 import { useAuthStore } from '../../store/useAuthStore';
-import { Settings, RefreshCw, LayoutDashboard, DollarSign, Lock, UserCheck, KeyRound, LogOut } from 'lucide-react';
+import { Settings, RefreshCw, LayoutDashboard, DollarSign, Lock, UserCheck, KeyRound } from 'lucide-react';
 
 interface HeaderProps {
   onOpenConfig: () => void;
@@ -25,7 +25,7 @@ export const Header: React.FC<HeaderProps> = ({
   const { ticketsTodayCount } = useTicketStore();
   const { currentShift } = useShiftStore();
   const { pendingCount, isSyncing, triggerSyncWorker } = useSyncStore();
-  const { users, activeCashier, switchCashierSession, logoutUser } = useAuthStore();
+  const { users, activeCashier, switchCashierSession } = useAuthStore();
 
   const [isSwitchingCashier, setIsSwitchingCashier] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState('');
@@ -44,14 +44,6 @@ export const Header: React.FC<HeaderProps> = ({
     } else {
       setSwitchError(true);
       setSwitchPin('');
-    }
-  };
-
-  const handleLogout = async () => {
-    await logoutUser();
-    if (users.length > 0) {
-      setSelectedUserId(users[0].id);
-      setIsSwitchingCashier(true);
     }
   };
 
@@ -92,16 +84,6 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <UserCheck className="w-3.5 h-3.5 text-amber-600" />
           <span>{activeCashier ? activeCashier.name : 'Switch Staff'}</span>
-        </button>
-
-        {/* Logout Button */}
-        <button
-          onClick={handleLogout}
-          className="flex items-center gap-1 px-2.5 py-1.5 border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-900 text-xs font-black uppercase transition rounded-none"
-          title="Logout active cashier session"
-        >
-          <LogOut className="w-3.5 h-3.5 text-rose-600" />
-          <span>Logout</span>
         </button>
 
         {/* Outbox Sync Badge */}

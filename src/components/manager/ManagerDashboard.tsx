@@ -106,7 +106,10 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({ onRequirePin
       </div>
 
       {/* Admin Profile & Security Settings Panel */}
-      <AdminProfileSettings />
+      <AdminProfileSettings onLogoutAdmin={() => {
+        // Exit Manager Mode on Admin Logout
+        window.location.reload();
+      }} />
 
       {/* Staff Management Panel (Admin Only) */}
       <StaffManagement />
