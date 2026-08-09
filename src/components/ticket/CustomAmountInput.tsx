@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useDeviceStore } from '../../store/useDeviceStore';
+import { useShiftStore } from '../../store/useShiftStore';
+import { useAuthStore } from '../../store/useAuthStore';
 import { Printer } from 'lucide-react';
 
 interface CustomAmountInputProps {
@@ -12,16 +14,28 @@ export const CustomAmountInput: React.FC<CustomAmountInputProps> = ({ onTicketCr
   const [customVal, setCustomVal] = useState('');
   const { createAndPrintTicket } = useTicketStore();
   const { config } = useDeviceStore();
+  const { currentShift } = useShiftStore();
+  const { activeUser } = useAuthStore();
 
   const handlePrint = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!activeUser) {
+      onError('Cashier account has to be created and logged in first before printing tickets!');
+      return;
+    }
+
+    if (!currentShift) {
+      onError('Active shift must be opened by Cashier before printing tickets!');
+      return;
+    }
+
     const amount = parseFloat(customVal);
     if (!amount || amount <= 0) {
       onError('Please enter a valid ticket amount');
       return;
     }
 
-    const res = await createAndPrintTicket(amount);
+    const res = await createAndPrintTicket(amount, activeUser.id);
     if (res.success) {
       onTicketCreated(res.message);
       setCustomVal('');
@@ -58,7 +72,7 @@ export const CustomAmountInput: React.FC<CustomAmountInputProps> = ({ onTicketCr
           className="px-6 py-3 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 transition active:scale-95 whitespace-nowrap rounded-none"
         >
           <Printer className="w-4 h-4" />
-          <span>Print Ticket</span>
+          <span>Print Custom Ticket</span>
         </button>
       </form>
     </div>

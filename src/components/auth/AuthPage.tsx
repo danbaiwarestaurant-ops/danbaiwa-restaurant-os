@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ShieldCheck, LogIn, UserPlus, Mail, Lock, KeyRound, AlertCircle, CheckCircle2, ArrowLeft } from 'lucide-react';
+import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
+import { supabase } from '../../services/supabase/supabaseClient';
 
 export const AuthPage: React.FC = () => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
@@ -16,18 +17,15 @@ export const AuthPage: React.FC = () => {
   const [regPin, setRegPin] = useState('');
   const [regRole, setRegRole] = useState<'admin' | 'cashier'>('admin');
 
-  // Reset Password / Recovery State
+  // Supabase Online Email Reset State
   const [resetEmail, setResetEmail] = useState('');
-  const [resetKey, setResetKey] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [newPin, setNewPin] = useState('');
-  const [resetSuccess, setResetSuccess] = useState(false);
+  const [resetSuccessMsg, setResetSuccessMsg] = useState<string | null>(null);
   
   // UI State
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const { loginUser, registerUser, recoverAdminPinWithKey } = useAuthStore();
+  const { loginUser, registerUser } = useAuthStore();
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,30 +83,35 @@ export const AuthPage: React.FC = () => {
     }
   };
 
-  const handleResetSubmit = async (e: React.FormEvent) => {
+  const handleOnlineSupabaseReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setResetSuccessMsg(null);
 
-    if (!resetEmail.trim() || !resetKey.trim() || newPin.length < 4) {
-      setError('Please fill in all recovery fields');
+    const cleanEmail = resetEmail.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setError('Please enter a valid email address');
       return;
     }
 
     try {
       setLoading(true);
-      const success = await recoverAdminPinWithKey(resetEmail, resetKey, newPin);
-      if (success) {
-        setResetSuccess(true);
-        setTimeout(() => {
-          setMode('login');
-          setLoginEmail(resetEmail);
-          setResetSuccess(false);
-        }, 2000);
-      } else {
-        setError('Invalid Master Recovery Key or Email address');
+      if (!navigator.onLine) {
+        throw new Error('Internet connection is required to send Supabase Password Reset email.');
       }
+
+      // Real Supabase Auth Online Password Reset Request
+      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: window.location.origin,
+      });
+
+      if (resetErr) {
+        throw new Error(resetErr.message);
+      }
+
+      setResetSuccessMsg(`Password reset instructions sent to ${cleanEmail}. Please check your inbox.`);
     } catch (err: any) {
-      setError(err?.message || 'Password reset failed.');
+      setError(err?.message || 'Failed to send reset email. Ensure Supabase credentials are configured in .env.');
     } finally {
       setLoading(false);
     }
@@ -126,7 +129,7 @@ export const AuthPage: React.FC = () => {
                 Danbaiwa POS Auth
               </h1>
               <p className="text-xs text-slate-500 font-bold uppercase">
-                Salted Hashing • User Data Isolation
+                Real Supabase Auth • Multi-Tenant Scoping
               </p>
             </div>
           </div>
@@ -168,7 +171,7 @@ export const AuthPage: React.FC = () => {
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Back to Login</span>
             </button>
-            <span className="text-xs font-black uppercase text-slate-800">Reset Account Password</span>
+            <span className="text-xs font-black uppercase text-slate-800">Online Password Reset</span>
           </div>
         )}
 
@@ -181,10 +184,10 @@ export const AuthPage: React.FC = () => {
         )}
 
         {/* Success Feedback */}
-        {resetSuccess && (
+        {resetSuccessMsg && (
           <div className="p-3 bg-emerald-50 border-2 border-emerald-400 text-emerald-950 text-xs font-bold uppercase rounded-none flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-            <span>Password & PIN Reset Successfully! Redirecting...</span>
+            <span>{resetSuccessMsg}</span>
           </div>
         )}
 
@@ -328,9 +331,13 @@ export const AuthPage: React.FC = () => {
           </form>
         )}
 
-        {/* Reset Password Form */}
+        {/* Online Supabase Reset Password Form */}
         {mode === 'forgot' && (
-          <form onSubmit={handleResetSubmit} className="space-y-4">
+          <form onSubmit={handleOnlineSupabaseReset} className="space-y-4">
+            <div className="p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold uppercase rounded-none">
+              Enter your account email address below. We will send a secure Supabase Cloud Password Reset link directly to your inbox.
+            </div>
+
             <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
                 <Mail className="w-3.5 h-3.5 text-amber-600" />
@@ -340,55 +347,25 @@ export const AuthPage: React.FC = () => {
                 type="email"
                 value={resetEmail}
                 onChange={e => setResetEmail(e.target.value)}
-                placeholder="registered@danbaiwarestaurant.com"
+                placeholder="owner@danbaiwarestaurant.com"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
-                <KeyRound className="w-3.5 h-3.5 text-amber-600" />
-                <span>24-Char Master Recovery Key</span>
-              </label>
-              <input
-                type="text"
-                value={resetKey}
-                onChange={e => setResetKey(e.target.value.toUpperCase())}
-                placeholder="DANB-XXXX-XXXX-XXXX"
-                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 tracking-wider focus:border-amber-500 focus:outline-none"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-                New Custom PIN
-              </label>
-              <input
-                type="password"
-                value={newPin}
-                onChange={e => setNewPin(e.target.value.replace(/\D/g, ''))}
-                placeholder="4-8 Digits"
-                maxLength={8}
-                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono font-black text-center text-lg text-slate-900 focus:border-amber-500 focus:outline-none"
                 required
               />
             </div>
 
             <button
               type="submit"
-              disabled={loading || !resetEmail || !resetKey || newPin.length < 4}
+              disabled={loading || !resetEmail}
               className="w-full py-3.5 mt-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 rounded-none transition active:scale-95"
             >
-              <KeyRound className="w-4 h-4" />
-              <span>Reset Account Credentials</span>
+              <Send className="w-4 h-4" />
+              <span>Send Supabase Reset Link</span>
             </button>
           </form>
         )}
 
         <div className="pt-3 border-t text-center text-[10px] text-slate-400 font-mono">
-          Cryptographic Hashing • User Data Isolation • SQLite Persistence
+          Supabase Auth Cloud Reset • Multi-Tenant Data Isolation
         </div>
       </div>
     </div>
