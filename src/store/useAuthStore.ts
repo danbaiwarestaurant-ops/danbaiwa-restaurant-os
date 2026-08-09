@@ -37,7 +37,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loadUsers: async () => {
     await dbService.init();
-    const users = await dbService.getUsers();
+    
+    // 1. Load local accounts
+    let users = await dbService.getUsers();
+
+    // 2. Check if Supabase or Shared Sync outbox contains pre-existing accounts
+    // To ensure ALL browsers, tabs, and devices share the exact same Admin/Cashier accounts
+    const outboxItems = await dbService.getPendingOutbox();
+    const userMutations = outboxItems.filter(o => o.tableName === 'users' && o.payload);
+    
+    for (const item of userMutations) {
+      const u = item.payload as UserAccount;
+      if (!users.some(existing => existing.id === u.id || existing.username === u.username)) {
+        users.push(u);
+      }
+    }
+
     const activeUsers = users.filter(u => u.status === 'active');
     const adminExists = activeUsers.some(u => u.role === 'admin');
 
