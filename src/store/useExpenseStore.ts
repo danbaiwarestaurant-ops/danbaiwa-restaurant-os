@@ -6,7 +6,7 @@ import { useShiftStore } from './useShiftStore';
 interface ExpenseState {
   expenses: Expense[];
   isLoading: boolean;
-  loadExpenses: () => Promise<void>;
+  loadExpenses: (shiftId?: string, userId?: string) => Promise<void>;
   logExpense: (amount: number, category: string, description: string) => Promise<Expense>;
   approveExpense: (expenseId: string, reviewerName: string) => Promise<void>;
   rejectExpense: (expenseId: string, reviewerName: string, reason: string) => Promise<void>;
@@ -16,10 +16,10 @@ export const useExpenseStore = create<ExpenseState>((set, get) => ({
   expenses: [],
   isLoading: false,
 
-  loadExpenses: async () => {
+  loadExpenses: async (shiftId?: string, userId?: string) => {
     set({ isLoading: true });
     await dbService.init();
-    const expenses = await dbService.getExpenses();
+    const expenses = await dbService.getExpenses(shiftId, userId);
     set({ expenses, isLoading: false });
   },
 

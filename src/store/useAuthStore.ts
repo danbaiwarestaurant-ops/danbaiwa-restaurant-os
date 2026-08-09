@@ -1,13 +1,13 @@
 import { create } from 'zustand';
-import { UserAccount } from '../types/user';
-import { generateSalt, hashPinWithSalt, verifyUserPin, generateMasterRecoveryKey } from '../services/auth/pinAuth';
+import { UserAccount, UserRole } from '../types/user';
+import { generateSalt, hashSecretWithSalt, verifySecret, generateMasterRecoveryKey } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/LocalStorageDbService';
 import { authenticateAdminWithSupabase, supabase } from '../services/supabase/supabaseClient';
 
 interface AuthState {
   users: UserAccount[];
-  activeCashier: UserAccount | null;
-  hasAdminAccount: boolean;
+  activeUser: UserAccount | null;
+  isAuthenticated: boolean;
   isLoaded: boolean;
   
   isPinModalOpen: boolean;
@@ -15,14 +15,16 @@ interface AuthState {
   pinChallengeCallback: ((success: boolean) => void) | null;
 
   loadUsers: () => Promise<void>;
-  createFirstAdmin: (name: string, email: string, pin: string) => Promise<{ admin: UserAccount; recoveryKey: string }>;
+  registerUser: (name: string, email: string, password: string, pin: string, role?: UserRole) => Promise<UserAccount>;
+  loginUser: (email: string, passwordOrPin: string) => Promise<boolean>;
+  logoutUser: () => Promise<void>;
+  
   updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
   createStaffCashier: (name: string, username: string, pin: string) => Promise<UserAccount>;
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
   recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
   switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
-  logoutUser: () => Promise<void>;
-  systemLogout: () => Promise<void>;
+  
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
@@ -30,8 +32,8 @@ interface AuthState {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   users: [],
-  activeCashier: null,
-  hasAdminAccount: false,
+  activeUser: null,
+  isAuthenticated: false,
   isLoaded: false,
 
   isPinModalOpen: false,
@@ -40,73 +42,115 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loadUsers: async () => {
     await dbService.init();
+    const users = await dbService.getUsers();
     
-    // Load local accounts
-    let users = await dbService.getUsers();
+    // Check if session token exists in localStorage
+    const savedUserId = localStorage.getItem('ticket_pos_session_user_id');
+    let activeUser: UserAccount | null = null;
+    let isAuthenticated = false;
 
-    // Check if Supabase or Shared Sync outbox contains pre-existing accounts
-    const outboxItems = await dbService.getPendingOutbox();
-    const userMutations = outboxItems.filter(o => o.tableName === 'users' && o.payload);
-    
-    for (const item of userMutations) {
-      const u = item.payload as UserAccount;
-      if (!users.some(existing => existing.id === u.id || existing.username === u.username)) {
-        users.push(u);
-      }
+    if (savedUserId) {
+      activeUser = users.find(u => u.id === savedUserId && u.status === 'active') || null;
+      if (activeUser) isAuthenticated = true;
     }
 
-    const activeUsers = users.filter(u => u.status === 'active');
-    const adminExists = activeUsers.some(u => u.role === 'admin');
-
-    const currentActive = get().activeCashier;
-    const nextActive = currentActive 
-      ? activeUsers.find(u => u.id === currentActive.id) || activeUsers[0] || null
-      : activeUsers[0] || null;
-
     set({
-      users: activeUsers,
-      activeCashier: nextActive,
-      hasAdminAccount: adminExists,
+      users: users.filter(u => u.status === 'active'),
+      activeUser,
+      isAuthenticated,
       isLoaded: true,
     });
   },
 
-  createFirstAdmin: async (name: string, email: string, pin: string) => {
+  registerUser: async (name: string, email: string, password: string, pin: string, role: UserRole = 'admin') => {
     const cleanEmail = email.trim().toLowerCase();
-
-    // 1. Perform REAL Supabase Auth GoTrue cloud authentication
-    const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin);
-
-    // 2. Generate salted credentials for local SQLite offline continuity
-    const salt = generateSalt();
-    const pinHash = await hashPinWithSalt(pin, salt);
     
-    const recoveryKey = generateMasterRecoveryKey();
-    const recoverySalt = generateSalt();
-    const recoveryKeyHash = await hashPinWithSalt(recoveryKey.replace(/-/g, ''), recoverySalt);
+    // Check if account already exists
+    const existing = await dbService.getUserByEmail(cleanEmail);
+    if (existing) {
+      throw new Error(`An account with email "${cleanEmail}" already exists. Please log in instead.`);
+    }
 
-    const adminUser: UserAccount = {
-      id: supabaseAuthResult.userId || crypto.randomUUID(),
+    // Try Supabase Auth Cloud Registration if online & configured
+    try {
+      await authenticateAdminWithSupabase(cleanEmail, pin);
+    } catch (e) {
+      // Fallback to local cryptographic registration if unconfigured
+    }
+
+    // Generate salted credentials for password and PIN
+    const passwordSalt = generateSalt();
+    const passwordHash = await hashSecretWithSalt(password, passwordSalt);
+
+    const pinSalt = generateSalt();
+    const pinHash = await hashSecretWithSalt(pin, pinSalt);
+
+    const newUser: UserAccount = {
+      id: crypto.randomUUID(),
       name: name.trim(),
-      username: cleanEmail,
       email: cleanEmail,
-      role: 'admin',
+      username: cleanEmail,
+      passwordHash,
+      passwordSalt,
       pinHash,
-      pinSalt: salt,
-      recoveryKeyHash,
-      recoveryKeySalt: recoverySalt,
+      pinSalt,
+      role,
       createdAt: new Date().toISOString(),
       status: 'active',
     };
 
-    // Save to local SQLite database so subsequent launches run 100% offline
-    await dbService.saveUser(adminUser);
+    await dbService.saveUser(newUser);
+    localStorage.setItem('ticket_pos_session_user_id', newUser.id);
+
+    set({
+      activeUser: newUser,
+      isAuthenticated: true,
+    });
+
     await get().loadUsers();
-    return { admin: adminUser, recoveryKey };
+    return newUser;
+  },
+
+  loginUser: async (email: string, passwordOrPin: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await dbService.getUserByEmail(cleanEmail);
+    if (!user) return false;
+
+    // Test secret against both password and PIN salted hashes
+    const isPasswordValid = user.passwordHash && user.passwordSalt
+      ? await verifySecret(passwordOrPin, user.passwordHash, user.passwordSalt)
+      : false;
+
+    const isPinValid = await verifySecret(passwordOrPin, user.pinHash, user.pinSalt);
+
+    if (isPasswordValid || isPinValid) {
+      localStorage.setItem('ticket_pos_session_user_id', user.id);
+      set({
+        activeUser: user,
+        isAuthenticated: true,
+      });
+      return true;
+    }
+
+    return false;
+  },
+
+  logoutUser: async () => {
+    try {
+      if (navigator.onLine && supabase) {
+        await supabase.auth.signOut();
+      }
+    } catch (e) {}
+
+    localStorage.removeItem('ticket_pos_session_user_id');
+    set({
+      activeUser: null,
+      isAuthenticated: false,
+    });
   },
 
   updateAdminProfile: async (userId: string, name: string, email: string, newPin?: string) => {
-    const user = get().users.find(u => u.id === userId && u.role === 'admin');
+    const user = get().users.find(u => u.id === userId);
     if (!user) return false;
 
     const cleanEmail = email.trim().toLowerCase();
@@ -115,34 +159,40 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     if (newPin && newPin.length >= 4) {
       pinSalt = generateSalt();
-      pinHash = await hashPinWithSalt(newPin, pinSalt);
+      pinHash = await hashSecretWithSalt(newPin, pinSalt);
     }
 
-    const updatedAdmin: UserAccount = {
+    const updatedUser: UserAccount = {
       ...user,
       name: name.trim(),
-      username: cleanEmail,
       email: cleanEmail,
+      username: cleanEmail,
       pinHash,
       pinSalt,
     };
 
-    await dbService.updateUser(updatedAdmin);
+    await dbService.updateUser(updatedUser);
+    set({ activeUser: updatedUser });
     await get().loadUsers();
     return true;
   },
 
   createStaffCashier: async (name: string, username: string, pin: string) => {
-    const salt = generateSalt();
-    const pinHash = await hashPinWithSalt(pin, salt);
+    const pinSalt = generateSalt();
+    const pinHash = await hashSecretWithSalt(pin, pinSalt);
+    const passwordSalt = generateSalt();
+    const passwordHash = await hashSecretWithSalt(pin, passwordSalt);
 
     const cashierUser: UserAccount = {
       id: crypto.randomUUID(),
       name: name.trim(),
+      email: username.trim().toLowerCase(),
       username: username.trim().toLowerCase(),
-      role: 'cashier',
+      passwordHash,
+      passwordSalt,
       pinHash,
-      pinSalt: salt,
+      pinSalt,
+      role: 'cashier',
       createdAt: new Date().toISOString(),
       status: 'active',
     };
@@ -156,13 +206,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const user = get().users.find(u => u.id === cashierId);
     if (!user) return false;
 
-    const salt = generateSalt();
-    const pinHash = await hashPinWithSalt(newPin, salt);
+    const pinSalt = generateSalt();
+    const pinHash = await hashSecretWithSalt(newPin, pinSalt);
     
     const updatedUser: UserAccount = {
       ...user,
       pinHash,
-      pinSalt: salt,
+      pinSalt,
     };
 
     await dbService.updateUser(updatedUser);
@@ -177,11 +227,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const user = get().users.find(u => (u.username === target || u.email === target) && u.role === 'admin');
     if (!user || !user.recoveryKeyHash || !user.recoveryKeySalt) return false;
 
-    const isValidKey = await verifyUserPin(cleanKey, user.recoveryKeyHash, user.recoveryKeySalt);
+    const isValidKey = await verifySecret(cleanKey, user.recoveryKeyHash, user.recoveryKeySalt);
     if (!isValidKey) return false;
 
     const newSalt = generateSalt();
-    const newPinHash = await hashPinWithSalt(newPin, newSalt);
+    const newPinHash = await hashSecretWithSalt(newPin, newSalt);
 
     const updatedAdmin: UserAccount = {
       ...user,
@@ -198,41 +248,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const user = get().users.find(u => u.id === userId);
     if (!user) return false;
 
-    const isValid = await verifyUserPin(pin, user.pinHash, user.pinSalt);
+    const isValid = await verifySecret(pin, user.pinHash, user.pinSalt);
     if (isValid) {
-      set({ activeCashier: user });
+      localStorage.setItem('ticket_pos_session_user_id', user.id);
+      set({ activeUser: user });
     }
     return isValid;
-  },
-
-  logoutUser: async () => {
-    try {
-      if (navigator.onLine && supabase) {
-        await supabase.auth.signOut();
-      }
-    } catch (e) {
-      // Ignore offline signout errors
-    }
-    set({ activeCashier: null });
-  },
-
-  systemLogout: async () => {
-    try {
-      if (navigator.onLine && supabase) {
-        await supabase.auth.signOut();
-      }
-    } catch (e) {
-      // Ignore offline signout errors
-    }
-    
-    // Perform complete system logout & reset active cashier and admin flags
-    set({
-      activeCashier: null,
-      hasAdminAccount: false,
-      users: [],
-    });
-    localStorage.removeItem('ticket_pos_users');
-    window.location.reload();
   },
 
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => {
@@ -257,7 +278,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     let isValid = false;
     for (const admin of admins) {
-      const match = await verifyUserPin(pin, admin.pinHash, admin.pinSalt);
+      const match = await verifySecret(pin, admin.pinHash, admin.pinSalt);
       if (match) {
         isValid = true;
         break;

@@ -10,7 +10,7 @@ import { Header } from './components/common/Header';
 import { Toast } from './components/common/Toast';
 import { PinModal } from './components/common/PinModal';
 import { QuickConfigModal } from './components/common/QuickConfigModal';
-import { FirstLaunchAdminSetup } from './components/auth/FirstLaunchAdminSetup';
+import { AuthPage } from './components/auth/AuthPage';
 
 import { PresetCardGrid } from './components/ticket/PresetCardGrid';
 import { CustomAmountInput } from './components/ticket/CustomAmountInput';
@@ -32,7 +32,8 @@ export function App() {
   const { checkOutbox } = useSyncStore();
 
   const {
-    hasAdminAccount,
+    activeUser,
+    isAuthenticated,
     isLoaded: isAuthLoaded,
     loadUsers,
     isPinModalOpen,
@@ -70,11 +71,17 @@ export function App() {
   useEffect(() => {
     loadConfig();
     loadUsers();
-    loadTickets();
-    loadShift();
-    loadExpenses();
     checkOutbox();
   }, []);
+
+  // Whenever activeUser changes (login/logout/switch), reload user-scoped data!
+  useEffect(() => {
+    if (isAuthenticated && activeUser) {
+      loadTickets(activeUser.id);
+      loadShift(activeUser.id);
+      loadExpenses(undefined, activeUser.id);
+    }
+  }, [isAuthenticated, activeUser?.id]);
 
   const handleOpenVoidModal = (ticketId: string) => {
     openPinModal(`Void Ticket #${ticketId}`, (verified) => {
@@ -88,8 +95,8 @@ export function App() {
   };
 
   const handleConfirmVoid = async (reason: string) => {
-    if (selectedVoidTicketId) {
-      await voidTicket(selectedVoidTicketId, reason, 'MANAGER-ADMIN');
+    if (selectedVoidTicketId && activeUser) {
+      await voidTicket(selectedVoidTicketId, reason, activeUser.name);
       showSuccess(`Voided ticket #${selectedVoidTicketId}`);
       setIsVoidModalOpen(false);
       setSelectedVoidTicketId(null);
@@ -110,9 +117,9 @@ export function App() {
     }
   };
 
-  // Render First-Launch Admin Setup Wizard if no Admin account exists
-  if (isAuthLoaded && !hasAdminAccount) {
-    return <FirstLaunchAdminSetup onAdminCreated={() => showSuccess('Admin Account created successfully!')} />;
+  // Render Full-Screen AuthPage if user is not authenticated
+  if (isAuthLoaded && !isAuthenticated) {
+    return <AuthPage />;
   }
 
   return (

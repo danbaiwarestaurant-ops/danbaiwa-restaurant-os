@@ -8,7 +8,7 @@ import { useExpenseStore } from './useExpenseStore';
 interface ShiftState {
   currentShift: Shift | null;
   isLoading: boolean;
-  loadShift: () => Promise<void>;
+  loadShift: (userId?: string) => Promise<void>;
   openShift: (openingFloat: number, cashierName?: string) => Promise<Shift>;
   closeShift: (countedCash: number, notes?: string) => Promise<Shift>;
 }
@@ -17,10 +17,10 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   currentShift: null,
   isLoading: false,
 
-  loadShift: async () => {
+  loadShift: async (userId?: string) => {
     set({ isLoading: true });
     await dbService.init();
-    const shift = await dbService.getCurrentShift();
+    const shift = await dbService.getCurrentShift(userId);
     set({ currentShift: shift, isLoading: false });
   },
 

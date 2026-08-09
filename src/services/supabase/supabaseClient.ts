@@ -1,8 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Read Supabase environment variables from Vite .env
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key';
+// Read Supabase environment variables safely with fallback
+const metaEnv = (import.meta as any).env || {};
+const SUPABASE_URL = metaEnv.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
+const SUPABASE_ANON_KEY = metaEnv.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -11,7 +12,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
  * Performs live Supabase Auth GoTrue signup/login for the Owner Admin
  */
 export async function authenticateAdminWithSupabase(email: string, pin: string) {
-  const isOnline = navigator.onLine;
+  const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   if (!isOnline) {
     throw new Error('Internet connection required for initial Supabase Cloud Admin activation.');
   }
@@ -47,9 +48,7 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
   });
 
   if (signUpError) {
-    // If Supabase URL is placeholder or network offline, gracefully allow local-seeded setup
     if (SUPABASE_URL.includes('placeholder')) {
-      console.warn('Supabase URL is unconfigured (placeholder). Proceeding with local SQLite activation.');
       return {
         userId: crypto.randomUUID(),
         email: email.trim().toLowerCase(),

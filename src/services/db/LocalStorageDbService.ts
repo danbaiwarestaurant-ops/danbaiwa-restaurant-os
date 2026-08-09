@@ -17,14 +17,31 @@ const STORAGE_KEYS = {
   SEQ: 'ticket_pos_sequences',
 };
 
+// In-memory fallback for headless Node.js unit test environments
+const inMemoryStore: Record<string, string> = {};
+
+function getItem(key: string): string | null {
+  if (typeof localStorage !== 'undefined') {
+    return localStorage.getItem(key);
+  }
+  return inMemoryStore[key] || null;
+}
+
+function setItem(key: string, value: string): void {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(key, value);
+  } else {
+    inMemoryStore[key] = value;
+  }
+}
+
 export class LocalStorageDbService implements IDbService {
   private isInitialized = false;
 
   async init(): Promise<void> {
     if (this.isInitialized) return;
     
-    // Ensure default device config if missing
-    const existingConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
+    const existingConfig = getItem(STORAGE_KEYS.CONFIG);
     if (!existingConfig) {
       const defaultConfig: DeviceConfig = {
         locationId: 'LOC01',
@@ -36,37 +53,36 @@ export class LocalStorageDbService implements IDbService {
         presetAmounts: [200, 300, 400, 500, 1000],
         isConfigured: true,
       };
-      localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(defaultConfig));
+      setItem(STORAGE_KEYS.CONFIG, JSON.stringify(defaultConfig));
     }
     this.isInitialized = true;
   }
 
   async getDeviceConfig(): Promise<DeviceConfig | null> {
-    const raw = localStorage.getItem(STORAGE_KEYS.CONFIG);
+    const raw = getItem(STORAGE_KEYS.CONFIG);
     return raw ? JSON.parse(raw) : null;
   }
 
   async saveDeviceConfig(config: DeviceConfig): Promise<void> {
-    localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
+    setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
   }
 
-  // User Accounts & Staff Management
+  // Users & Accounts
   async getUsers(): Promise<UserAccount[]> {
-    const raw = localStorage.getItem(STORAGE_KEYS.USERS);
+    const raw = getItem(STORAGE_KEYS.USERS);
     return raw ? JSON.parse(raw) : [];
   }
 
-  async getUserById(id: string): Promise<UserAccount | null> {
+  async getUserByEmail(email: string): Promise<UserAccount | null> {
     const users = await this.getUsers();
-    return users.find(u => u.id === id) || null;
+    const cleanEmail = email.trim().toLowerCase();
+    return users.find(u => u.email.toLowerCase() === cleanEmail || u.username.toLowerCase() === cleanEmail) || null;
   }
 
   async saveUser(user: UserAccount): Promise<void> {
     const users = await this.getUsers();
     users.unshift(user);
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-
-    // Transactional write to sync_outbox for Supabase cloud sync
+    setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
     await this.queueOutbox('users', 'INSERT', user);
   }
 
@@ -75,23 +91,23 @@ export class LocalStorageDbService implements IDbService {
     const index = users.findIndex(u => u.id === user.id);
     if (index !== -1) {
       users[index] = user;
-      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+      setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
       await this.queueOutbox('users', 'UPDATE', user);
     }
   }
 
-  // Tickets
-  async getTickets(): Promise<Ticket[]> {
-    const raw = localStorage.getItem(STORAGE_KEYS.TICKETS);
-    return raw ? JSON.parse(raw) : [];
+  // User-Scoped Tickets
+  async getTickets(userId?: string): Promise<Ticket[]> {
+    const raw = getItem(STORAGE_KEYS.TICKETS);
+    const tickets: Ticket[] = raw ? JSON.parse(raw) : [];
+    if (!userId) return tickets;
+    return tickets.filter(t => t.cashierId === userId || t.cashierId.includes(userId));
   }
 
   async saveTicket(ticket: Ticket): Promise<void> {
     const tickets = await this.getTickets();
     tickets.unshift(ticket);
-    localStorage.setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
-
-    // Write to Outbox
+    setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
     await this.queueOutbox('tickets', 'INSERT', ticket);
   }
 
@@ -110,45 +126,47 @@ export class LocalStorageDbService implements IDbService {
         tickets[index].voidedBy = voidedBy;
         tickets[index].voidedAt = new Date().toISOString();
         
-        // Append to immutable audit log
         this.appendAuditLog({
           entity: 'ticket',
           entityId: ticketId,
           action: 'VOID',
-          actorId: voidedBy || 'MANAGER',
+          actorId: voidedBy || 'ADMIN',
           reason: reason || 'N/A',
           timestamp: new Date().toISOString(),
         });
       }
-      localStorage.setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
+      setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
       await this.queueOutbox('tickets', 'UPDATE', tickets[index]);
     }
   }
 
   async getNextSeq(locationId: string, deviceId: string): Promise<number> {
-    const rawSeqMap = localStorage.getItem(STORAGE_KEYS.SEQ);
+    const rawSeqMap = getItem(STORAGE_KEYS.SEQ);
     const seqMap: Record<string, number> = rawSeqMap ? JSON.parse(rawSeqMap) : {};
     const key = `${locationId}_${deviceId}`;
     const nextVal = (seqMap[key] || 0) + 1;
     seqMap[key] = nextVal;
-    localStorage.setItem(STORAGE_KEYS.SEQ, JSON.stringify(seqMap));
+    setItem(STORAGE_KEYS.SEQ, JSON.stringify(seqMap));
     return nextVal;
   }
 
-  async getCurrentShift(): Promise<Shift | null> {
-    const shifts = await this.getShifts();
+  // User-Scoped Shifts
+  async getCurrentShift(userId?: string): Promise<Shift | null> {
+    const shifts = await this.getShifts(userId);
     return shifts.find(s => s.status === 'open') || null;
   }
 
-  async getShifts(): Promise<Shift[]> {
-    const raw = localStorage.getItem(STORAGE_KEYS.SHIFTS);
-    return raw ? JSON.parse(raw) : [];
+  async getShifts(userId?: string): Promise<Shift[]> {
+    const raw = getItem(STORAGE_KEYS.SHIFTS);
+    const shifts: Shift[] = raw ? JSON.parse(raw) : [];
+    if (!userId) return shifts;
+    return shifts.filter(s => s.cashierId === userId);
   }
 
   async saveShift(shift: Shift): Promise<void> {
     const shifts = await this.getShifts();
     shifts.unshift(shift);
-    localStorage.setItem(STORAGE_KEYS.SHIFTS, JSON.stringify(shifts));
+    setItem(STORAGE_KEYS.SHIFTS, JSON.stringify(shifts));
     await this.queueOutbox('shifts', 'INSERT', shift);
   }
 
@@ -168,21 +186,24 @@ export class LocalStorageDbService implements IDbService {
       shifts[index].expectedCash = expectedCash;
       shifts[index].variance = variance;
       shifts[index].notes = notes;
-      localStorage.setItem(STORAGE_KEYS.SHIFTS, JSON.stringify(shifts));
+      setItem(STORAGE_KEYS.SHIFTS, JSON.stringify(shifts));
       await this.queueOutbox('shifts', 'UPDATE', shifts[index]);
     }
   }
 
-  async getExpenses(shiftId?: string): Promise<Expense[]> {
-    const raw = localStorage.getItem(STORAGE_KEYS.EXPENSES);
-    const expenses: Expense[] = raw ? JSON.parse(raw) : [];
-    return shiftId ? expenses.filter(e => e.shiftId === shiftId) : expenses;
+  // User-Scoped Expenses
+  async getExpenses(shiftId?: string, userId?: string): Promise<Expense[]> {
+    const raw = getItem(STORAGE_KEYS.EXPENSES);
+    let expenses: Expense[] = raw ? JSON.parse(raw) : [];
+    if (shiftId) expenses = expenses.filter(e => e.shiftId === shiftId);
+    if (userId) expenses = expenses.filter(e => e.cashierId === userId);
+    return expenses;
   }
 
   async saveExpense(expense: Expense): Promise<void> {
     const expenses = await this.getExpenses();
     expenses.unshift(expense);
-    localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+    setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
     await this.queueOutbox('expenses', 'INSERT', expense);
   }
 
@@ -200,7 +221,7 @@ export class LocalStorageDbService implements IDbService {
       expenses[index].reviewedAt = new Date().toISOString();
       if (reason) expenses[index].rejectionReason = reason;
 
-      localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+      setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
       await this.queueOutbox('expenses', 'UPDATE', expenses[index]);
 
       this.appendAuditLog({
@@ -215,23 +236,23 @@ export class LocalStorageDbService implements IDbService {
   }
 
   async getPendingOutbox(): Promise<OutboxItem[]> {
-    const raw = localStorage.getItem(STORAGE_KEYS.OUTBOX);
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
     return outbox.filter(o => o.status === 'pending');
   }
 
   async markOutboxSynced(id: string): Promise<void> {
-    const raw = localStorage.getItem(STORAGE_KEYS.OUTBOX);
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
     const index = outbox.findIndex(o => o.id === id);
     if (index !== -1) {
       outbox[index].status = 'synced';
-      localStorage.setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
+      setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
     }
   }
 
   private async queueOutbox(tableName: string, action: 'INSERT' | 'UPDATE' | 'DELETE', payload: Record<string, any>): Promise<void> {
-    const raw = localStorage.getItem(STORAGE_KEYS.OUTBOX);
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
     outbox.push({
       id: crypto.randomUUID(),
@@ -242,14 +263,14 @@ export class LocalStorageDbService implements IDbService {
       status: 'pending',
       retryCount: 0,
     });
-    localStorage.setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
+    setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
   }
 
   private appendAuditLog(entry: { entity: string; entityId: string; action: string; actorId: string; reason: string; timestamp: string }) {
-    const raw = localStorage.getItem(STORAGE_KEYS.AUDIT);
+    const raw = getItem(STORAGE_KEYS.AUDIT);
     const logs = raw ? JSON.parse(raw) : [];
     logs.unshift(entry);
-    localStorage.setItem(STORAGE_KEYS.AUDIT, JSON.stringify(logs));
+    setItem(STORAGE_KEYS.AUDIT, JSON.stringify(logs));
   }
 }
 

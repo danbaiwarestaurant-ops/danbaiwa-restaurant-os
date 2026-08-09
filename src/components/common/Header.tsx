@@ -25,7 +25,7 @@ export const Header: React.FC<HeaderProps> = ({
   const { ticketsTodayCount } = useTicketStore();
   const { currentShift } = useShiftStore();
   const { pendingCount, isSyncing, triggerSyncWorker } = useSyncStore();
-  const { users, activeCashier, switchCashierSession } = useAuthStore();
+  const { users, activeUser, switchCashierSession } = useAuthStore();
 
   const [isSwitchingCashier, setIsSwitchingCashier] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState('');
@@ -63,7 +63,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span>TICKET POS SYSTEM</span>
             <span>•</span>
             <span className="text-slate-700 font-black">
-              CASHIER: {activeCashier ? activeCashier.name : 'UNASSIGNED'}
+              CASHIER: {activeUser ? activeUser.name : 'UNASSIGNED'}
             </span>
           </div>
         </div>
@@ -83,7 +83,7 @@ export const Header: React.FC<HeaderProps> = ({
           title="Switch active cashier session"
         >
           <UserCheck className="w-3.5 h-3.5 text-amber-600" />
-          <span>{activeCashier ? activeCashier.name : 'Switch Staff'}</span>
+          <span>{activeUser ? activeUser.name : 'Switch Staff'}</span>
         </button>
 
         {/* Outbox Sync Badge */}

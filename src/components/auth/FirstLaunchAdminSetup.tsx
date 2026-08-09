@@ -67,8 +67,8 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
       // Simulate 1.2s Online Cloud Authentication Handshake with Supabase / Central Registry
       await new Promise(resolve => setTimeout(resolve, 1200));
 
-      const res = await createFirstAdmin(name, email, pin);
-      setGeneratedRecoveryKey(res.recoveryKey);
+      await registerUser(name, email, pin, pin, 'admin');
+      onAdminCreated();
     } catch (err: any) {
       setError(err?.message || 'Failed to authenticate & activate Admin Account');
     } finally {
@@ -76,7 +76,7 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
     }
   };
 
-  const { createFirstAdmin } = useAuthStore();
+  const { registerUser } = useAuthStore();
 
   const handleCopyKey = () => {
     if (generatedRecoveryKey) {

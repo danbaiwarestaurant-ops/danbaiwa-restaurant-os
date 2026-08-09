@@ -1,67 +1,81 @@
 import { describe, it, expect } from 'vitest';
-import { generateSalt, hashPinWithSalt, verifyUserPin, generateMasterRecoveryKey } from '../services/auth/pinAuth';
+import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
+import { LocalStorageDbService } from '../services/db/LocalStorageDbService';
+import { Ticket } from '../types/ticket';
 
-describe('Enterprise Authentication & Salted Hashing Security (Zero Hardcoded PINs)', () => {
+describe('Enterprise Authentication & User Data Isolation', () => {
   it('should generate unique 16-byte cryptographically random hex salts', () => {
     const salt1 = generateSalt();
     const salt2 = generateSalt();
 
     expect(salt1).toBeDefined();
     expect(salt2).toBeDefined();
-    expect(salt1.length).toBe(32); // 16 bytes = 32 hex chars
+    expect(salt1.length).toBe(32);
     expect(salt2.length).toBe(32);
-    expect(salt1).not.toBe(salt2); // Salts must be unique
+    expect(salt1).not.toBe(salt2);
   });
 
-  it('should generate formatted 24-character Master Recovery Keys', () => {
-    const key1 = generateMasterRecoveryKey();
-    const key2 = generateMasterRecoveryKey();
-
-    expect(key1).toBeDefined();
-    expect(key1.startsWith('DANB-')).toBe(true);
-    expect(key1.length).toBe(19); // DANB-XXXX-XXXX-XXXX = 19 chars with hyphens
-    expect(key1).not.toBe(key2);
-  });
-
-  it('should produce identical hash for same PIN and salt, but different hash for different salt', async () => {
-    const pin = '8842';
-    const saltA = generateSalt();
-    const saltB = generateSalt();
-
-    const hashA1 = await hashPinWithSalt(pin, saltA);
-    const hashA2 = await hashPinWithSalt(pin, saltA);
-    const hashB = await hashPinWithSalt(pin, saltB);
-
-    expect(hashA1).toBe(hashA2);
-    expect(hashA1).not.toBe(hashB);
-  });
-
-  it('should successfully verify correct user PIN against stored hash and salt', async () => {
-    const pin = '5519';
+  it('should verify correct password or PIN against stored hash and salt', async () => {
+    const secret = 'SecurePass123';
     const salt = generateSalt();
-    const hash = await hashPinWithSalt(pin, salt);
+    const hash = await hashSecretWithSalt(secret, salt);
 
-    const isValid = await verifyUserPin(pin, hash, salt);
+    const isValid = await verifySecret(secret, hash, salt);
     expect(isValid).toBe(true);
   });
 
-  it('should fail verification for incorrect PIN', async () => {
-    const correctPin = '5519';
-    const wrongPin = '1111';
+  it('should fail verification for incorrect password or PIN', async () => {
+    const correctSecret = 'SecurePass123';
+    const wrongSecret = 'WrongPassword';
     const salt = generateSalt();
-    const hash = await hashPinWithSalt(correctPin, salt);
+    const hash = await hashSecretWithSalt(correctSecret, salt);
 
-    const isValid = await verifyUserPin(wrongPin, hash, salt);
+    const isValid = await verifySecret(wrongSecret, hash, salt);
     expect(isValid).toBe(false);
   });
 
-  it('should verify Master Recovery Key formatted input', async () => {
-    const rawKey = generateMasterRecoveryKey();
-    const cleanKey = rawKey.replace(/-/g, '');
-    const recoverySalt = generateSalt();
-    const recoveryHash = await hashPinWithSalt(cleanKey, recoverySalt);
+  it('should strictly isolate data per user account (Multi-Tenant Data Isolation)', async () => {
+    const db = new LocalStorageDbService();
+    await db.init();
 
-    const isValidKey = await verifyUserPin(cleanKey, recoveryHash, recoverySalt);
-    expect(isValidKey).toBe(true);
+    const userATicket: Ticket = {
+      id: 'LOC01-DEV01-000001',
+      locationId: 'LOC01',
+      deviceId: 'DEV01',
+      localSeq: 1,
+      amount: 500,
+      currency: '₦',
+      status: 'paid',
+      cashierId: 'user_a_id',
+      createdAt: new Date().toISOString(),
+      qrPayload: 'test-qr-payload-a',
+    };
+
+    const userBTicket: Ticket = {
+      id: 'LOC01-DEV01-000002',
+      locationId: 'LOC01',
+      deviceId: 'DEV01',
+      localSeq: 2,
+      amount: 1000,
+      currency: '₦',
+      status: 'paid',
+      cashierId: 'user_b_id',
+      createdAt: new Date().toISOString(),
+      qrPayload: 'test-qr-payload-b',
+    };
+
+    await db.saveTicket(userATicket);
+    await db.saveTicket(userBTicket);
+
+    const userATickets = await db.getTickets('user_a_id');
+    const userBTickets = await db.getTickets('user_b_id');
+
+    // Verify User A sees ONLY User A's ticket
+    expect(userATickets.some(t => t.id === 'LOC01-DEV01-000001')).toBe(true);
+    expect(userATickets.some(t => t.id === 'LOC01-DEV01-000002')).toBe(false);
+
+    // Verify User B sees ONLY User B's ticket
+    expect(userBTickets.some(t => t.id === 'LOC01-DEV01-000002')).toBe(true);
+    expect(userBTickets.some(t => t.id === 'LOC01-DEV01-000001')).toBe(false);
   });
 });

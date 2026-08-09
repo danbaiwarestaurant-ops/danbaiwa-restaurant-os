@@ -10,7 +10,7 @@ interface TicketState {
   ticketsTodayCount: number;
   isLoading: boolean;
   activeFlashingAmount: number | null;
-  loadTickets: () => Promise<void>;
+  loadTickets: (userId?: string) => Promise<void>;
   createAndPrintTicket: (amount: number, cashierId?: string) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
   voidTicket: (ticketId: string, reason: string, voidedBy: string) => Promise<void>;
@@ -23,10 +23,10 @@ export const useTicketStore = create<TicketState>((set, get) => ({
   isLoading: false,
   activeFlashingAmount: null,
 
-  loadTickets: async () => {
+  loadTickets: async (userId?: string) => {
     set({ isLoading: true });
     await dbService.init();
-    const tickets = await dbService.getTickets();
+    const tickets = await dbService.getTickets(userId);
     
     // Count today's tickets
     const todayStr = new Date().toISOString().split('T')[0];

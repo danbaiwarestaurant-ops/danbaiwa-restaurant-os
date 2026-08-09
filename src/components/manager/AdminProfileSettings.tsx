@@ -7,7 +7,7 @@ interface AdminProfileSettingsProps {
 }
 
 export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
-  const { users, updateAdminProfile, systemLogout } = useAuthStore();
+  const { users, updateAdminProfile, logoutUser } = useAuthStore();
   const currentAdmin = users.find(u => u.role === 'admin');
 
   const [name, setName] = useState(currentAdmin ? currentAdmin.name : '');
@@ -59,7 +59,7 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
 
   const handleSystemLogout = async () => {
     if (window.confirm('Are you sure you want to log out of the system terminal account? This will unbind the active account and return to the login screen.')) {
-      await systemLogout();
+      await logoutUser();
     }
   };
 
