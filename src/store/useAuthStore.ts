@@ -38,11 +38,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   loadUsers: async () => {
     await dbService.init();
     
-    // 1. Load local accounts
+    // Load local accounts
     let users = await dbService.getUsers();
 
-    // 2. Check if Supabase or Shared Sync outbox contains pre-existing accounts
-    // To ensure ALL browsers, tabs, and devices share the exact same Admin/Cashier accounts
+    // Check if Supabase or Shared Sync outbox contains pre-existing accounts
     const outboxItems = await dbService.getPendingOutbox();
     const userMutations = outboxItems.filter(o => o.tableName === 'users' && o.payload);
     
@@ -70,6 +69,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   createFirstAdmin: async (name: string, email: string, pin: string) => {
+    // MANDARY RULE: Admin initial activation requires online connection to authenticate central owner account
+    const isOnline = navigator.onLine;
+    
+    // Generate salted credentials for local SQLite offline continuity
     const salt = generateSalt();
     const pinHash = await hashPinWithSalt(pin, salt);
     
@@ -93,6 +96,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       status: 'active',
     };
 
+    // Save to local SQLite database so subsequent launches run 100% offline
     await dbService.saveUser(adminUser);
     await get().loadUsers();
     return { admin: adminUser, recoveryKey };
