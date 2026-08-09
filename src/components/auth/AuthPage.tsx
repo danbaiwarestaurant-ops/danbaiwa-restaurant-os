@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
-import { ShieldCheck, LogIn, UserPlus, Mail, Lock, KeyRound, AlertCircle } from 'lucide-react';
+import { ShieldCheck, LogIn, UserPlus, Mail, Lock, KeyRound, AlertCircle, CheckCircle2, ArrowLeft } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
 
 export const AuthPage: React.FC = () => {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
   
   // Login State
   const [loginEmail, setLoginEmail] = useState('');
-  const [loginSecret, setLoginSecret] = useState(''); // Password or PIN
+  const [loginSecret, setLoginSecret] = useState('');
   
   // Register State
   const [regName, setRegName] = useState('');
@@ -15,12 +15,19 @@ export const AuthPage: React.FC = () => {
   const [regPassword, setRegPassword] = useState('');
   const [regPin, setRegPin] = useState('');
   const [regRole, setRegRole] = useState<'admin' | 'cashier'>('admin');
+
+  // Reset Password / Recovery State
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetKey, setResetKey] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [resetSuccess, setResetSuccess] = useState(false);
   
   // UI State
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const { loginUser, registerUser } = useAuthStore();
+  const { loginUser, registerUser, recoverAdminPinWithKey } = useAuthStore();
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,6 +85,35 @@ export const AuthPage: React.FC = () => {
     }
   };
 
+  const handleResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!resetEmail.trim() || !resetKey.trim() || newPin.length < 4) {
+      setError('Please fill in all recovery fields');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const success = await recoverAdminPinWithKey(resetEmail, resetKey, newPin);
+      if (success) {
+        setResetSuccess(true);
+        setTimeout(() => {
+          setMode('login');
+          setLoginEmail(resetEmail);
+          setResetSuccess(false);
+        }, 2000);
+      } else {
+        setError('Invalid Master Recovery Key or Email address');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Password reset failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 selection:bg-amber-500 selection:text-white">
       <div className="bg-white border-4 border-amber-500 w-full max-w-md shadow-2xl p-8 rounded-none space-y-6">
@@ -97,30 +133,44 @@ export const AuthPage: React.FC = () => {
         </div>
 
         {/* Tab Toggle */}
-        <div className="grid grid-cols-2 border-2 border-slate-300 rounded-none overflow-hidden">
-          <button
-            type="button"
-            onClick={() => { setMode('login'); setError(null); }}
-            className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
-              mode === 'login'
-                ? 'bg-slate-900 text-white'
-                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-            }`}
-          >
-            Log In
-          </button>
-          <button
-            type="button"
-            onClick={() => { setMode('register'); setError(null); }}
-            className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
-              mode === 'register'
-                ? 'bg-slate-900 text-white'
-                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-            }`}
-          >
-            Create Account
-          </button>
-        </div>
+        {mode !== 'forgot' ? (
+          <div className="grid grid-cols-2 border-2 border-slate-300 rounded-none overflow-hidden">
+            <button
+              type="button"
+              onClick={() => { setMode('login'); setError(null); }}
+              className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
+                mode === 'login'
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              Log In
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode('register'); setError(null); }}
+              className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
+                mode === 'register'
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              Create Account
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => { setMode('login'); setError(null); }}
+              className="text-xs font-bold uppercase text-slate-600 hover:text-slate-900 flex items-center gap-1 border border-slate-300 px-3 py-1.5 rounded-none"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to Login</span>
+            </button>
+            <span className="text-xs font-black uppercase text-slate-800">Reset Account Password</span>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (
@@ -130,8 +180,16 @@ export const AuthPage: React.FC = () => {
           </div>
         )}
 
+        {/* Success Feedback */}
+        {resetSuccess && (
+          <div className="p-3 bg-emerald-50 border-2 border-emerald-400 text-emerald-950 text-xs font-bold uppercase rounded-none flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            <span>Password & PIN Reset Successfully! Redirecting...</span>
+          </div>
+        )}
+
         {/* Login Form */}
-        {mode === 'login' ? (
+        {mode === 'login' && (
           <form onSubmit={handleLoginSubmit} className="space-y-4">
             <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
@@ -149,10 +207,19 @@ export const AuthPage: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
-                <Lock className="w-3.5 h-3.5 text-amber-600" />
-                <span>Password or Custom PIN</span>
-              </label>
+              <div className="flex justify-between items-center mb-1">
+                <label className="block text-xs font-bold uppercase text-slate-700 flex items-center gap-1">
+                  <Lock className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Password or Custom PIN</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => { setMode('forgot'); setError(null); }}
+                  className="text-[11px] font-bold text-amber-600 hover:text-amber-800 uppercase"
+                >
+                  Forgot Password?
+                </button>
+              </div>
               <input
                 type="password"
                 value={loginSecret}
@@ -172,8 +239,10 @@ export const AuthPage: React.FC = () => {
               <span>Log In to Terminal</span>
             </button>
           </form>
-        ) : (
-          /* Registration Form */
+        )}
+
+        {/* Registration Form */}
+        {mode === 'register' && (
           <form onSubmit={handleRegisterSubmit} className="space-y-3">
             <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
@@ -255,6 +324,65 @@ export const AuthPage: React.FC = () => {
             >
               <UserPlus className="w-4 h-4" />
               <span>Create Account & Log In</span>
+            </button>
+          </form>
+        )}
+
+        {/* Reset Password Form */}
+        {mode === 'forgot' && (
+          <form onSubmit={handleResetSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
+                <Mail className="w-3.5 h-3.5 text-amber-600" />
+                <span>Account Email Address</span>
+              </label>
+              <input
+                type="email"
+                value={resetEmail}
+                onChange={e => setResetEmail(e.target.value)}
+                placeholder="registered@danbaiwarestaurant.com"
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
+                <KeyRound className="w-3.5 h-3.5 text-amber-600" />
+                <span>24-Char Master Recovery Key</span>
+              </label>
+              <input
+                type="text"
+                value={resetKey}
+                onChange={e => setResetKey(e.target.value.toUpperCase())}
+                placeholder="DANB-XXXX-XXXX-XXXX"
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 tracking-wider focus:border-amber-500 focus:outline-none"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+                New Custom PIN
+              </label>
+              <input
+                type="password"
+                value={newPin}
+                onChange={e => setNewPin(e.target.value.replace(/\D/g, ''))}
+                placeholder="4-8 Digits"
+                maxLength={8}
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono font-black text-center text-lg text-slate-900 focus:border-amber-500 focus:outline-none"
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || !resetEmail || !resetKey || newPin.length < 4}
+              className="w-full py-3.5 mt-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 rounded-none transition active:scale-95"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>Reset Account Credentials</span>
             </button>
           </form>
         )}
