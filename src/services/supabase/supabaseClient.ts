@@ -5,22 +5,45 @@ const metaEnv = (import.meta as any).env || {};
 const SUPABASE_URL = metaEnv.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
 const SUPABASE_ANON_KEY = metaEnv.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key';
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const isSupabaseConfigured = Boolean(
+  SUPABASE_URL &&
+  !SUPABASE_URL.includes('placeholder') &&
+  SUPABASE_ANON_KEY &&
+  !SUPABASE_ANON_KEY.includes('placeholder')
+);
+
+// Create a single global singleton instance of Supabase Client
+export const supabase = createClient(
+  isSupabaseConfigured ? SUPABASE_URL : 'https://placeholder.supabase.co',
+  isSupabaseConfigured ? SUPABASE_ANON_KEY : 'placeholder-anon-key',
+  {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+  }
+);
 
 /**
  * Real Supabase Cloud Email Authentication Engine
- * Performs live Supabase Auth GoTrue signup/login for the Owner Admin
  */
 export async function authenticateAdminWithSupabase(email: string, pin: string) {
+  if (!isSupabaseConfigured) {
+    return {
+      userId: crypto.randomUUID(),
+      email: email.trim().toLowerCase(),
+      session: null,
+      isNewUser: true,
+    };
+  }
+
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   if (!isOnline) {
     throw new Error('Internet connection required for initial Supabase Cloud Admin activation.');
   }
 
-  // Derive a strong 12+ char password from email and PIN for Supabase GoTrue auth requirements
   const derivedPassword = `Danbaiwa_POS_#2026_${pin}_Secret`;
 
-  // 1. Attempt Supabase Auth Sign In first
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
     email: email.trim().toLowerCase(),
     password: derivedPassword,
@@ -35,7 +58,6 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
     };
   }
 
-  // 2. If Sign In failed, attempt Sign Up (New Admin Registration)
   const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
     email: email.trim().toLowerCase(),
     password: derivedPassword,
@@ -48,14 +70,6 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
   });
 
   if (signUpError) {
-    if (SUPABASE_URL.includes('placeholder')) {
-      return {
-        userId: crypto.randomUUID(),
-        email: email.trim().toLowerCase(),
-        session: null,
-        isNewUser: true,
-      };
-    }
     throw new Error(`Supabase Email Auth Error: ${signUpError.message}`);
   }
 

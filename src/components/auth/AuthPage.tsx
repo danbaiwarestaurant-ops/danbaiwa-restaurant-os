@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send } from 'lucide-react';
+import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send, Info } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
-import { supabase } from '../../services/supabase/supabaseClient';
+import { supabase, isSupabaseConfigured } from '../../services/supabase/supabaseClient';
 
 export const AuthPage: React.FC = () => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
@@ -94,13 +94,17 @@ export const AuthPage: React.FC = () => {
       return;
     }
 
+    if (!isSupabaseConfigured) {
+      setError('Supabase is not configured yet. Please paste your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY into your .env file to enable live cloud email resets.');
+      return;
+    }
+
     try {
       setLoading(true);
       if (!navigator.onLine) {
         throw new Error('Internet connection is required to send Supabase Password Reset email.');
       }
 
-      // Real Supabase Auth Online Password Reset Request
       const { error: resetErr } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
         redirectTo: window.location.origin,
       });
@@ -111,7 +115,7 @@ export const AuthPage: React.FC = () => {
 
       setResetSuccessMsg(`Password reset instructions sent to ${cleanEmail}. Please check your inbox.`);
     } catch (err: any) {
-      setError(err?.message || 'Failed to send reset email. Ensure Supabase credentials are configured in .env.');
+      setError(err?.message || 'Failed to send reset email.');
     } finally {
       setLoading(false);
     }
@@ -334,9 +338,17 @@ export const AuthPage: React.FC = () => {
         {/* Online Supabase Reset Password Form */}
         {mode === 'forgot' && (
           <form onSubmit={handleOnlineSupabaseReset} className="space-y-4">
-            <div className="p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold uppercase rounded-none">
-              Enter your account email address below. We will send a secure Supabase Cloud Password Reset link directly to your inbox.
-            </div>
+            {!isSupabaseConfigured && (
+              <div className="p-3 bg-amber-50 border-2 border-amber-400 text-amber-950 text-xs font-bold uppercase rounded-none flex items-start gap-2">
+                <Info className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-black mb-0.5">Supabase Credentials Unconfigured</div>
+                  <div className="text-[11px] font-normal lowercase">
+                    Add your real <code className="font-mono bg-amber-200 px-1 font-bold">VITE_SUPABASE_URL</code> and <code className="font-mono bg-amber-200 px-1 font-bold">VITE_SUPABASE_ANON_KEY</code> to your <code className="font-mono bg-amber-200 px-1 font-bold">.env</code> file to enable live Supabase email resets.
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
