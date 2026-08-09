@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  /* Sharp ticket stub notch cutouts for preset amount cards */
+  .ticket-stub {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .ticket-stub::before,
+  .ticket-stub::after {
+    content: "";
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    background-color: #f1f5f9; /* slate-100 container background */
+    border-radius: 0%; /* Sharp 90-degree zero radius notch */
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+  }
+
+  .ticket-stub::before {
+    top: -8px;
+    border-bottom: 2px solid #cbd5e1;
+    border-left: 2px solid #cbd5e1;
+    border-right: 2px solid #cbd5e1;
+  }
+
+  .ticket-stub::after {
+    bottom: -8px;
+    border-top: 2px solid #cbd5e1;
+    border-left: 2px solid #cbd5e1;
+    border-right: 2px solid #cbd5e1;
+  }
+
+  /* Keydown / click flash feedback animation */
+  .card-flash {
+    animation: flash-animation 0.25s ease-in-out;
+  }
+
+  @keyframes flash-animation {
+    0% {
+      background-color: rgba(16, 185, 129, 0.15);
+      border-color: #10b981;
+      transform: scale(0.97);
+    }
+    100% {
+      background-color: #ffffff;
+      border-color: #d97706;
+      transform: scale(1);
+    }
+  }
+}
+
+/* Thermal Printable Area Rules (80mm width) */
+@media print {
+  @page {
+    size: 80mm auto;
+    margin: 0;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  #thermalPrintArea,
+  #thermalPrintArea * {
+    visibility: visible !important;
+  }
+
+  #thermalPrintArea {
+    display: block !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 80mm !important;
+    padding: 4mm !important;
+    font-family: 'Courier New', monospace !important;
+    color: #000000 !important;
+    background: #ffffff !important;
+  }
+}
