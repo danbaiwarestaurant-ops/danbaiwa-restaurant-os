@@ -1,26 +1,21 @@
-# Project Rules & Guidelines — Ticket POS MVP
+# Project Rules & Guidelines — Ticket POS (Danbaiwa Restaurant OS)
 
-## 1. Architecture & Core Tech Stack
-- **Framework**: React 18 + Vite + TypeScript.
-- **State Management**: Zustand stores (`useTicketStore`, `useShiftStore`, `useExpenseStore`, `useDeviceStore`, `useSyncStore`, `useAuthStore`).
-- **Styling & Theme**: Tailwind CSS with a clean **Light Mode** design (light slate/warm neutral backgrounds `#f8fafc` / `#ffffff`, crisp borders `#e2e8f0`, dark bold typography `#0f172a`, amber `#f59e0b` / `#d97706` highlight accents, emerald green `#10b981` status badges).
-- **Architecture Pattern**: Component-Based Scaffolding (`components/`, `store/`, `services/`, `hooks/`, `types/`, `utils/`).
-- **Local Database**: Abstracted `IDbService` interface. SQLite WASM (`@sqlite.org/sqlite-wasm` / `sql.js`) in browser dev preview, Tauri SQL plugin (rusqlite SQLite WAL mode) in Tauri production.
-- **Unit Testing**: Vitest for unit testing core business logic (ticket composite key generation, shift cash reconciliation & variance, outbox payload idempotency).
+## 1. MANDATORY UNIT TESTING (VITEST)
+- **Vitest First Principle**: All core business logic (PIN hashing, RBAC role checks, user management, composite key generation, shift float reconciliation, cash variance math, and outbox idempotency formatting) MUST be covered by unit tests in `src/tests/` running via `npm run test`.
+- **Zero Regression Policy**: Never break or bypass Vitest suite before declaring any feature or bug fix complete.
 
-## 2. Functional Requirements & Specific UI Mechanics
-- **FR1 (Ticket Creation)**: Preset amount cards + Home-row hotkeys (`A`, `S`, `D`, `F`, `G`, `H`, `J`, `K`, `L`) + Custom amount keypad input.
-- **Visual Feedback**: Ticket stubs with notch cutouts (`amount-card` rounded top/bottom notches), key badge in top-left corner, visual flash effect (`flash` CSS / state animation) on card press or hotkey match.
-- **Active Typing Detection**: Bypasses global keydown hotkeys whenever user is typing in input or textarea fields.
-- **FR2 (Composite Ticket Numbering)**: Composite primary key format: `${location_id}-${device_id}-${local_seq}` (e.g. `LOC01-DEV01-000042`).
-- **FR3 (Thermal Printing)**: Instant printable thermal receipt view (80mm layout) with Business Name, bold amount (Naira `₦`), `#ticketNo`, timestamp, and inline SVG QR code. Dev console logging + toast notification.
-- **FR4 & Security (Void & Audit)**: Ticket voiding requires Manager PIN (Argon2 hashed) + mandatory reason. Every void creates an immutable append-only audit log entry (`audit_logs`).
-- **FR5 (Collection Scanning)**: Scan/mark ticket status as `collected` from ticket list or scan modal.
-- **FR9-FR11 (Shift Management & Cash Reconciliation)**: Cashier opens shift with declared float, closes shift with physical cash count. System automatically computes `expected_cash = opening_float + cash_ticket_total - approved_expenses` and surfaces `cash_variance = counted - expected` with mandatory manager flag if non-zero.
-- **FR6-FR8 (Expense Queue)**: Cashier logs mid-shift expense (amount, category, description). Pending manager approval queue; rejection requires mandatory reason.
-- **FR16-FR17 (Outbox Sync Worker)**: All mutations write to SQLite `sync_outbox` table within the same transaction. Background worker (5s interval when online) pushes outbox rows to Supabase idempotently via client UUIDs.
+## 2. SECURITY & ZERO HARDCODED CREDENTIALS RULE
+- **CRITICAL**: ABSOLUTELY NO hardcoded PINs, passwords, or fallback credentials anywhere in source code (e.g. no `DEFAULT_PINS = '9999'`).
+- **Dynamic Account Management**: System initializes via a First-Launch Admin Setup screen on first boot where the venue owner creates the primary Admin account.
+- **Salted Hashing**: All user PINs (Admin and Staff Cashiers) are hashed using `crypto.subtle.digest('SHA-256', salt + pin)` with a unique 16-byte cryptographically random salt generated via `crypto.getRandomValues()`.
+- **Stored in SQLite Only**: Hashes and salts are stored strictly in the SQLite `users` table (`id`, `name`, `username`, `role`, `pin_hash`, `pin_salt`, `created_at`, `status`).
 
-## 3. Durability & Testing Rules
-- Zero business logic in React JSX event handlers — all math and key generation live in `utils/` or `services/` with 100% Vitest coverage.
-- Append-only audit logs: Never modify or delete past void/edit records.
-- Lockfiles committed, floating majors avoided in dependencies.
+## 3. SUPABASE CLOUD SYNC FOR ALL DATA (OUTBOX PATTERN)
+- **Full Outbox Coverage**: ALL local database mutations across ALL tables (`users`, `tickets`, `shifts`, `expenses`, `audit_logs`) MUST be written to `sync_outbox` in the exact same database transaction.
+- **Idempotency Keys**: All outbox payloads use client-generated UUID primary keys (`id`) to ensure 100% replay-safe idempotent upserts on Supabase Postgres backend.
+- **Background Outbox Worker**: Polling worker (5s interval when online) drains `sync_outbox` to Supabase without blocking the main UI thread.
+
+## 4. CODE ARCHITECTURE & STYLING
+- **Component-Based Architecture**: Modular organization (`src/components/`, `src/store/`, `src/services/`, `src/hooks/`, `src/types/`, `src/utils/`, `src/tests/`).
+- **Light Mode POS Aesthetics**: High-contrast light slate theme (`#f8fafc` background, `#ffffff` panels, `#e2e8f0` borders, `#0f172a` typography, `#f59e0b` amber accents, `#10b981` status badges).
+- **Strict 90-Degree Zero Radius (`rounded-none`)**: NO rounded corners on any elements — crisp industrial POS edges across all cards, modals, buttons, and ticket stubs.

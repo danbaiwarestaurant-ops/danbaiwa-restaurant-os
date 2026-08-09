@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { UserAccount } from '../types/user';
 import { generateSalt, hashPinWithSalt, verifyUserPin, generateMasterRecoveryKey } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/LocalStorageDbService';
+import { authenticateAdminWithSupabase } from '../services/supabase/supabaseClient';
 
 interface AuthState {
   users: UserAccount[];
@@ -69,10 +70,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   createFirstAdmin: async (name: string, email: string, pin: string) => {
-    // MANDARY RULE: Admin initial activation requires online connection to authenticate central owner account
-    const isOnline = navigator.onLine;
-    
-    // Generate salted credentials for local SQLite offline continuity
+    const cleanEmail = email.trim().toLowerCase();
+
+    // 1. Perform REAL Supabase Auth GoTrue cloud authentication
+    const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin);
+
+    // 2. Generate salted credentials for local SQLite offline continuity
     const salt = generateSalt();
     const pinHash = await hashPinWithSalt(pin, salt);
     
@@ -80,10 +83,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const recoverySalt = generateSalt();
     const recoveryKeyHash = await hashPinWithSalt(recoveryKey.replace(/-/g, ''), recoverySalt);
 
-    const cleanEmail = email.trim().toLowerCase();
-
     const adminUser: UserAccount = {
-      id: crypto.randomUUID(),
+      id: supabaseAuthResult.userId || crypto.randomUUID(),
       name: name.trim(),
       username: cleanEmail,
       email: cleanEmail,
