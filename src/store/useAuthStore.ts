@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { UserAccount } from '../types/user';
 import { generateSalt, hashPinWithSalt, verifyUserPin, generateMasterRecoveryKey } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/LocalStorageDbService';
-import { authenticateAdminWithSupabase } from '../services/supabase/supabaseClient';
+import { authenticateAdminWithSupabase, supabase } from '../services/supabase/supabaseClient';
 
 interface AuthState {
   users: UserAccount[];
@@ -21,6 +21,7 @@ interface AuthState {
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
   recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
   switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
+  logoutUser: () => Promise<void>;
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
@@ -201,6 +202,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ activeCashier: user });
     }
     return isValid;
+  },
+
+  logoutUser: async () => {
+    try {
+      if (navigator.onLine && supabase) {
+        await supabase.auth.signOut();
+      }
+    } catch (e) {
+      // Ignore offline signout errors
+    }
+    set({ activeCashier: null });
   },
 
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => {
