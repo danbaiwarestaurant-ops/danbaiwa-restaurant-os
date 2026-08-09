@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { useAuthStore } from '../../store/useAuthStore';
-import { UserCheck, Mail, KeyRound, CheckCircle2, Shield, LogOut } from 'lucide-react';
+import { UserCheck, Mail, KeyRound, CheckCircle2, Shield, LogOut, Power } from 'lucide-react';
 
 interface AdminProfileSettingsProps {
   onLogoutAdmin?: () => void;
 }
 
-export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = ({ onLogoutAdmin }) => {
-  const { users, updateAdminProfile, logoutUser } = useAuthStore();
+export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
+  const { users, updateAdminProfile, systemLogout } = useAuthStore();
   const currentAdmin = users.find(u => u.role === 'admin');
 
   const [name, setName] = useState(currentAdmin ? currentAdmin.name : '');
@@ -57,9 +57,10 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = ({ onLo
     }
   };
 
-  const handleLogout = async () => {
-    await logoutUser();
-    if (onLogoutAdmin) onLogoutAdmin();
+  const handleSystemLogout = async () => {
+    if (window.confirm('Are you sure you want to log out of the system terminal account? This will unbind the active account and return to the login screen.')) {
+      await systemLogout();
+    }
   };
 
   return (
@@ -74,12 +75,12 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = ({ onLo
             PRIMARY ADMIN
           </span>
           <button
-            onClick={handleLogout}
-            className="flex items-center gap-1 px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white text-xs font-black uppercase transition border border-rose-700 rounded-none shadow-xs"
-            title="Logout Admin session and exit Manager Mode"
+            onClick={handleSystemLogout}
+            className="flex items-center gap-1.5 px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white text-xs font-black uppercase transition border border-rose-700 rounded-none shadow-xs"
+            title="Perform complete System Logout of terminal account"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Logout Admin Session</span>
+            <Power className="w-3.5 h-3.5" />
+            <span>System Logout</span>
           </button>
         </div>
       </div>
@@ -169,11 +170,11 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = ({ onLo
         <div className="flex justify-end gap-3 pt-2 border-t">
           <button
             type="button"
-            onClick={handleLogout}
+            onClick={handleSystemLogout}
             className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-900 border border-rose-300 font-bold uppercase text-xs rounded-none flex items-center gap-1.5"
           >
-            <LogOut className="w-3.5 h-3.5 text-rose-600" />
-            <span>Logout Admin</span>
+            <Power className="w-3.5 h-3.5 text-rose-600" />
+            <span>System Logout</span>
           </button>
 
           <button

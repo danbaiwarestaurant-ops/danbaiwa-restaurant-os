@@ -22,6 +22,7 @@ interface AuthState {
   recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
   switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
   logoutUser: () => Promise<void>;
+  systemLogout: () => Promise<void>;
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
@@ -213,6 +214,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Ignore offline signout errors
     }
     set({ activeCashier: null });
+  },
+
+  systemLogout: async () => {
+    try {
+      if (navigator.onLine && supabase) {
+        await supabase.auth.signOut();
+      }
+    } catch (e) {
+      // Ignore offline signout errors
+    }
+    
+    // Perform complete system logout & reset active cashier and admin flags
+    set({
+      activeCashier: null,
+      hasAdminAccount: false,
+      users: [],
+    });
+    localStorage.removeItem('ticket_pos_users');
+    window.location.reload();
   },
 
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => {
