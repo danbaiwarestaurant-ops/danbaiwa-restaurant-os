@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, UserPlus, KeyRound, Copy, Check } from 'lucide-react';
+import { ShieldCheck, UserPlus, KeyRound, Copy, Check, Mail } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
 
 interface FirstLaunchAdminSetupProps {
@@ -8,7 +8,7 @@ interface FirstLaunchAdminSetupProps {
 
 export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ onAdminCreated }) => {
   const [name, setName] = useState('');
-  const [username, setUsername] = useState('admin');
+  const [email, setEmail] = useState('');
   const [pin, setPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -22,8 +22,13 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
     e.preventDefault();
     setError(null);
 
-    if (!name.trim() || !username.trim()) {
+    if (!name.trim() || !email.trim()) {
       setError('Please fill in all account fields');
+      return;
+    }
+
+    if (!email.includes('@') || !email.includes('.')) {
+      setError('Please enter a valid owner email address');
       return;
     }
 
@@ -39,7 +44,7 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
 
     try {
       setIsSubmitting(true);
-      const res = await createFirstAdmin(name, username, pin);
+      const res = await createFirstAdmin(name, email, pin);
       setGeneratedRecoveryKey(res.recoveryKey);
     } catch (err: any) {
       setError(err?.message || 'Failed to create Admin Account');
@@ -73,7 +78,7 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
           </div>
 
           <p className="text-xs text-slate-700 font-semibold leading-relaxed">
-            IMPORTANT: Store this key safely in your records or print it out! If you ever forget your Admin PIN while offline, this key allows you to reset your PIN instantly.
+            IMPORTANT: Store this key safely! If you ever forget your Admin PIN while offline, this key allows you to reset your PIN instantly. An account record has also been registered under <span className="font-bold text-slate-900">{email}</span>.
           </p>
 
           <div className="bg-slate-50 border-2 border-slate-300 p-4 text-center rounded-none">
@@ -116,13 +121,13 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
               First-Launch Admin Setup
             </h1>
             <p className="text-xs text-slate-500 font-bold uppercase">
-              Danbaiwa POS • Cryptographic Hashing
+              Danbaiwa POS • Email & Salted Hashing Auth
             </p>
           </div>
         </div>
 
         <p className="text-xs text-slate-600 font-semibold mb-6">
-          Welcome! No Admin account was found. Please create the primary Admin account for this POS terminal. All PINs are stored securely as salted cryptographic hashes.
+          Welcome! Please create the primary Admin account for this POS terminal. Your registered email address is used for profile management, multi-terminal syncing, and password recovery.
         </p>
 
         {error && (
@@ -140,21 +145,23 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
-              placeholder="e.g. Danbaiwa Admin"
+              placeholder="e.g. Danbaiwa Owner"
               className="w-full p-3 border-2 border-slate-300 rounded-none font-semibold text-slate-900 focus:border-amber-500 focus:outline-none"
               required
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-              Admin Username / Staff ID
+            <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
+              <Mail className="w-3.5 h-3.5 text-amber-600" />
+              <span>Owner Email Address</span>
             </label>
             <input
-              type="text"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              className="w-full p-3 border-2 border-slate-300 rounded-none font-mono font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="owner@danbaiwarestaurant.com"
+              className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
               required
             />
           </div>
@@ -192,16 +199,16 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
 
           <button
             type="submit"
-            disabled={isSubmitting || !name || !username || !pin}
+            disabled={isSubmitting || !name || !email || !pin}
             className="w-full py-3.5 mt-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 rounded-none transition active:scale-95"
           >
             <UserPlus className="w-4 h-4" />
-            <span>Create Primary Admin Account</span>
+            <span>Create Admin Account</span>
           </button>
         </form>
 
         <div className="mt-6 pt-4 border-t text-center text-[10px] text-slate-400 font-mono">
-          Security Protocol • Cryptographically Salted Hashing • SQLite Storage
+          Security Protocol • Email Auth • Cryptographic Hashing • SQLite Storage
         </div>
       </div>
     </div>

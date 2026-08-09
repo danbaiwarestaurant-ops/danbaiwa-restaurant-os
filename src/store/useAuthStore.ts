@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { UserAccount, UserRole } from '../types/user';
+import { UserAccount } from '../types/user';
 import { generateSalt, hashPinWithSalt, verifyUserPin, generateMasterRecoveryKey } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/LocalStorageDbService';
 
@@ -14,10 +14,11 @@ interface AuthState {
   pinChallengeCallback: ((success: boolean) => void) | null;
 
   loadUsers: () => Promise<void>;
-  createFirstAdmin: (name: string, username: string, pin: string) => Promise<{ admin: UserAccount; recoveryKey: string }>;
+  createFirstAdmin: (name: string, email: string, pin: string) => Promise<{ admin: UserAccount; recoveryKey: string }>;
+  updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
   createStaffCashier: (name: string, username: string, pin: string) => Promise<UserAccount>;
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
-  recoverAdminPinWithKey: (username: string, recoveryKey: string, newPin: string) => Promise<boolean>;
+  recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
   switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
   closePinModal: () => void;
@@ -53,7 +54,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
   },
 
-  createFirstAdmin: async (name: string, username: string, pin: string) => {
+  createFirstAdmin: async (name: string, email: string, pin: string) => {
     const salt = generateSalt();
     const pinHash = await hashPinWithSalt(pin, salt);
     
@@ -61,10 +62,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const recoverySalt = generateSalt();
     const recoveryKeyHash = await hashPinWithSalt(recoveryKey.replace(/-/g, ''), recoverySalt);
 
+    const cleanEmail = email.trim().toLowerCase();
+
     const adminUser: UserAccount = {
       id: crypto.randomUUID(),
       name: name.trim(),
-      username: username.trim().toLowerCase(),
+      username: cleanEmail,
+      email: cleanEmail,
       role: 'admin',
       pinHash,
       pinSalt: salt,
@@ -77,6 +81,33 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await dbService.saveUser(adminUser);
     await get().loadUsers();
     return { admin: adminUser, recoveryKey };
+  },
+
+  updateAdminProfile: async (userId: string, name: string, email: string, newPin?: string) => {
+    const user = get().users.find(u => u.id === userId && u.role === 'admin');
+    if (!user) return false;
+
+    const cleanEmail = email.trim().toLowerCase();
+    let pinHash = user.pinHash;
+    let pinSalt = user.pinSalt;
+
+    if (newPin && newPin.length >= 4) {
+      pinSalt = generateSalt();
+      pinHash = await hashPinWithSalt(newPin, pinSalt);
+    }
+
+    const updatedAdmin: UserAccount = {
+      ...user,
+      name: name.trim(),
+      username: cleanEmail,
+      email: cleanEmail,
+      pinHash,
+      pinSalt,
+    };
+
+    await dbService.updateUser(updatedAdmin);
+    await get().loadUsers();
+    return true;
   },
 
   createStaffCashier: async (name: string, username: string, pin: string) => {
@@ -117,11 +148,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return true;
   },
 
-  recoverAdminPinWithKey: async (username: string, recoveryKey: string, newPin: string) => {
-    const cleanUsername = username.trim().toLowerCase();
+  recoverAdminPinWithKey: async (usernameOrEmail: string, recoveryKey: string, newPin: string) => {
+    const target = usernameOrEmail.trim().toLowerCase();
     const cleanKey = recoveryKey.trim().toUpperCase().replace(/-/g, '');
     
-    const user = get().users.find(u => u.username === cleanUsername && u.role === 'admin');
+    const user = get().users.find(u => (u.username === target || u.email === target) && u.role === 'admin');
     if (!user || !user.recoveryKeyHash || !user.recoveryKeySalt) return false;
 
     const isValidKey = await verifyUserPin(cleanKey, user.recoveryKeyHash, user.recoveryKeySalt);

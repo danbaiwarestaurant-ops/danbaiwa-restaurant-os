@@ -6,6 +6,7 @@ import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { TrendingUp, ShieldAlert, Globe, Filter } from 'lucide-react';
 import { ExpenseApprovalQueue } from '../expense/ExpenseApprovalQueue';
 import { StaffManagement } from './StaffManagement';
+import { AdminProfileSettings } from './AdminProfileSettings';
 
 interface ManagerDashboardProps {
   onRequirePin: (purpose: string, onVerified: () => void) => void;
@@ -103,6 +104,9 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({ onRequirePin
           </div>
         </div>
       </div>
+
+      {/* Admin Profile & Security Settings Panel */}
+      <AdminProfileSettings />
 
       {/* Staff Management Panel (Admin Only) */}
       <StaffManagement />
