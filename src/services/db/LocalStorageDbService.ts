@@ -4,9 +4,11 @@ import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
+import { UserAccount } from '../../types/user';
 
 const STORAGE_KEYS = {
   CONFIG: 'ticket_pos_device_config',
+  USERS: 'ticket_pos_users',
   TICKETS: 'ticket_pos_tickets',
   SHIFTS: 'ticket_pos_shifts',
   EXPENSES: 'ticket_pos_expenses',
@@ -48,6 +50,37 @@ export class LocalStorageDbService implements IDbService {
     localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
   }
 
+  // User Accounts & Staff Management
+  async getUsers(): Promise<UserAccount[]> {
+    const raw = localStorage.getItem(STORAGE_KEYS.USERS);
+    return raw ? JSON.parse(raw) : [];
+  }
+
+  async getUserById(id: string): Promise<UserAccount | null> {
+    const users = await this.getUsers();
+    return users.find(u => u.id === id) || null;
+  }
+
+  async saveUser(user: UserAccount): Promise<void> {
+    const users = await this.getUsers();
+    users.unshift(user);
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+
+    // Transactional write to sync_outbox for Supabase cloud sync
+    await this.queueOutbox('users', 'INSERT', user);
+  }
+
+  async updateUser(user: UserAccount): Promise<void> {
+    const users = await this.getUsers();
+    const index = users.findIndex(u => u.id === user.id);
+    if (index !== -1) {
+      users[index] = user;
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+      await this.queueOutbox('users', 'UPDATE', user);
+    }
+  }
+
+  // Tickets
   async getTickets(): Promise<Ticket[]> {
     const raw = localStorage.getItem(STORAGE_KEYS.TICKETS);
     return raw ? JSON.parse(raw) : [];

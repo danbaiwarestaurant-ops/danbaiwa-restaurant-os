@@ -5,6 +5,7 @@ import { useDeviceStore } from '../../store/useDeviceStore';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { TrendingUp, ShieldAlert, Globe, Filter } from 'lucide-react';
 import { ExpenseApprovalQueue } from '../expense/ExpenseApprovalQueue';
+import { StaffManagement } from './StaffManagement';
 
 interface ManagerDashboardProps {
   onRequirePin: (purpose: string, onVerified: () => void) => void;
@@ -102,6 +103,9 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({ onRequirePin
           </div>
         </div>
       </div>
+
+      {/* Staff Management Panel (Admin Only) */}
+      <StaffManagement />
 
       {/* Expense Approval Queue Section */}
       <ExpenseApprovalQueue onRequirePin={onRequirePin} />

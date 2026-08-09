@@ -10,6 +10,7 @@ import { Header } from './components/common/Header';
 import { Toast } from './components/common/Toast';
 import { PinModal } from './components/common/PinModal';
 import { QuickConfigModal } from './components/common/QuickConfigModal';
+import { FirstLaunchAdminSetup } from './components/auth/FirstLaunchAdminSetup';
 
 import { PresetCardGrid } from './components/ticket/PresetCardGrid';
 import { CustomAmountInput } from './components/ticket/CustomAmountInput';
@@ -31,11 +32,13 @@ export function App() {
   const { checkOutbox } = useSyncStore();
 
   const {
+    hasAdminAccount,
+    isLoaded: isAuthLoaded,
+    loadUsers,
     isPinModalOpen,
     pinModalPurpose,
     openPinModal,
     closePinModal,
-    validatePin,
   } = useAuthStore();
 
   // Modals state
@@ -66,6 +69,7 @@ export function App() {
 
   useEffect(() => {
     loadConfig();
+    loadUsers();
     loadTickets();
     loadShift();
     loadExpenses();
@@ -85,7 +89,7 @@ export function App() {
 
   const handleConfirmVoid = async (reason: string) => {
     if (selectedVoidTicketId) {
-      await voidTicket(selectedVoidTicketId, reason, 'MANAGER-01');
+      await voidTicket(selectedVoidTicketId, reason, 'MANAGER-ADMIN');
       showSuccess(`Voided ticket #${selectedVoidTicketId}`);
       setIsVoidModalOpen(false);
       setSelectedVoidTicketId(null);
@@ -105,6 +109,11 @@ export function App() {
       setIsManagerView(false);
     }
   };
+
+  // Render First-Launch Admin Setup Wizard if no Admin account exists
+  if (isAuthLoaded && !hasAdminAccount) {
+    return <FirstLaunchAdminSetup onAdminCreated={() => showSuccess('Admin Account created successfully!')} />;
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 font-sans text-slate-900 selection:bg-amber-100 selection:text-amber-900">

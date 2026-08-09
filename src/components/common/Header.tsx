@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useShiftStore } from '../../store/useShiftStore';
 import { useSyncStore } from '../../store/useSyncStore';
-import { Settings, RefreshCw, LayoutDashboard, DollarSign, Lock } from 'lucide-react';
+import { useAuthStore } from '../../store/useAuthStore';
+import { Settings, RefreshCw, LayoutDashboard, DollarSign, Lock, UserCheck, KeyRound } from 'lucide-react';
 
 interface HeaderProps {
   onOpenConfig: () => void;
@@ -24,6 +25,27 @@ export const Header: React.FC<HeaderProps> = ({
   const { ticketsTodayCount } = useTicketStore();
   const { currentShift } = useShiftStore();
   const { pendingCount, isSyncing, triggerSyncWorker } = useSyncStore();
+  const { users, activeCashier, switchCashierSession } = useAuthStore();
+
+  const [isSwitchingCashier, setIsSwitchingCashier] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [switchPin, setSwitchPin] = useState('');
+  const [switchError, setSwitchError] = useState(false);
+
+  const handleSwitchSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUserId || !switchPin) return;
+
+    const success = await switchCashierSession(selectedUserId, switchPin);
+    if (success) {
+      setIsSwitchingCashier(false);
+      setSwitchPin('');
+      setSwitchError(false);
+    } else {
+      setSwitchError(true);
+      setSwitchPin('');
+    }
+  };
 
   return (
     <header className="bg-white border-b-4 border-amber-500 px-6 py-4 shadow-xs flex flex-wrap items-center justify-between gap-4">
@@ -37,14 +59,33 @@ export const Header: React.FC<HeaderProps> = ({
               {config.locationId}-{config.deviceId}
             </span>
           </div>
-          <div className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">
-            TICKET POS SYSTEM — PRODUCTION MVP
+          <div className="text-[10px] text-slate-500 uppercase tracking-widest font-bold flex items-center gap-2">
+            <span>TICKET POS SYSTEM</span>
+            <span>•</span>
+            <span className="text-slate-700 font-black">
+              CASHIER: {activeCashier ? activeCashier.name : 'UNASSIGNED'}
+            </span>
           </div>
         </div>
       </div>
 
       {/* Action Controls & Badges */}
       <div className="flex items-center gap-2">
+        {/* Cashier Session Switch Button */}
+        <button
+          onClick={() => {
+            if (users.length > 0) {
+              setSelectedUserId(users[0].id);
+              setIsSwitchingCashier(true);
+            }
+          }}
+          className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-900 text-xs font-black uppercase transition rounded-none"
+          title="Switch active cashier session"
+        >
+          <UserCheck className="w-3.5 h-3.5 text-amber-600" />
+          <span>{activeCashier ? activeCashier.name : 'Switch Staff'}</span>
+        </button>
+
         {/* Outbox Sync Badge */}
         <button
           onClick={() => triggerSyncWorker()}
@@ -113,6 +154,80 @@ export const Header: React.FC<HeaderProps> = ({
           Tickets Today
         </div>
       </div>
+
+      {/* Switch Cashier Session PIN Modal */}
+      {isSwitchingCashier && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white border-2 border-slate-900 w-full max-w-sm p-6 rounded-none shadow-2xl">
+            <h4 className="font-black text-sm uppercase text-slate-900 mb-3 flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-amber-600" />
+              <span>Switch Cashier Session</span>
+            </h4>
+
+            {switchError && (
+              <div className="mb-3 p-2 bg-rose-50 border border-rose-400 text-rose-900 text-xs font-bold uppercase rounded-none">
+                Invalid Staff PIN
+              </div>
+            )}
+
+            <form onSubmit={handleSwitchSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+                  Select Staff Member
+                </label>
+                <select
+                  value={selectedUserId}
+                  onChange={e => setSelectedUserId(e.target.value)}
+                  className="w-full p-2.5 border-2 border-slate-300 text-xs font-bold text-slate-900 bg-white rounded-none"
+                >
+                  {users.map(u => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} (@{u.username}) — {u.role.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+                  Enter Staff PIN
+                </label>
+                <input
+                  type="password"
+                  value={switchPin}
+                  onChange={e => setSwitchPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="Enter PIN"
+                  maxLength={8}
+                  className="w-full p-2.5 border-2 border-slate-300 text-center font-mono font-black text-lg text-slate-900 rounded-none focus:border-amber-500 focus:outline-none"
+                  autoFocus
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSwitchingCashier(false);
+                    setSwitchPin('');
+                    setSwitchError(false);
+                  }}
+                  className="px-3 py-1.5 text-xs font-bold uppercase border border-slate-300 rounded-none"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!switchPin}
+                  className="px-4 py-1.5 text-xs font-black uppercase bg-amber-500 text-white rounded-none border border-amber-600 shadow-xs"
+                >
+                  Switch Session
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </header>
   );
 };

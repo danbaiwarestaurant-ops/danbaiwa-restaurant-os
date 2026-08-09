@@ -3,6 +3,7 @@ import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
+import { UserAccount } from '../../types/user';
 
 export interface IDbService {
   init(): Promise<void>;
@@ -10,6 +11,12 @@ export interface IDbService {
   // Config
   getDeviceConfig(): Promise<DeviceConfig | null>;
   saveDeviceConfig(config: DeviceConfig): Promise<void>;
+
+  // Users & Staff
+  getUsers(): Promise<UserAccount[]>;
+  getUserById(id: string): Promise<UserAccount | null>;
+  saveUser(user: UserAccount): Promise<void>;
+  updateUser(user: UserAccount): Promise<void>;
 
   // Tickets
   getTickets(): Promise<Ticket[]>;
