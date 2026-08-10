@@ -75,8 +75,11 @@ export class LocalStorageDbService implements IDbService {
 
   async getUserByEmail(email: string): Promise<UserAccount | null> {
     const users = await this.getUsers();
-    const cleanEmail = email.trim().toLowerCase();
-    return users.find(u => u.email.toLowerCase() === cleanEmail || u.username.toLowerCase() === cleanEmail) || null;
+    const cleanEmail = (email || '').trim().toLowerCase();
+    return users.find(u => 
+      (u && u.email && typeof u.email === 'string' && u.email.toLowerCase() === cleanEmail) || 
+      (u && u.username && typeof u.username === 'string' && u.username.toLowerCase() === cleanEmail)
+    ) || null;
   }
 
   async saveUser(user: UserAccount): Promise<void> {
@@ -101,7 +104,7 @@ export class LocalStorageDbService implements IDbService {
     const raw = getItem(STORAGE_KEYS.TICKETS);
     const tickets: Ticket[] = raw ? JSON.parse(raw) : [];
     if (!userId) return tickets;
-    return tickets.filter(t => t.cashierId === userId || t.cashierId.includes(userId));
+    return tickets.filter(t => t.cashierId === userId || (t.cashierId && t.cashierId.includes(userId)));
   }
 
   async saveTicket(ticket: Ticket): Promise<void> {

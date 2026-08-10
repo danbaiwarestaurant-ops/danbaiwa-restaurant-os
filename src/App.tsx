@@ -155,7 +155,7 @@ export function App() {
 
             {/* Quick Amount Grid */}
             <div className="bg-white border-2 border-slate-300 rounded-none p-5 shadow-xs">
-              <PresetCardGrid onTicketCreated={showSuccess} />
+              <PresetCardGrid onTicketCreated={showSuccess} onError={showError} />
             </div>
           </div>
 
