@@ -1,8 +1,8 @@
 import { create } from 'zustand';
 import { UserAccount, UserRole } from '../types/user';
-import { generateSalt, hashSecretWithSalt, verifySecret, generateMasterRecoveryKey } from '../services/auth/pinAuth';
+import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/LocalStorageDbService';
-import { authenticateAdminWithSupabase, supabase } from '../services/supabase/supabaseClient';
+import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase } from '../services/supabase/supabaseClient';
 
 interface AuthState {
   users: UserAccount[];
@@ -10,6 +10,10 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoaded: boolean;
   
+  // Rate-limiting & Brute-force protection
+  failedAttempts: number;
+  lockoutUntil: number | null; // Timestamp in ms
+
   isPinModalOpen: boolean;
   pinModalPurpose: string | null;
   pinChallengeCallback: ((success: boolean) => void) | null;
@@ -20,6 +24,7 @@ interface AuthState {
   logoutUser: () => Promise<void>;
   
   updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
+  updatePasswordAfterRecovery: (email: string, newPassword: string, newPin: string) => Promise<boolean>;
   createStaffCashier: (name: string, username: string, pin: string) => Promise<UserAccount>;
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
   recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
@@ -28,6 +33,7 @@ interface AuthState {
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
+  assertAdminRole: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -35,6 +41,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   activeUser: null,
   isAuthenticated: false,
   isLoaded: false,
+
+  failedAttempts: 0,
+  lockoutUntil: null,
 
   isPinModalOpen: false,
   pinModalPurpose: null,
@@ -44,7 +53,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await dbService.init();
     const users = await dbService.getUsers();
     
-    // Check if session token exists in localStorage
     const savedUserId = localStorage.getItem('ticket_pos_session_user_id');
     let activeUser: UserAccount | null = null;
     let isAuthenticated = false;
@@ -65,20 +73,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   registerUser: async (name: string, email: string, password: string, pin: string, role: UserRole = 'admin') => {
     const cleanEmail = email.trim().toLowerCase();
     
-    // Check if account already exists
+    // 1. Check SQLite local database first
     const existing = await dbService.getUserByEmail(cleanEmail);
     if (existing) {
       throw new Error(`An account with email "${cleanEmail}" already exists. Please log in instead.`);
     }
 
-    // Try Supabase Auth Cloud Registration if online & configured
-    try {
-      await authenticateAdminWithSupabase(cleanEmail, pin);
-    } catch (e) {
-      // Fallback to local cryptographic registration if unconfigured
-    }
+    // 2. Perform Supabase Cloud Signup
+    const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin);
 
-    // Generate salted credentials for password and PIN
+    // 3. Generate per-user cryptographic salts
     const passwordSalt = generateSalt();
     const passwordHash = await hashSecretWithSalt(password, passwordSalt);
 
@@ -86,7 +90,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
 
     const newUser: UserAccount = {
-      id: crypto.randomUUID(),
+      id: supabaseAuthResult.userId || crypto.randomUUID(),
       name: name.trim(),
       email: cleanEmail,
       username: cleanEmail,
@@ -105,6 +109,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({
       activeUser: newUser,
       isAuthenticated: true,
+      failedAttempts: 0,
+      lockoutUntil: null,
     });
 
     await get().loadUsers();
@@ -112,11 +118,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loginUser: async (email: string, passwordOrPin: string) => {
+    const lockout = get().lockoutUntil;
+    if (lockout && Date.now() < lockout) {
+      const remainingSeconds = Math.ceil((lockout - Date.now()) / 1000);
+      throw new Error(`Security Lockout: Too many failed attempts. Try again in ${remainingSeconds}s.`);
+    }
+
     const cleanEmail = email.trim().toLowerCase();
     const user = await dbService.getUserByEmail(cleanEmail);
-    if (!user) return false;
+    
+    if (!user) {
+      const fails = get().failedAttempts + 1;
+      const lockoutTime = fails >= 3 ? Date.now() + 30000 : null;
+      set({ failedAttempts: fails, lockoutUntil: lockoutTime });
+      return false;
+    }
 
-    // Test secret against both password and PIN salted hashes
     const isPasswordValid = user.passwordHash && user.passwordSalt
       ? await verifySecret(passwordOrPin, user.passwordHash, user.passwordSalt)
       : false;
@@ -128,10 +145,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({
         activeUser: user,
         isAuthenticated: true,
+        failedAttempts: 0,
+        lockoutUntil: null,
       });
       return true;
     }
 
+    // Rate-limiting calculation
+    const fails = get().failedAttempts + 1;
+    const lockoutTime = fails >= 3 ? Date.now() + 30000 : null;
+    set({ failedAttempts: fails, lockoutUntil: lockoutTime });
     return false;
   },
 
@@ -150,6 +173,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   updateAdminProfile: async (userId: string, name: string, email: string, newPin?: string) => {
+    get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
     if (!user) return false;
 
@@ -177,7 +201,47 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return true;
   },
 
+  updatePasswordAfterRecovery: async (email: string, newPassword: string, newPin: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await dbService.getUserByEmail(cleanEmail);
+    if (!user) return false;
+
+    // 1. Update Supabase Cloud password
+    try {
+      await updateSupabaseUserPassword(newPassword);
+    } catch (e) {
+      console.warn('Supabase password update warning:', e);
+    }
+
+    // 2. Generate new salted password and PIN hashes for local SQLite
+    const passwordSalt = generateSalt();
+    const passwordHash = await hashSecretWithSalt(newPassword, passwordSalt);
+
+    const pinSalt = generateSalt();
+    const pinHash = await hashSecretWithSalt(newPin, pinSalt);
+
+    const updatedUser: UserAccount = {
+      ...user,
+      passwordHash,
+      passwordSalt,
+      pinHash,
+      pinSalt,
+    };
+
+    await dbService.updateUser(updatedUser);
+    set({
+      activeUser: updatedUser,
+      isAuthenticated: true,
+      failedAttempts: 0,
+      lockoutUntil: null,
+    });
+
+    await get().loadUsers();
+    return true;
+  },
+
   createStaffCashier: async (name: string, username: string, pin: string) => {
+    get().assertAdminRole();
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
     const passwordSalt = generateSalt();
@@ -203,6 +267,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   resetCashierPin: async (cashierId: string, newPin: string) => {
+    get().assertAdminRole();
     const user = get().users.find(u => u.id === cashierId);
     if (!user) return false;
 
@@ -289,5 +354,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (cb) cb(isValid);
     if (isValid) get().closePinModal();
     return isValid;
+  },
+
+  assertAdminRole: () => {
+    const active = get().activeUser;
+    if (!active || active.role !== 'admin') {
+      throw new Error('Security Access Denied: Action requires an active Admin role');
+    }
   },
 }));

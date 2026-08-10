@@ -28,10 +28,12 @@ export const supabase = createClient(
  * Real Supabase Cloud Email Authentication Engine
  */
 export async function authenticateAdminWithSupabase(email: string, pin: string) {
+  const cleanEmail = email.trim().toLowerCase();
+
   if (!isSupabaseConfigured) {
     return {
       userId: crypto.randomUUID(),
-      email: email.trim().toLowerCase(),
+      email: cleanEmail,
       session: null,
       isNewUser: true,
     };
@@ -44,8 +46,9 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
 
   const derivedPassword = `Danbaiwa_POS_#2026_${pin}_Secret`;
 
+  // 1. Attempt Supabase Auth Sign In first
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-    email: email.trim().toLowerCase(),
+    email: cleanEmail,
     password: derivedPassword,
   });
 
@@ -58,8 +61,9 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
     };
   }
 
+  // 2. If Sign In failed, attempt Sign Up (New Registration)
   const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-    email: email.trim().toLowerCase(),
+    email: cleanEmail,
     password: derivedPassword,
     options: {
       data: {
@@ -70,13 +74,30 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
   });
 
   if (signUpError) {
+    if (signUpError.message.toLowerCase().includes('already registered') || signUpError.message.toLowerCase().includes('already exists')) {
+      throw new Error(`An account with email "${cleanEmail}" is already registered. Please log in instead.`);
+    }
     throw new Error(`Supabase Email Auth Error: ${signUpError.message}`);
   }
 
   return {
     userId: signUpData.user?.id || crypto.randomUUID(),
-    email: signUpData.user?.email || email,
+    email: signUpData.user?.email || cleanEmail,
     session: signUpData.session,
     isNewUser: true,
   };
+}
+
+/**
+ * Complete Supabase Magic Link Password Update
+ */
+export async function updateSupabaseUserPassword(newPassword: string) {
+  if (!isSupabaseConfigured) return;
+  const { data, error } = await supabase.auth.updateUser({
+    password: newPassword,
+  });
+  if (error) {
+    throw new Error(`Supabase Password Update Error: ${error.message}`);
+  }
+  return data;
 }

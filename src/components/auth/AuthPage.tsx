@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
-import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send, Info } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send, Info, KeyRound, Clock } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase, isSupabaseConfigured } from '../../services/supabase/supabaseClient';
 
 export const AuthPage: React.FC = () => {
-  const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'recovery_complete'>('login');
   
   // Login State
   const [loginEmail, setLoginEmail] = useState('');
@@ -17,19 +17,47 @@ export const AuthPage: React.FC = () => {
   const [regPin, setRegPin] = useState('');
   const [regRole, setRegRole] = useState<'admin' | 'cashier'>('admin');
 
-  // Supabase Online Email Reset State
+  // Supabase Online Email Reset & Recovery State
   const [resetEmail, setResetEmail] = useState('');
+  const [newRecoveryPassword, setNewRecoveryPassword] = useState('');
+  const [newRecoveryPin, setNewRecoveryPin] = useState('');
   const [resetSuccessMsg, setResetSuccessMsg] = useState<string | null>(null);
   
   // UI State
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const { loginUser, registerUser } = useAuthStore();
+  const { loginUser, registerUser, updatePasswordAfterRecovery, lockoutUntil, failedAttempts } = useAuthStore();
+
+  // Check if user arrives via Supabase Email Reset Link (#type=recovery or PASSWORD_RECOVERY event)
+  useEffect(() => {
+    if (isSupabaseConfigured) {
+      const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+        if (event === 'PASSWORD_RECOVERY' || window.location.hash.includes('type=recovery')) {
+          setMode('recovery_complete');
+          if (session?.user?.email) {
+            setResetEmail(session.user.email);
+          }
+        }
+      });
+
+      return () => {
+        authListener.subscription.unsubscribe();
+      };
+    }
+  }, []);
+
+  const isLockedOut = lockoutUntil ? Date.now() < lockoutUntil : false;
+  const remainingLockoutSec = lockoutUntil ? Math.ceil((lockoutUntil - Date.now()) / 1000) : 0;
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (isLockedOut) {
+      setError(`Security Lockout Active: Too many failed attempts. Try again in ${remainingLockoutSec}s.`);
+      return;
+    }
 
     if (!loginEmail.trim() || !loginSecret) {
       setError('Please enter your email and password or PIN');
@@ -121,6 +149,26 @@ export const AuthPage: React.FC = () => {
     }
   };
 
+  const handleCompletePasswordRecovery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!resetEmail || !newRecoveryPassword || newRecoveryPin.length < 4) {
+      setError('Please fill in all recovery password fields');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      await updatePasswordAfterRecovery(resetEmail, newRecoveryPassword, newRecoveryPin);
+      setResetSuccessMsg('Account Password & PIN updated successfully! Logging in...');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to update recovery password.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 selection:bg-amber-500 selection:text-white">
       <div className="bg-white border-4 border-amber-500 w-full max-w-md shadow-2xl p-8 rounded-none space-y-6">
@@ -140,7 +188,7 @@ export const AuthPage: React.FC = () => {
         </div>
 
         {/* Tab Toggle */}
-        {mode !== 'forgot' ? (
+        {mode === 'login' || mode === 'register' ? (
           <div className="grid grid-cols-2 border-2 border-slate-300 rounded-none overflow-hidden">
             <button
               type="button"
@@ -175,7 +223,17 @@ export const AuthPage: React.FC = () => {
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Back to Login</span>
             </button>
-            <span className="text-xs font-black uppercase text-slate-800">Online Password Reset</span>
+            <span className="text-xs font-black uppercase text-slate-800">
+              {mode === 'recovery_complete' ? 'Set New Credentials' : 'Online Password Reset'}
+            </span>
+          </div>
+        )}
+
+        {/* Security Rate-Limiting Lockout Banner */}
+        {isLockedOut && (
+          <div className="p-3 bg-amber-50 border-2 border-amber-500 text-amber-950 text-xs font-bold uppercase rounded-none flex items-center gap-2">
+            <Clock className="w-4 h-4 text-amber-600 flex-shrink-0 animate-pulse" />
+            <span>Brute-Force Protection Lockout: Retry in {remainingLockoutSec}s</span>
           </div>
         )}
 
@@ -209,6 +267,7 @@ export const AuthPage: React.FC = () => {
                 onChange={e => setLoginEmail(e.target.value)}
                 placeholder="user@danbaiwarestaurant.com"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
+                disabled={isLockedOut}
                 required
               />
             </div>
@@ -233,13 +292,14 @@ export const AuthPage: React.FC = () => {
                 onChange={e => setLoginSecret(e.target.value)}
                 placeholder="Enter Password or PIN"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
+                disabled={isLockedOut}
                 required
               />
             </div>
 
             <button
               type="submit"
-              disabled={loading || !loginEmail || !loginSecret}
+              disabled={loading || isLockedOut || !loginEmail || !loginSecret}
               className="w-full py-3.5 mt-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 rounded-none transition active:scale-95"
             >
               <LogIn className="w-4 h-4" />
@@ -372,6 +432,69 @@ export const AuthPage: React.FC = () => {
             >
               <Send className="w-4 h-4" />
               <span>Send Supabase Reset Link</span>
+            </button>
+          </form>
+        )}
+
+        {/* Recovery Password Completion Form (Magic Link Redirect Target) */}
+        {mode === 'recovery_complete' && (
+          <form onSubmit={handleCompletePasswordRecovery} className="space-y-4">
+            <div className="p-3 bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-bold uppercase rounded-none">
+              Authenticated via Supabase Reset Link! Set your new password and custom PIN below.
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+                Account Email Address
+              </label>
+              <input
+                type="email"
+                value={resetEmail}
+                onChange={e => setResetEmail(e.target.value)}
+                placeholder="registered@danbaiwarestaurant.com"
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 bg-slate-100"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                <span>New Account Password</span>
+              </label>
+              <input
+                type="password"
+                value={newRecoveryPassword}
+                onChange={e => setNewRecoveryPassword(e.target.value)}
+                placeholder="Enter new password (min 6 chars)"
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm text-slate-900 focus:border-amber-500 focus:outline-none"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
+                <KeyRound className="w-3.5 h-3.5 text-amber-600" />
+                <span>New Custom PIN (4-8 Digits)</span>
+              </label>
+              <input
+                type="password"
+                value={newRecoveryPin}
+                onChange={e => setNewRecoveryPin(e.target.value.replace(/\D/g, ''))}
+                placeholder="Enter 4-8 digit PIN"
+                maxLength={8}
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono font-black text-center text-lg text-slate-900 focus:border-amber-500 focus:outline-none"
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || !newRecoveryPassword || newRecoveryPin.length < 4}
+              className="w-full py-3.5 mt-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 rounded-none transition active:scale-95"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Update Credentials & Log In</span>
             </button>
           </form>
         )}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useDeviceStore } from './store/useDeviceStore';
 import { useTicketStore } from './store/useTicketStore';
 import { useShiftStore } from './store/useShiftStore';
@@ -23,6 +23,8 @@ import { OpenShiftModal } from './components/shift/OpenShiftModal';
 import { CloseShiftModal } from './components/shift/CloseShiftModal';
 import { ExpenseLoggerModal } from './components/expense/ExpenseLoggerModal';
 import { ManagerDashboard } from './components/manager/ManagerDashboard';
+
+const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 
 export function App() {
   const { loadConfig } = useDeviceStore();
@@ -58,6 +60,8 @@ export function App() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
 
+  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const showSuccess = (msg: string) => {
     setToastMsg(msg);
     setToastType('success');
@@ -74,7 +78,7 @@ export function App() {
     checkOutbox();
   }, []);
 
-  // Whenever activeUser changes (login/logout/switch), reload user-scoped data!
+  // Reload user-scoped data whenever activeUser changes
   useEffect(() => {
     if (isAuthenticated && activeUser) {
       loadTickets(activeUser.id);
@@ -82,6 +86,33 @@ export function App() {
       loadExpenses(undefined, activeUser.id);
     }
   }, [isAuthenticated, activeUser?.id]);
+
+  // 5-Minute Inactivity Idle Auto-Lock Timer
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const resetIdleTimer = () => {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = setTimeout(() => {
+        if (!isPinModalOpen) {
+          openPinModal('Screen Auto-Locked due to Inactivity', (verified) => {
+            if (!verified) {
+              showError('Authentication required to unlock till');
+            }
+          });
+        }
+      }, INACTIVITY_TIMEOUT_MS);
+    };
+
+    const events = ['mousemove', 'keydown', 'click', 'touchstart'];
+    events.forEach(e => window.addEventListener(e, resetIdleTimer));
+    resetIdleTimer();
+
+    return () => {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      events.forEach(e => window.removeEventListener(e, resetIdleTimer));
+    };
+  }, [isAuthenticated, isPinModalOpen]);
 
   const handleOpenVoidModal = (ticketId: string) => {
     openPinModal(`Void Ticket #${ticketId}`, (verified) => {
@@ -117,7 +148,6 @@ export function App() {
     }
   };
 
-  // Render Full-Screen AuthPage if user is not authenticated
   if (isAuthLoaded && !isAuthenticated) {
     return <AuthPage />;
   }
