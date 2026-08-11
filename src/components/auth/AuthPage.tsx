@@ -3,8 +3,14 @@ import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, Ar
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase, isSupabaseConfigured } from '../../services/supabase/supabaseClient';
 
-export const AuthPage: React.FC = () => {
-  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'recovery_complete'>('login');
+
+interface AuthPageProps {
+  initialMode?: 'login' | 'register' | 'forgot' | 'recovery_complete';
+}
+
+export const AuthPage: React.FC<AuthPageProps> = ({ initialMode }) => {
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'recovery_complete'>(initialMode || 'login');
+
   
   // Login State
   const [loginEmail, setLoginEmail] = useState('');
@@ -133,9 +139,11 @@ export const AuthPage: React.FC = () => {
         throw new Error('Internet connection is required to send Supabase Password Reset email.');
       }
 
+      const redirectTo = `${window.location.origin}/`;
       const { error: resetErr } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-        redirectTo: window.location.origin,
+        redirectTo,
       });
+
 
       if (resetErr) {
         throw new Error(resetErr.message);
