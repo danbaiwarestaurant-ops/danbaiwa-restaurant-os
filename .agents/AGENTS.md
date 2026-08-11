@@ -19,3 +19,6 @@
 - **Component-Based Architecture**: Modular organization (`src/components/`, `src/store/`, `src/services/`, `src/hooks/`, `src/types/`, `src/utils/`, `src/tests/`).
 - **Light Mode POS Aesthetics**: High-contrast light slate theme (`#f8fafc` background, `#ffffff` panels, `#e2e8f0` borders, `#0f172a` typography, `#f59e0b` amber accents, `#10b981` status badges).
 - **Strict 90-Degree Zero Radius (`rounded-none`)**: NO rounded corners on any elements — crisp industrial POS edges across all cards, modals, buttons, and ticket stubs.
+
+## 5. MANDATORY DEEP END-TO-END FUNCTIONAL TESTING RULE
+- **Complete End-to-End Life-Cycle Verification**: When testing a feature or bug fix, verifying UI rendering or page navigation alone is NOT sufficient. You MUST verify the complete end-to-end functional lifecycle down to the final target outcome (e.g. for password/PIN resets: verify credential update in database, verify old password/PIN is rejected, and verify logging in with the new password/PIN authenticates the user and hydrates their session).
