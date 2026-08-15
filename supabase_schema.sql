@@ -1,110 +1,167 @@
--- =====================================================================
--- TICKET POS — SUPABASE POSTGRES SCHEMA (IDEMPOTENT RLS PROTECTED)
--- =====================================================================
+-- =============================================================================
+-- Supabase Database Schema & Row Level Security (RLS) Setup Script
+-- Project: Danbaiwa Restaurant OS (Ticket POS)
+-- Run this script in your Supabase project (SQL Editor) to set up tables and RLS.
+-- =============================================================================
 
--- 1. Device Configuration Table
-CREATE TABLE IF NOT EXISTS public.device_configs (
-    location_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    business_name TEXT NOT NULL,
-    location_name TEXT NOT NULL,
-    currency_symbol TEXT DEFAULT '₦',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (location_id, device_id)
+-- Enable extension for UUID generation if not already active
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 1. Table: users
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS users (
+  id                UUID PRIMARY KEY,
+  name              TEXT NOT NULL,
+  email             TEXT,
+  username          TEXT,
+  password_hash     TEXT,
+  password_salt     TEXT,
+  pin_hash          TEXT NOT NULL,
+  pin_salt          TEXT NOT NULL,
+  recovery_key_hash TEXT,
+  recovery_key_salt TEXT,
+  role              TEXT NOT NULL DEFAULT 'cashier',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  status            TEXT NOT NULL DEFAULT 'active',
+  location_id       TEXT -- Scopes RLS checks for Cashiers/Staff
 );
 
--- 2. Tickets Table (Client-Generated Composite Key: location_id-device_id-local_seq)
-CREATE TABLE IF NOT EXISTS public.tickets (
-    id TEXT PRIMARY KEY, -- Composite key e.g. LOC01-DEV01-000001
-    location_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    local_seq INT8 NOT NULL,
-    amount NUMERIC(12, 2) NOT NULL,
-    currency TEXT DEFAULT '₦',
-    status TEXT NOT NULL CHECK (status IN ('paid', 'collected', 'void')),
-    cashier_id TEXT NOT NULL,
-    void_reason TEXT,
-    voided_by TEXT,
-    voided_at TIMESTAMPTZ,
-    qr_payload TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    synced_at TIMESTAMPTZ DEFAULT NOW()
+CREATE INDEX IF NOT EXISTS idx_users_email_sb ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_location_sb ON users(location_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 2. Table: tickets
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS tickets (
+  id          TEXT PRIMARY KEY, -- Composite key format: LOC01-DEV01-000001
+  location_id TEXT NOT NULL,
+  device_id   TEXT NOT NULL,
+  local_seq   INTEGER NOT NULL,
+  amount      NUMERIC(12, 2) NOT NULL,
+  currency    TEXT NOT NULL DEFAULT '₦',
+  status      TEXT NOT NULL DEFAULT 'paid',
+  cashier_id  TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  qr_payload  TEXT NOT NULL,
+  void_reason TEXT,
+  voided_by   TEXT,
+  voided_at   TIMESTAMPTZ
 );
 
--- Index for multi-location reporting rollups
-CREATE INDEX IF NOT EXISTS idx_tickets_location_date ON public.tickets (location_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_tickets_status ON public.tickets (status);
+CREATE INDEX IF NOT EXISTS idx_tickets_cashier_sb ON tickets(cashier_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_created_sb ON tickets(created_at);
+CREATE INDEX IF NOT EXISTS idx_tickets_status_sb  ON tickets(status);
+CREATE INDEX IF NOT EXISTS idx_tickets_location_sb ON tickets(location_id);
 
--- 3. Shifts Table (Cash Reconciliation)
-CREATE TABLE IF NOT EXISTS public.shifts (
-    id UUID PRIMARY KEY, -- Client-generated UUID
-    location_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    cashier_id TEXT NOT NULL,
-    cashier_name TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
-    opened_at TIMESTAMPTZ NOT NULL,
-    closed_at TIMESTAMPTZ,
-    opening_float NUMERIC(12, 2) NOT NULL,
-    expected_cash NUMERIC(12, 2),
-    counted_cash NUMERIC(12, 2),
-    variance NUMERIC(12, 2),
-    notes TEXT,
-    synced_at TIMESTAMPTZ DEFAULT NOW()
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 3. Table: shifts
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS shifts (
+  id             UUID PRIMARY KEY,
+  cashier_id     TEXT NOT NULL,
+  cashier_name   TEXT NOT NULL,
+  location_id    TEXT NOT NULL,
+  device_id      TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'open',
+  opening_float  NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  opened_at      TIMESTAMPTZ NOT NULL,
+  closed_at      TIMESTAMPTZ,
+  counted_cash   NUMERIC(12, 2),
+  expected_cash  NUMERIC(12, 2),
+  variance       NUMERIC(12, 2),
+  notes          TEXT
 );
 
--- 4. Expenses Table (Approval Queue)
-CREATE TABLE IF NOT EXISTS public.expenses (
-    id UUID PRIMARY KEY, -- Client-generated UUID
-    shift_id TEXT NOT NULL,
-    cashier_id TEXT NOT NULL,
-    cashier_name TEXT NOT NULL,
-    amount NUMERIC(12, 2) NOT NULL,
-    category TEXT NOT NULL,
-    description TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
-    logged_at TIMESTAMPTZ NOT NULL,
-    reviewed_by TEXT,
-    reviewed_at TIMESTAMPTZ,
-    rejection_reason TEXT,
-    synced_at TIMESTAMPTZ DEFAULT NOW()
+CREATE INDEX IF NOT EXISTS idx_shifts_cashier_sb ON shifts(cashier_id);
+CREATE INDEX IF NOT EXISTS idx_shifts_status_sb  ON shifts(status);
+CREATE INDEX IF NOT EXISTS idx_shifts_location_sb ON shifts(location_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 4. Table: expenses
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS expenses (
+  id               UUID PRIMARY KEY,
+  shift_id         UUID NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+  cashier_id       TEXT NOT NULL,
+  cashier_name     TEXT NOT NULL,
+  category         TEXT NOT NULL,
+  description      TEXT,
+  amount           NUMERIC(12, 2) NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'pending',
+  logged_at        TIMESTAMPTZ NOT NULL,
+  reviewed_by      TEXT,
+  reviewed_at      TIMESTAMPTZ,
+  rejection_reason TEXT
 );
 
--- 5. Immutable Audit Logs Table (Append Only)
-CREATE TABLE IF NOT EXISTS public.audit_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    entity TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    actor_id TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    timestamp TIMESTAMPTZ NOT NULL
+CREATE INDEX IF NOT EXISTS idx_expenses_shift_sb   ON expenses(shift_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_cashier_sb ON expenses(cashier_id);
+
+-- =============================================================================
+-- Row Level Security (RLS) Setup & Multi-Location Scoping
+-- =============================================================================
+
+-- Enable Row Level Security (RLS) on all POS Tables
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE shifts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;
+
+-- Drop existing policies if any to prevent collision on re-runs
+DROP POLICY IF EXISTS "Scope users by location" ON users;
+DROP POLICY IF EXISTS "Scope tickets by location" ON tickets;
+DROP POLICY IF EXISTS "Scope shifts by location" ON shifts;
+DROP POLICY IF EXISTS "Scope expenses by location" ON expenses;
+
+-- 1. Users Scoping Policy: Users can query/update themselves,
+-- and Admins can manage users scoped to their location.
+CREATE POLICY "Scope users by location" ON users
+FOR ALL TO authenticated
+USING (
+  id = auth.uid() OR
+  location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id')
+)
+WITH CHECK (
+  id = auth.uid() OR
+  location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id')
 );
 
--- =====================================================================
--- ROW LEVEL SECURITY (RLS) POLICIES — ANON KEY ACCESS ONLY
--- =====================================================================
-ALTER TABLE public.tickets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.shifts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.expenses ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.device_configs ENABLE ROW LEVEL SECURITY;
+-- 2. Tickets Scoping Policy: Restricts access to matching location_id metadata.
+CREATE POLICY "Scope tickets by location" ON tickets
+FOR ALL TO authenticated
+USING (location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id'))
+WITH CHECK (location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id'));
 
--- Allow anon key to insert/upsert idempotent records
-CREATE POLICY "Allow anon insert tickets" ON public.tickets FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update tickets" ON public.tickets FOR UPDATE USING (true);
-CREATE POLICY "Allow anon read tickets" ON public.tickets FOR SELECT USING (true);
+-- 3. Shifts Scoping Policy: Restricts access to matching location_id metadata.
+CREATE POLICY "Scope shifts by location" ON shifts
+FOR ALL TO authenticated
+USING (location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id'))
+WITH CHECK (location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id'));
 
-CREATE POLICY "Allow anon insert shifts" ON public.shifts FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update shifts" ON public.shifts FOR UPDATE USING (true);
-CREATE POLICY "Allow anon read shifts" ON public.shifts FOR SELECT USING (true);
+-- 4. Expenses Scoping Policy: Scopes access to expenses related to location shifts.
+CREATE POLICY "Scope expenses by location" ON expenses
+FOR ALL TO authenticated
+USING (
+  shift_id IN (
+    SELECT id FROM shifts 
+    WHERE location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id')
+  )
+)
+WITH CHECK (
+  shift_id IN (
+    SELECT id FROM shifts 
+    WHERE location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id')
+  )
+);
 
-CREATE POLICY "Allow anon insert expenses" ON public.expenses FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update expenses" ON public.expenses FOR UPDATE USING (true);
-CREATE POLICY "Allow anon read expenses" ON public.expenses FOR SELECT USING (true);
+-- =============================================================================
+-- Storage Bucket Setup for SQL.js Binary Backups
+-- =============================================================================
 
-CREATE POLICY "Allow anon insert audit_logs" ON public.audit_logs FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon read audit_logs" ON public.audit_logs FOR SELECT USING (true);
-
-CREATE POLICY "Allow anon read device_configs" ON public.device_configs FOR SELECT USING (true);
+-- Allow authenticated users to perform snapshot DB backup writes
+DROP POLICY IF EXISTS "authenticated users can upload backups" ON storage.objects;
+CREATE POLICY "authenticated users can upload backups"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (bucket_id = 'db-backups');
