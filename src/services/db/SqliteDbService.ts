@@ -1,23 +1,22 @@
 /**
  * SqliteDbService.ts
  *
- * Production-grade SQLite-in-WASM persistence engine.
- * 10-year marathon hardened:
+ * Production-grade SQLite-in-WASM database service.
+ * Hardened for a 10-year marathon:
  *
- * Storage tier 1 — sql.js in-memory SQLite (microsecond reads/writes)
- * Storage tier 2 — IndexedDB binary snapshot (no quota limit, raw Uint8Array)
- * Storage tier 3 — Supabase Storage cloud backup (debounced 10s, disaster recovery)
+ * 1. Tier 1 (In-Memory execution): sql.js (microseconds reads/writes)
+ * 2. Tier 2 (Durability / WAL Journal): Writes only transaction queries to IndexedDB 'journal' store
+ *    (O(1) write latency, crash-safe, awaited before print)
+ * 3. Tier 2 (Baseline Snapshot): Debounced full db.export() to IndexedDB 'snapshots' store
+ *    (every 10s on mutation, cleans up journal)
+ * 4. Tier 3 (Cloud Disaster Recovery): Debounced db.export() upload to Supabase Storage
+ *    (latest.db + daily snapshots)
  *
- * Crash safety guarantee:
- *   Every write is wrapped in a SQL BEGIN/COMMIT transaction.
- *   The IndexedDB persist() call is awaited before the method returns.
- *   Print is dispatched ONLY after persist() resolves.
- *   If the browser crashes after persist(), data is safe in IndexedDB.
- *   If it crashes before persist(), the write never happened (no orphaned receipt).
- *
- * Vitest compatible:
- *   In Node test environments (no indexedDB, no window), both IDB and Supabase
- *   layers are skipped silently. Tests run against pure in-memory SQLite.
+ * Crash-safe guarantee:
+ * - Mutating statements are executed on in-memory SQLite and pushed to a pending transaction buffer.
+ * - Calling await _persist() appends the transaction statements as a single journal entry to IndexedDB.
+ * - Re-loading DB reads the last baseline snapshot and replays any pending journal entries in order.
+ * - Vitest fallback: Node test environments bypass IndexedDB/Storage and run pure in-memory SQLite.
  */
 
 import { IDbService } from './IDbService';
@@ -29,23 +28,19 @@ import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const MIGRATION_FLAG = 'ticket_pos_migrated_v3';
 
-const MIGRATION_FLAG = 'ticket_pos_migrated_v2';
-
-/** IndexedDB database & store names */
-const IDB_DB_NAME = 'ticket_pos_idb_v1';
-const IDB_STORE_NAME = 'snapshots';
+/** IndexedDB DB & Store Configuration */
+const IDB_DB_NAME = 'ticket_pos_idb_v2';
+const IDB_SNAPSHOT_STORE = 'snapshots';
+const IDB_JOURNAL_STORE = 'journal';
 const IDB_KEY = 'sqlite_db';
 
-/** Supabase Storage bucket (must be created once in Supabase Dashboard) */
+/** Supabase Storage Configuration */
 const SUPABASE_BUCKET = 'db-backups';
-
-/** How long to debounce Supabase cloud backup after last write (ms) */
 const BACKUP_DEBOUNCE_MS = 10_000;
 
-// ─── Schema DDL ───────────────────────────────────────────────────────────────
-
+// DDL — Schema definitions for SQLite tables
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
@@ -150,14 +145,11 @@ const SCHEMA_SQL = `
   );
 `;
 
-// ─── Type alias ───────────────────────────────────────────────────────────────
-
 type SqlJsDatabase = import('sql.js').Database;
-
-// ─── sql.js loader ───────────────────────────────────────────────────────────
 
 let _sqlJsModule: any = null;
 
+/** Load sql.js WASM or fallback to JS in Node test context */
 async function loadSqlJs(): Promise<any> {
   if (_sqlJsModule) return _sqlJsModule;
   const initSqlJs = (await import('sql.js')).default;
@@ -168,7 +160,7 @@ async function loadSqlJs(): Promise<any> {
   return _sqlJsModule;
 }
 
-// ─── Tier 2: IndexedDB binary snapshot ───────────────────────────────────────
+// ─── Tier 2: IndexedDB WAL and Snapshot helper ──────────────────────────────
 
 function isIDBAvailable(): boolean {
   return typeof indexedDB !== 'undefined';
@@ -178,60 +170,117 @@ function _openIDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_DB_NAME, 1);
     req.onupgradeneeded = (e) => {
-      (e.target as IDBOpenDBRequest).result.createObjectStore(IDB_STORE_NAME);
+      const db = (e.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(IDB_SNAPSHOT_STORE)) {
+        db.createObjectStore(IDB_SNAPSHOT_STORE);
+      }
+      if (!db.objectStoreNames.contains(IDB_JOURNAL_STORE)) {
+        db.createObjectStore(IDB_JOURNAL_STORE, { autoIncrement: true });
+      }
     };
     req.onsuccess = (e) => resolve((e.target as IDBOpenDBRequest).result);
     req.onerror = () => reject(req.error);
   });
 }
 
-async function saveSnapshotIDB(data: Uint8Array): Promise<void> {
-  if (!isIDBAvailable()) return;
-  try {
-    const idb = await _openIDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = idb.transaction(IDB_STORE_NAME, 'readwrite');
-      tx.objectStore(IDB_STORE_NAME).put(data, IDB_KEY);
-      tx.oncomplete = () => { idb.close(); resolve(); };
-      tx.onerror   = () => { idb.close(); reject(tx.error); };
-    });
-  } catch (e) {
-    console.warn('[SqliteDbService] IDB save failed:', e);
-  }
-}
-
+/** Load the baseline binary snapshot from IndexedDB */
 async function loadSnapshotIDB(): Promise<Uint8Array | null> {
   if (!isIDBAvailable()) return null;
   try {
     const idb = await _openIDB();
     return await new Promise<Uint8Array | null>((resolve, reject) => {
-      const tx = idb.transaction(IDB_STORE_NAME, 'readonly');
-      const req = tx.objectStore(IDB_STORE_NAME).get(IDB_KEY);
+      const tx = idb.transaction(IDB_SNAPSHOT_STORE, 'readonly');
+      const req = tx.objectStore(IDB_SNAPSHOT_STORE).get(IDB_KEY);
       req.onsuccess = () => { idb.close(); resolve(req.result as Uint8Array | null ?? null); };
-      req.onerror   = () => { idb.close(); reject(req.error); };
+      req.onerror   = () => { idb.close(); reject(tx.error || req.error); };
     });
   } catch (e) {
-    console.warn('[SqliteDbService] IDB load failed:', e);
+    console.warn('[SqliteDbService] IDB baseline snapshot load failed:', e);
     return null;
   }
 }
 
-// ─── Tier 3: Supabase Storage cloud backup ────────────────────────────────────
+/** Appends a transaction containing pending statements to the WAL journal */
+async function appendJournalIDB(statements: Array<{ sql: string; params?: any[] }>): Promise<number> {
+  if (!isIDBAvailable() || statements.length === 0) return 0;
+  const idb = await _openIDB();
+  return await new Promise<number>((resolve, reject) => {
+    const tx = idb.transaction(IDB_JOURNAL_STORE, 'readwrite');
+    const store = tx.objectStore(IDB_JOURNAL_STORE);
+    const req = store.add(statements); // Appends the array as a single atomic entry
+    req.onsuccess = () => { idb.close(); resolve(req.result as number); };
+    req.onerror   = () => { idb.close(); reject(tx.error || req.error); };
+  });
+}
 
-/** Device ID used for Supabase Storage path — updated after config loads */
+/** Reads all pending journal entries from the WAL */
+async function loadJournalIDB(): Promise<Array<{ id: number; statements: Array<{ sql: string; params?: any[] }> }>> {
+  if (!isIDBAvailable()) return [];
+  const idb = await _openIDB();
+  return await new Promise<any>((resolve, reject) => {
+    const tx = idb.transaction(IDB_JOURNAL_STORE, 'readonly');
+    const store = tx.objectStore(IDB_JOURNAL_STORE);
+    const entries: any[] = [];
+    store.openCursor().onsuccess = (event: any) => {
+      const cursor = event.target.result;
+      if (cursor) {
+        entries.push({ id: cursor.key, statements: cursor.value });
+        cursor.continue();
+      } else {
+        idb.close();
+        resolve(entries);
+      }
+    };
+    tx.onerror = () => { idb.close(); reject(tx.error); };
+  });
+}
+
+/** Deletes journal entries up to a specific auto-increment key id */
+async function deleteJournalIDBUpTo(maxId: number): Promise<void> {
+  if (!isIDBAvailable() || maxId <= 0) return;
+  const idb = await _openIDB();
+  return await new Promise<void>((resolve, reject) => {
+    const tx = idb.transaction(IDB_JOURNAL_STORE, 'readwrite');
+    const store = tx.objectStore(IDB_JOURNAL_STORE);
+    
+    // Iterate keys and delete all that are <= maxId
+    store.openKeyCursor().onsuccess = (event: any) => {
+      const cursor = event.target.result;
+      if (cursor) {
+        const key = cursor.key as number;
+        if (key <= maxId) {
+          store.delete(key);
+          cursor.continue();
+        } else {
+          idb.close();
+          resolve();
+        }
+      } else {
+        idb.close();
+        resolve();
+      }
+    };
+    tx.onerror = () => { idb.close(); reject(tx.error); };
+  });
+}
+
+/** Clear all journal entries from the WAL store */
+async function clearJournalIDB(): Promise<void> {
+  if (!isIDBAvailable()) return;
+  const idb = await _openIDB();
+  return await new Promise<void>((resolve, reject) => {
+    const tx = idb.transaction(IDB_JOURNAL_STORE, 'readwrite');
+    tx.objectStore(IDB_JOURNAL_STORE).clear();
+    tx.oncomplete = () => { idb.close(); resolve(); };
+    tx.onerror    = () => { idb.close(); reject(tx.error); };
+  });
+}
+
+// ─── Tier 3: Supabase Storage Backup configuration ─────────────────────────
+
 let _deviceId = 'DEV01';
-
 let _backupTimer: ReturnType<typeof setTimeout> | null = null;
 
-/**
- * Upload the binary SQLite snapshot to Supabase Storage.
- * Two files are written on every backup:
- *   db-backups/snapshots/{deviceId}/latest.db  — always overwritten (hot recovery)
- *   db-backups/snapshots/{deviceId}/{date}.db  — daily versioned archive
- *
- * This function is debounced — frequent writes coalesce into one upload
- * per BACKUP_DEBOUNCE_MS window.
- */
 function scheduleSupabaseBackup(data: Uint8Array): void {
   if (!isSupabaseConfigured || typeof window === 'undefined') return;
   if (_backupTimer) clearTimeout(_backupTimer);
@@ -241,49 +290,38 @@ function scheduleSupabaseBackup(data: Uint8Array): void {
       const date = new Date().toISOString().split('T')[0];
       const blob = new Blob([data], { type: 'application/octet-stream' });
 
-      // Latest hot copy (always overwrite)
+      // Overwrite latest hot snapshot
       await supabase.storage
         .from(SUPABASE_BUCKET)
         .upload(`snapshots/${_deviceId}/latest.db`, blob, { upsert: true });
 
-      // Daily versioned archive
+      // Daily versioned snapshot
       await supabase.storage
         .from(SUPABASE_BUCKET)
         .upload(`snapshots/${_deviceId}/${date}.db`, blob, { upsert: true });
 
-      console.debug(`[SqliteDbService] Cloud backup uploaded (${(data.byteLength / 1024).toFixed(1)} KB)`);
+      console.info(`[SqliteDbService] Cloud backup sync complete (${(data.byteLength / 1024).toFixed(1)} KB)`);
     } catch (e) {
-      console.warn('[SqliteDbService] Supabase backup failed (will retry next write):', e);
+      console.warn('[SqliteDbService] Cloud backup failed (will retry on next snapshot):', e);
     }
   }, BACKUP_DEBOUNCE_MS);
 }
 
-/**
- * Ensure the db-backups bucket exists in Supabase Storage.
- * Called once on init — silently ignores "already exists" errors.
- */
 async function ensureBackupBucket(): Promise<void> {
   if (!isSupabaseConfigured || typeof window === 'undefined') return;
   try {
     const { error } = await supabase.storage.createBucket(SUPABASE_BUCKET, {
       public: false,
-      fileSizeLimit: 52_428_800, // 50 MB
+      fileSizeLimit: 52_428_800, // 50MB
     });
-    // Ignore "already exists" — expected on subsequent boots
     if (error && !error.message.toLowerCase().includes('already exists') && !error.message.toLowerCase().includes('duplicate')) {
-      console.warn('[SqliteDbService] Could not create backup bucket:', error.message);
+      console.warn('[SqliteDbService] Backup bucket creation notice:', error.message);
     }
   } catch (_) {}
 }
 
-// ─── SQL helpers ─────────────────────────────────────────────────────────────
+// ─── SQL execute helpers ───────────────────────────────────────────────────
 
-/** Execute a write statement (no automatic persist — callers call this._persist()) */
-function runSql(db: SqlJsDatabase, sql: string, params?: any[]): void {
-  db.run(sql, params);
-}
-
-/** Execute a read query and return typed rows */
 function querySql<T = Record<string, any>>(db: SqlJsDatabase, sql: string, params?: any[]): T[] {
   const stmt = db.prepare(sql);
   if (params) stmt.bind(params);
@@ -295,13 +333,17 @@ function querySql<T = Record<string, any>>(db: SqlJsDatabase, sql: string, param
   return rows;
 }
 
-// ─── Service class ────────────────────────────────────────────────────────────
+// ─── Service Class ──────────────────────────────────────────────────────────
 
 export class SqliteDbService implements IDbService {
   private db: SqlJsDatabase | null = null;
   private initPromise: Promise<void> | null = null;
 
-  // ─── Init ───────────────────────────────────────────────────────────────
+  /** Accumulates mutating SQL queries ran in the current transaction */
+  private pendingStatements: Array<{ sql: string; params?: any[] }> = [];
+
+  /** Exporter debouncing state */
+  private snapshotTimeout: ReturnType<typeof setTimeout> | null = null;
 
   async init(): Promise<void> {
     if (this.db) return;
@@ -309,13 +351,43 @@ export class SqliteDbService implements IDbService {
 
     this.initPromise = (async () => {
       const SQL = await loadSqlJs();
-
-      // Tier 2: load from IndexedDB (fast — binary, no parsing)
       const snapshot = await loadSnapshotIDB();
-      const db: SqlJsDatabase = snapshot ? new SQL.Database(snapshot) : new SQL.Database();
 
-      // Create / migrate schema (idempotent)
+      // Use a local variable to satisfy TypeScript strict null narrowing
+      const db: SqlJsDatabase = snapshot ? new SQL.Database(snapshot) : new SQL.Database();
       db.run(SCHEMA_SQL);
+
+      // Replay any pending journal entries from the WAL store (crash recovery)
+      const journalEntries = await loadJournalIDB();
+      if (journalEntries.length > 0) {
+        console.info(`[SqliteDbService] Replaying ${journalEntries.length} WAL journal transactions...`);
+        db.run('BEGIN TRANSACTION');
+        try {
+          for (const entry of journalEntries) {
+            for (const stmt of entry.statements) {
+              db.run(stmt.sql, stmt.params);
+            }
+          }
+          db.run('COMMIT');
+        } catch (e) {
+          db.run('ROLLBACK');
+          console.error('[SqliteDbService] WAL replay failed, database may be inconsistent:', e);
+        }
+        
+        // Export fully replayed database baseline and clear the replayed journal log
+        const updatedData = db.export();
+        if (isIDBAvailable()) {
+          const idb = await _openIDB();
+          await new Promise<void>((resolve, reject) => {
+            const tx = idb.transaction([IDB_SNAPSHOT_STORE, IDB_JOURNAL_STORE], 'readwrite');
+            tx.objectStore(IDB_SNAPSHOT_STORE).put(updatedData, IDB_KEY);
+            tx.objectStore(IDB_JOURNAL_STORE).clear();
+            tx.oncomplete = () => { idb.close(); resolve(); };
+            tx.onerror    = () => { idb.close(); reject(tx.error); };
+          });
+        }
+        console.info('[SqliteDbService] WAL journal cleared and baseline snapshot updated.');
+      }
 
       // Seed default device config if missing
       const cfgRows = querySql(db, "SELECT value FROM config WHERE key = 'device_config'");
@@ -332,7 +404,6 @@ export class SqliteDbService implements IDbService {
         };
         db.run("INSERT INTO config (key, value) VALUES ('device_config', ?)", [JSON.stringify(defaultConfig)]);
       } else {
-        // Update module-level deviceId from stored config
         try {
           const cfg: DeviceConfig = JSON.parse(cfgRows[0].value as string);
           _deviceId = cfg.deviceId || 'DEV01';
@@ -341,13 +412,10 @@ export class SqliteDbService implements IDbService {
 
       this.db = db;
 
-      // Persist initial state to IndexedDB
-      await this._persist();
-
-      // Tier 3: ensure Supabase Storage bucket exists (async, non-blocking)
+      // Ensure Supabase Storage bucket is ready
       ensureBackupBucket().catch(() => {});
 
-      // One-time migration from legacy localStorage JSON blobs
+      // One-time legacy migration from localStorage JSON blobs
       if (typeof localStorage !== 'undefined' && !localStorage.getItem(MIGRATION_FLAG)) {
         this._migrateFromLocalStorage();
         localStorage.setItem(MIGRATION_FLAG, '1');
@@ -357,26 +425,69 @@ export class SqliteDbService implements IDbService {
     return this.initPromise;
   }
 
-  /**
-   * Persist in-memory SQLite state to IndexedDB (Tier 2) and
-   * schedule debounced Supabase cloud backup (Tier 3).
-   *
-   * This is the heart of crash-safety: every write method awaits _persist()
-   * before returning, so the caller can be sure data is durable in IDB.
-   */
-  private async _persist(): Promise<void> {
-    if (!this.db) return;
-    const data = this.db.export();
-    await saveSnapshotIDB(data);
-    scheduleSupabaseBackup(data);
-  }
-
+  /** Gets the active Database connection */
   private get DB(): SqlJsDatabase {
     if (!this.db) throw new Error('SqliteDbService: call init() first.');
     return this.db;
   }
 
-  // ─── Config ─────────────────────────────────────────────────────────────
+  /** Run a write query (in-memory SQLite + buffer statement for journal) */
+  private runWrite(sql: string, params?: any[]): void {
+    this.DB.run(sql, params);
+    this.pendingStatements.push({ sql, params });
+  }
+
+  /**
+   * Durability step: Appends the transaction statements to the IndexedDB WAL journal.
+   * This is O(1) and awaited in service methods to ensure crash-safety before returning.
+   * Also schedules a debounced background export of the full snapshot database.
+   */
+  private async _persist(): Promise<void> {
+    if (this.pendingStatements.length === 0) return;
+    
+    // Append the statements as a single atomic journal transaction entry in IDB WAL
+    const journalId = await appendJournalIDB(this.pendingStatements);
+    this.pendingStatements = [];
+
+    // Schedule debounced full snapshot baseline update
+    this.scheduleSnapshotExport(journalId);
+  }
+
+  /**
+   * Debounces full database binary exports. Runs baseline update in background
+   * to keep the UI responsive and thread unblocked.
+   */
+  private scheduleSnapshotExport(latestJournalId: number): void {
+    if (this.snapshotTimeout) clearTimeout(this.snapshotTimeout);
+    
+    this.snapshotTimeout = setTimeout(async () => {
+      if (!this.db) return;
+      try {
+        const data = this.db.export();
+        
+        // Tier 2: Update baseline snapshot in IndexedDB
+        if (isIDBAvailable()) {
+          const idb = await _openIDB();
+          await new Promise<void>((resolve, reject) => {
+            const tx = idb.transaction(IDB_SNAPSHOT_STORE, 'readwrite');
+            tx.objectStore(IDB_SNAPSHOT_STORE).put(data, IDB_KEY);
+            tx.oncomplete = () => { idb.close(); resolve(); };
+            tx.onerror    = () => { idb.close(); reject(tx.error); };
+          });
+
+          // Delete journal entries that are now folded into this baseline snapshot
+          await deleteJournalIDBUpTo(latestJournalId);
+        }
+
+        // Tier 3: Sync to cloud storage
+        scheduleSupabaseBackup(data);
+      } catch (e) {
+        console.warn('[SqliteDbService] Snapshot background export failed:', e);
+      }
+    }, 5000); // 5 seconds debounce
+  }
+
+  // ─── Config ──────────────────────────────────────────────────────────────
 
   async getDeviceConfig(): Promise<DeviceConfig | null> {
     const rows = querySql(this.DB, "SELECT value FROM config WHERE key = 'device_config'");
@@ -384,14 +495,14 @@ export class SqliteDbService implements IDbService {
   }
 
   async saveDeviceConfig(config: DeviceConfig): Promise<void> {
-    this.DB.run("BEGIN");
-    runSql(this.DB, "INSERT OR REPLACE INTO config (key, value) VALUES ('device_config', ?)", [JSON.stringify(config)]);
-    this.DB.run("COMMIT");
+    this.runWrite("BEGIN TRANSACTION");
+    this.runWrite("INSERT OR REPLACE INTO config (key, value) VALUES ('device_config', ?)", [JSON.stringify(config)]);
+    this.runWrite("COMMIT");
     _deviceId = config.deviceId || 'DEV01';
     await this._persist();
   }
 
-  // ─── Users ──────────────────────────────────────────────────────────────
+  // ─── Users ───────────────────────────────────────────────────────────────
 
   async getUsers(): Promise<UserAccount[]> {
     return querySql(this.DB, 'SELECT * FROM users ORDER BY created_at DESC').map(this._rowToUser);
@@ -407,8 +518,8 @@ export class SqliteDbService implements IDbService {
   }
 
   async saveUser(user: UserAccount): Promise<void> {
-    this.DB.run('BEGIN');
-    runSql(this.DB, `
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(`
       INSERT OR IGNORE INTO users
         (id,name,email,username,password_hash,password_salt,pin_hash,pin_salt,
          recovery_key_hash,recovery_key_salt,role,created_at,status)
@@ -421,13 +532,13 @@ export class SqliteDbService implements IDbService {
       user.role, user.createdAt, user.status,
     ]);
     this._runQueueOutbox('users', 'INSERT', user);
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
   async updateUser(user: UserAccount): Promise<void> {
-    this.DB.run('BEGIN');
-    runSql(this.DB, `
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(`
       UPDATE users SET name=?,email=?,username=?,password_hash=?,password_salt=?,
         pin_hash=?,pin_salt=?,recovery_key_hash=?,recovery_key_salt=?,role=?,status=?
       WHERE id=?
@@ -439,11 +550,11 @@ export class SqliteDbService implements IDbService {
       user.role, user.status, user.id,
     ]);
     this._runQueueOutbox('users', 'UPDATE', user);
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
-  // ─── Tickets ────────────────────────────────────────────────────────────
+  // ─── Tickets ─────────────────────────────────────────────────────────────
 
   async getTickets(userId?: string): Promise<Ticket[]> {
     const rows = userId
@@ -453,8 +564,8 @@ export class SqliteDbService implements IDbService {
   }
 
   async saveTicket(ticket: Ticket): Promise<void> {
-    this.DB.run('BEGIN');
-    runSql(this.DB, `
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(`
       INSERT OR IGNORE INTO tickets
         (id,location_id,device_id,local_seq,amount,currency,status,
          cashier_id,created_at,qr_payload,void_reason,voided_by,voided_at)
@@ -466,53 +577,49 @@ export class SqliteDbService implements IDbService {
       ticket.voidReason ?? null, ticket.voidedBy ?? null, ticket.voidedAt ?? null,
     ]);
     this._runQueueOutbox('tickets', 'INSERT', ticket);
-    this.DB.run('COMMIT');
-    await this._persist(); // ← IDB write confirmed before caller returns
+    this.runWrite('COMMIT');
+    await this._persist();
   }
 
   async updateTicketStatus(ticketId: string, status: 'paid' | 'collected' | 'void', reason?: string, voidedBy?: string): Promise<void> {
     const now = new Date().toISOString();
-    this.DB.run('BEGIN');
+    this.runWrite('BEGIN TRANSACTION');
     if (status === 'void') {
-      runSql(this.DB,
+      this.runWrite(
         'UPDATE tickets SET status=?,void_reason=?,voided_by=?,voided_at=? WHERE id=?',
         [status, reason ?? null, voidedBy ?? null, now, ticketId]
       );
       this._runAuditLog({ entity: 'ticket', entityId: ticketId, action: 'VOID', actorId: voidedBy ?? 'ADMIN', reason: reason ?? 'N/A', timestamp: now });
     } else {
-      runSql(this.DB, 'UPDATE tickets SET status=? WHERE id=?', [status, ticketId]);
+      this.runWrite('UPDATE tickets SET status=? WHERE id=?', [status, ticketId]);
     }
     const rows = querySql(this.DB, 'SELECT * FROM tickets WHERE id=?', [ticketId]);
     if (rows.length > 0) this._runQueueOutbox('tickets', 'UPDATE', this._rowToTicket(rows[0]));
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
-  /**
-   * Atomic sequence increment — BEGIN/COMMIT wraps the UPSERT + SELECT.
-   * No race condition is possible: SQLite serialises concurrent writers
-   * and the result is committed to IndexedDB before returning.
-   */
+  /** Atomically increment sequence counter */
   async getNextSeq(locationId: string, deviceId: string): Promise<number> {
     const key = `${locationId}_${deviceId}`;
-    this.DB.run('BEGIN');
+    this.runWrite('BEGIN TRANSACTION');
     try {
-      this.DB.run(
+      this.runWrite(
         'INSERT INTO sequences (key, next_val) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET next_val = next_val + 1',
         [key]
       );
       const rows = querySql(this.DB, 'SELECT next_val FROM sequences WHERE key=?', [key]);
       const nextVal = rows[0].next_val as number;
-      this.DB.run('COMMIT');
-      await this._persist(); // sequence committed & durable before print
+      this.runWrite('COMMIT');
+      await this._persist();
       return nextVal;
     } catch (e) {
-      this.DB.run('ROLLBACK');
+      this.runWrite('ROLLBACK');
       throw e;
     }
   }
 
-  // ─── Shifts ─────────────────────────────────────────────────────────────
+  // ─── Shifts ──────────────────────────────────────────────────────────────
 
   async getCurrentShift(userId?: string): Promise<Shift | null> {
     const shifts = await this.getShifts(userId);
@@ -527,8 +634,8 @@ export class SqliteDbService implements IDbService {
   }
 
   async saveShift(shift: Shift): Promise<void> {
-    this.DB.run('BEGIN');
-    runSql(this.DB, `
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(`
       INSERT OR IGNORE INTO shifts
         (id,cashier_id,cashier_name,location_id,device_id,status,
          opening_float,opened_at,closed_at,counted_cash,expected_cash,variance,notes)
@@ -540,37 +647,37 @@ export class SqliteDbService implements IDbService {
       shift.expectedCash ?? null, shift.variance ?? null, shift.notes ?? null,
     ]);
     this._runQueueOutbox('shifts', 'INSERT', shift);
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
   async closeShift(shiftId: string, countedCash: number, expectedCash: number, variance: number, notes?: string): Promise<void> {
     const now = new Date().toISOString();
-    this.DB.run('BEGIN');
-    runSql(this.DB,
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(
       'UPDATE shifts SET status=?,closed_at=?,counted_cash=?,expected_cash=?,variance=?,notes=? WHERE id=?',
       ['closed', now, countedCash, expectedCash, variance, notes ?? null, shiftId]
     );
     const rows = querySql(this.DB, 'SELECT * FROM shifts WHERE id=?', [shiftId]);
     if (rows.length > 0) this._runQueueOutbox('shifts', 'UPDATE', this._rowToShift(rows[0]));
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
-  // ─── Expenses ───────────────────────────────────────────────────────────
+  // ─── Expenses ────────────────────────────────────────────────────────────
 
   async getExpenses(shiftId?: string, userId?: string): Promise<Expense[]> {
     let sql = 'SELECT * FROM expenses WHERE 1=1';
     const params: any[] = [];
-    if (shiftId) { sql += ' AND shift_id=?';   params.push(shiftId); }
-    if (userId)  { sql += ' AND cashier_id=?';  params.push(userId); }
+    if (shiftId) { sql += ' AND shift_id=?'; params.push(shiftId); }
+    if (userId)  { sql += ' AND cashier_id=?'; params.push(userId); }
     sql += ' ORDER BY logged_at DESC';
     return querySql(this.DB, sql, params).map(this._rowToExpense);
   }
 
   async saveExpense(expense: Expense): Promise<void> {
-    this.DB.run('BEGIN');
-    runSql(this.DB, `
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(`
       INSERT OR IGNORE INTO expenses
         (id,shift_id,cashier_id,cashier_name,category,description,amount,status,logged_at,
          reviewed_by,reviewed_at,rejection_reason)
@@ -583,14 +690,14 @@ export class SqliteDbService implements IDbService {
       expense.reviewedAt ?? null, expense.rejectionReason ?? null,
     ]);
     this._runQueueOutbox('expenses', 'INSERT', expense);
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
   async updateExpenseStatus(expenseId: string, status: 'approved' | 'rejected', reviewer: string, reason?: string): Promise<void> {
     const now = new Date().toISOString();
-    this.DB.run('BEGIN');
-    runSql(this.DB,
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite(
       'UPDATE expenses SET status=?,reviewed_by=?,reviewed_at=?,rejection_reason=? WHERE id=?',
       [status, reviewer, now, reason ?? null, expenseId]
     );
@@ -603,50 +710,48 @@ export class SqliteDbService implements IDbService {
         actorId: reviewer, reason: reason ?? 'Manager Review', timestamp: now,
       });
     }
-    this.DB.run('COMMIT');
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
-  // ─── Outbox ─────────────────────────────────────────────────────────────
+  // ─── Outbox Sync ─────────────────────────────────────────────────────────
 
   async getPendingOutbox(): Promise<OutboxItem[]> {
     return querySql(this.DB, "SELECT * FROM outbox WHERE status='pending' ORDER BY created_at ASC").map(r => ({
-      id:          r.id as string,
-      tableName:   r.table_name as string,
-      action:      r.action as 'INSERT' | 'UPDATE' | 'DELETE',
-      payload:     JSON.parse(r.payload as string),
-      createdAt:   r.created_at as string,
-      status:      r.status as 'pending' | 'synced',
-      retryCount:  r.retry_count as number,
+      id: r.id as string,
+      tableName: r.table_name as string,
+      action: r.action as 'INSERT' | 'UPDATE' | 'DELETE',
+      payload: JSON.parse(r.payload as string),
+      createdAt: r.created_at as string,
+      status: r.status as 'pending' | 'synced',
+      retryCount: r.retry_count as number,
     }));
   }
 
   async markOutboxSynced(id: string): Promise<void> {
-    this.DB.run('BEGIN');
-    runSql(this.DB, "UPDATE outbox SET status='synced' WHERE id=?", [id]);
-    this.DB.run('COMMIT');
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite("UPDATE outbox SET status='synced' WHERE id=?", [id]);
+    this.runWrite('COMMIT');
     await this._persist();
   }
 
-  // ─── Private synchronous helpers (called inside BEGIN/COMMIT) ────────────
+  // ─── Private Sync outbox/audit helpers (inserts to transaction queue) ─────
 
-  /** Synchronously queue an outbox row — must be called inside an open transaction */
   private _runQueueOutbox(tableName: string, action: string, payload: Record<string, any>): void {
-    runSql(this.DB, `
+    this.runWrite(`
       INSERT INTO outbox (id,table_name,action,payload,created_at,status,retry_count)
       VALUES (?,?,?,?,?,'pending',0)
     `, [crypto.randomUUID(), tableName, action, JSON.stringify(payload), new Date().toISOString()]);
   }
 
-  /** Synchronously append an audit log row — must be called inside an open transaction */
   private _runAuditLog(e: { entity: string; entityId: string; action: string; actorId: string; reason: string; timestamp: string }): void {
-    runSql(this.DB, `
+    this.runWrite(`
       INSERT INTO audit_logs (id,entity,entity_id,action,actor_id,reason,timestamp)
       VALUES (?,?,?,?,?,?,?)
     `, [crypto.randomUUID(), e.entity, e.entityId, e.action, e.actorId, e.reason, e.timestamp]);
   }
 
-  // ─── Row mappers ────────────────────────────────────────────────────────
+  // ─── Row Mappers ─────────────────────────────────────────────────────────
 
   private _rowToUser(r: Record<string, any>): UserAccount {
     return {
@@ -664,8 +769,7 @@ export class SqliteDbService implements IDbService {
       id: r.id, locationId: r.location_id, deviceId: r.device_id,
       localSeq: r.local_seq as number, amount: r.amount as number, currency: r.currency,
       status: r.status, cashierId: r.cashier_id, createdAt: r.created_at, qrPayload: r.qr_payload,
-      voidReason: r.void_reason ?? undefined, voidedBy: r.voided_by ?? undefined,
-      voidedAt: r.voided_at ?? undefined,
+      voidReason: r.void_reason ?? undefined, voidedBy: r.voided_by ?? undefined, voidedAt: r.voided_at ?? undefined,
     };
   }
 
@@ -675,8 +779,7 @@ export class SqliteDbService implements IDbService {
       locationId: r.location_id, deviceId: r.device_id,
       status: r.status, openingFloat: r.opening_float as number, openedAt: r.opened_at,
       closedAt: r.closed_at ?? undefined, countedCash: r.counted_cash ?? undefined,
-      expectedCash: r.expected_cash ?? undefined, variance: r.variance ?? undefined,
-      notes: r.notes ?? undefined,
+      expectedCash: r.expected_cash ?? undefined, variance: r.variance ?? undefined, notes: r.notes ?? undefined,
     };
   }
 
@@ -691,13 +794,8 @@ export class SqliteDbService implements IDbService {
     };
   }
 
-  // ─── One-time legacy migration ───────────────────────────────────────────
+  // ─── Legacy Migration ────────────────────────────────────────────────────
 
-  /**
-   * Read legacy localStorage JSON blobs, bulk-insert into SQLite,
-   * then delete the old keys. Runs once, guarded by MIGRATION_FLAG.
-   * All inserts use OR IGNORE — safe to re-run.
-   */
   private _migrateFromLocalStorage(): void {
     const keys = {
       TICKETS:  'ticket_pos_tickets',
@@ -715,8 +813,10 @@ export class SqliteDbService implements IDbService {
       } catch (_) {}
     };
 
+    this.runWrite('BEGIN TRANSACTION');
+
     tryMigrate<Ticket>(keys.TICKETS, t => {
-      this.DB.run(`INSERT OR IGNORE INTO tickets
+      this.runWrite(`INSERT OR IGNORE INTO tickets
         (id,location_id,device_id,local_seq,amount,currency,status,cashier_id,created_at,qr_payload)
         VALUES (?,?,?,?,?,?,?,?,?,?)`, [
         t.id, t.locationId, t.deviceId, t.localSeq,
@@ -725,7 +825,7 @@ export class SqliteDbService implements IDbService {
     });
 
     tryMigrate<UserAccount>(keys.USERS, u => {
-      this.DB.run(`INSERT OR IGNORE INTO users
+      this.runWrite(`INSERT OR IGNORE INTO users
         (id,name,email,username,password_hash,password_salt,pin_hash,pin_salt,role,created_at,status)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`, [
         u.id, u.name, u.email ?? null, u.username ?? null,
@@ -735,7 +835,7 @@ export class SqliteDbService implements IDbService {
     });
 
     tryMigrate<Shift>(keys.SHIFTS, s => {
-      this.DB.run(`INSERT OR IGNORE INTO shifts
+      this.runWrite(`INSERT OR IGNORE INTO shifts
         (id,cashier_id,cashier_name,location_id,device_id,status,opening_float,opened_at)
         VALUES (?,?,?,?,?,?,?,?)`, [
         s.id, s.cashierId, s.cashierName, s.locationId, s.deviceId,
@@ -744,7 +844,7 @@ export class SqliteDbService implements IDbService {
     });
 
     tryMigrate<Expense>(keys.EXPENSES, e => {
-      this.DB.run(`INSERT OR IGNORE INTO expenses
+      this.runWrite(`INSERT OR IGNORE INTO expenses
         (id,shift_id,cashier_id,cashier_name,category,amount,status,logged_at)
         VALUES (?,?,?,?,?,?,?,?)`, [
         e.id, e.shiftId, e.cashierId, e.cashierName ?? '',
@@ -752,10 +852,11 @@ export class SqliteDbService implements IDbService {
       ]);
     });
 
+    this.runWrite('COMMIT');
+
     Object.values(keys).forEach(k => { try { localStorage.removeItem(k); } catch (_) {} });
     console.info('[SqliteDbService] Legacy localStorage migration complete.');
 
-    // Persist migrated data immediately
     this._persist().catch(() => {});
   }
 }
