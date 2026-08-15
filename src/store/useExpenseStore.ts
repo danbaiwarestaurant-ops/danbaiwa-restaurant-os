@@ -3,6 +3,7 @@ import { Expense } from '../types/expense';
 import { dbService } from '../services/db/SqliteDbService';
 import { useShiftStore } from './useShiftStore';
 import { useAuthStore } from './useAuthStore';
+import { useSyncStore } from './useSyncStore';
 
 interface ExpenseState {
   expenses: Expense[];
@@ -41,16 +42,25 @@ export const useExpenseStore = create<ExpenseState>((set, get) => ({
 
     await dbService.saveExpense(newExpense);
     await get().loadExpenses();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     return newExpense;
   },
 
   approveExpense: async (expenseId: string, reviewerName: string = 'Manager') => {
     await dbService.updateExpenseStatus(expenseId, 'approved', reviewerName);
     await get().loadExpenses();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
   },
 
   rejectExpense: async (expenseId: string, reviewerName: string = 'Manager', reason: string) => {
     await dbService.updateExpenseStatus(expenseId, 'rejected', reviewerName, reason);
     await get().loadExpenses();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
   },
 }));

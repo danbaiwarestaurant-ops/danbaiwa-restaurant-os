@@ -4,6 +4,7 @@ import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth
 import { dbService } from '../services/db/SqliteDbService';
 import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
+import { useSyncStore } from './useSyncStore';
 
 interface AuthState {
   users: UserAccount[];
@@ -107,6 +108,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await dbService.saveUser(newUser);
     localStorage.setItem('ticket_pos_session_user_id', newUser.id);
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
 
     set({
       activeUser: newUser,
@@ -200,6 +204,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await dbService.updateUser(updatedUser);
     set({ activeUser: updatedUser });
     await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     return true;
   },
 
@@ -231,6 +238,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     };
 
     await dbService.updateUser(updatedUser);
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     set({
       activeUser: updatedUser,
       isAuthenticated: true,
@@ -265,6 +275,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await dbService.saveUser(cashierUser);
     await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     return cashierUser;
   },
 
@@ -284,6 +297,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await dbService.updateUser(updatedUser);
     await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     return true;
   },
 
@@ -308,6 +324,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await dbService.updateUser(updatedAdmin);
     await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     return true;
   },
 

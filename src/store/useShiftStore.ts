@@ -4,6 +4,7 @@ import { dbService } from '../services/db/SqliteDbService';
 import { calculateShiftReconciliation } from '../utils/reconciliation';
 import { useTicketStore } from './useTicketStore';
 import { useAuthStore } from './useAuthStore';
+import { useSyncStore } from './useSyncStore';
 
 interface ShiftState {
   currentShift: Shift | null;
@@ -43,6 +44,9 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
 
     await dbService.saveShift(newShift);
     set({ currentShift: newShift });
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
     return newShift;
   },
 
@@ -63,6 +67,9 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
 
     set({ currentShift: null });
     await get().loadShift();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
 
     return {
       ...shift,

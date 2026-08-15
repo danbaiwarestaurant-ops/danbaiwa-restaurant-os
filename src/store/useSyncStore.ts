@@ -8,6 +8,7 @@ interface SyncStoreState extends SyncState {
   pendingItems: OutboxItem[];
   checkOutbox: () => Promise<void>;
   triggerSyncWorker: () => Promise<void>;
+  startBackgroundLoop: () => void;
 }
 
 /** Helper utility to transform camelCase JavaScript objects into snake_case database rows */
@@ -39,6 +40,9 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       pendingItems: pending,
       isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
     });
+    
+    // Automatically trigger self-contained background polling loop
+    get().startBackgroundLoop();
   },
 
   triggerSyncWorker: async () => {
@@ -93,5 +97,23 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       console.error('[Outbox Sync Worker Exception]:', e.message || e);
       set({ isSyncing: false });
     }
+  },
+
+  startBackgroundLoop: () => {
+    // Avoid double initialization of the background interval timer
+    if ((globalThis as any)._syncStoreInterval) return;
+    
+    (globalThis as any)._syncStoreInterval = setInterval(async () => {
+      const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      set({ isOnline: online });
+
+      if (!online || !isSupabaseConfigured) return;
+
+      // Silently refresh outbox and sync pending rows
+      await get().checkOutbox();
+      if (get().pendingCount > 0 && !get().isSyncing) {
+        await get().triggerSyncWorker();
+      }
+    }, 15000); // Poll every 15 seconds
   },
 }));

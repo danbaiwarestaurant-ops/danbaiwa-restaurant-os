@@ -4,6 +4,7 @@ import { dbService } from '../services/db/SqliteDbService';
 import { generateCompositeKey } from '../utils/compositeKey';
 import { PrintAdapter } from '../services/print/PrintAdapter';
 import { useDeviceStore } from './useDeviceStore';
+import { useSyncStore } from './useSyncStore';
 
 interface TicketState {
   tickets: Ticket[];
@@ -82,6 +83,11 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // STEP 4: Dispatch thermal print (after DB commit — crash-safe)
     const printRes = await PrintAdapter.printTicket(newTicket, config.businessName);
 
+    // Trigger outbox check and immediate cloud sync push
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
+
     return {
       success: true,
       ticket: newTicket,
@@ -92,11 +98,17 @@ export const useTicketStore = create<TicketState>((set, get) => ({
   markCollected: async (ticketId: string) => {
     await dbService.updateTicketStatus(ticketId, 'collected');
     await get().loadTickets();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
   },
 
   voidTicket: async (ticketId: string, reason: string, voidedBy: string) => {
     await dbService.updateTicketStatus(ticketId, 'void', reason, voidedBy);
     await get().loadTickets();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
   },
 
   triggerFlash: (amount: number) => {
