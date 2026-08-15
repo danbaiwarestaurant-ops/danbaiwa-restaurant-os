@@ -3,6 +3,7 @@ import { UserAccount, UserRole } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/SqliteDbService';
 import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase } from '../services/supabase/supabaseClient';
+import { useDeviceStore } from './useDeviceStore';
 
 interface AuthState {
   users: UserAccount[];
@@ -80,7 +81,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
 
     // 2. Perform Supabase Cloud Signup
-    const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin);
+    const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
+    const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin, locationId);
 
     // 3. Generate per-user cryptographic salts
     const passwordSalt = generateSalt();

@@ -27,7 +27,7 @@ export const supabase = createClient(
 /**
  * Real Supabase Cloud Email Authentication Engine
  */
-export async function authenticateAdminWithSupabase(email: string, pin: string) {
+export async function authenticateAdminWithSupabase(email: string, pin: string, locationId?: string) {
   const cleanEmail = email.trim().toLowerCase();
 
   if (!isSupabaseConfigured) {
@@ -69,6 +69,7 @@ export async function authenticateAdminWithSupabase(email: string, pin: string) 
       data: {
         role: 'admin',
         business_name: 'Danbaiwa Restaurant',
+        location_id: locationId || 'LOC01',
       },
     },
   });
