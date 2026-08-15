@@ -148,7 +148,20 @@ export function App() {
     }
   };
 
-  if (isAuthLoaded && !isAuthenticated) {
+  // 1. Loading Guard: Show safe black screen during SQLite/Auth bootstrap
+  if (!isAuthLoaded) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-6 selection:bg-amber-500">
+        <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mb-4" />
+        <div className="text-white font-black text-xs uppercase tracking-widest animate-pulse">
+          INITIALIZING POS TILL...
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Auth Guard: Redirect unauthenticated requests to AuthPage
+  if (!isAuthenticated) {
     return <AuthPage />;
   }
 
