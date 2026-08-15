@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useShiftStore } from '../../store/useShiftStore';
-import { useSyncStore } from '../../store/useSyncStore';
 import { useAuthStore } from '../../store/useAuthStore';
-import { Settings, RefreshCw, LayoutDashboard, DollarSign, Lock, UserCheck, KeyRound, LogOut } from 'lucide-react';
+import { SyncIndicator } from './SyncIndicator';
+import { Settings, LayoutDashboard, DollarSign, Lock, UserCheck, KeyRound, LogOut } from 'lucide-react';
 
 interface HeaderProps {
   onOpenConfig: () => void;
@@ -24,7 +24,6 @@ export const Header: React.FC<HeaderProps> = ({
   const { config } = useDeviceStore();
   const { ticketsTodayCount } = useTicketStore();
   const { currentShift } = useShiftStore();
-  const { pendingCount, isSyncing, triggerSyncWorker } = useSyncStore();
   const { users, activeUser, switchCashierSession, logoutUser } = useAuthStore();
 
   const [isSwitchingCashier, setIsSwitchingCashier] = useState(false);
@@ -102,19 +101,8 @@ export const Header: React.FC<HeaderProps> = ({
           <span>Log Out</span>
         </button>
 
-        {/* Outbox Sync Badge */}
-        <button
-          onClick={() => triggerSyncWorker()}
-          className={`flex items-center gap-1.5 px-3 py-1.5 border text-xs font-black uppercase transition rounded-none ${
-            pendingCount > 0
-              ? 'bg-amber-50 border-amber-400 text-amber-900 hover:bg-amber-100'
-              : 'bg-emerald-50 border-emerald-400 text-emerald-950'
-          }`}
-          title="Click to trigger manual outbox sync"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-amber-600' : ''}`} />
-          <span>{pendingCount > 0 ? `Sync (${pendingCount} pending)` : 'Online • Synced'}</span>
-        </button>
+        {/* Dedicated Cloud Sync Component */}
+        <SyncIndicator />
 
         {/* Shift Badge & Action */}
         <button
