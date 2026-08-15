@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { Expense } from '../types/expense';
-import { dbService } from '../services/db/LocalStorageDbService';
+import { dbService } from '../services/db/SqliteDbService';
 import { useShiftStore } from './useShiftStore';
+import { useAuthStore } from './useAuthStore';
 
 interface ExpenseState {
   expenses: Expense[];
@@ -25,11 +26,12 @@ export const useExpenseStore = create<ExpenseState>((set, get) => ({
 
   logExpense: async (amount: number, category: string, description: string) => {
     const shift = useShiftStore.getState().currentShift;
+    const activeUser = useAuthStore.getState().activeUser;
     const newExpense: Expense = {
       id: crypto.randomUUID(),
-      shiftId: shift?.id || 'GLOBAL_SHIFT',
-      cashierId: shift?.cashierId || 'CASHIER-01',
-      cashierName: shift?.cashierName || 'Cashier',
+      shiftId: shift?.id || '',
+      cashierId: activeUser?.id || shift?.cashierId || '',
+      cashierName: activeUser?.name || shift?.cashierName || 'Cashier',
       amount,
       category,
       description,

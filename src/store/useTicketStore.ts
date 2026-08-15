@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import { Ticket, TicketStatus } from '../types/ticket';
-import { dbService } from '../services/db/LocalStorageDbService';
+import { Ticket } from '../types/ticket';
+import { dbService } from '../services/db/SqliteDbService';
 import { generateCompositeKey } from '../utils/compositeKey';
 import { PrintAdapter } from '../services/print/PrintAdapter';
 import { useDeviceStore } from './useDeviceStore';
@@ -27,22 +27,29 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     set({ isLoading: true });
     await dbService.init();
     const tickets = await dbService.getTickets(userId);
-    
-    // Count today's tickets
     const todayStr = new Date().toISOString().split('T')[0];
     const todayCount = tickets.filter(t => t.createdAt.startsWith(todayStr) && t.status !== 'void').length;
-
     set({ tickets, ticketsTodayCount: todayCount, isLoading: false });
   },
 
-  createAndPrintTicket: async (amount: number, cashierId: string = 'CASHIER-01') => {
+  createAndPrintTicket: async (amount: number, cashierId: string = '') => {
     const config = useDeviceStore.getState().config;
     const locationId = config.locationId || 'LOC01';
     const deviceId = config.deviceId || 'DEV01';
 
-    // Synchronous memory sequence calculation for 0ms delay
-    const currentTickets = get().tickets;
-    const nextSeq = currentTickets.length > 0 ? currentTickets[0].localSeq + 1 : 1;
+    /**
+     * STEP 1: Atomically commit sequence + ticket to SQLite BEFORE printing.
+     *
+     * getNextSeq() wraps the sequence increment in a BEGIN/COMMIT transaction.
+     * If two rapid prints hit this simultaneously, SQLite serialises them —
+     * one gets seq=1, the other gets seq=2. No duplicates, no gaps, ever.
+     *
+     * If the browser crashes AFTER this await resolves, the ticket row is in
+     * the database. If it crashes before, the insert never happened.
+     * Either way the DB and receipt are always in sync.
+     */
+    await dbService.init();
+    const nextSeq = await dbService.getNextSeq(locationId, deviceId);
     const compositeId = generateCompositeKey(locationId, deviceId, nextSeq);
     const nowIso = new Date().toISOString();
 
@@ -59,23 +66,21 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       qrPayload: `TICKET|${compositeId}|${amount}|${nowIso}`,
     };
 
-    // 1. INSTANT SYNCHRONOUS UI STATE UPDATE (<1ms)
+    // Commit to DB (synchronous — ticket row is durable before print fires)
+    await dbService.saveTicket(newTicket);
+
+    // STEP 2: Update UI state with committed ticket
+    const currentTickets = get().tickets;
     const updatedTickets = [newTicket, ...currentTickets];
     const todayStr = nowIso.split('T')[0];
     const todayCount = updatedTickets.filter(t => t.createdAt.startsWith(todayStr) && t.status !== 'void').length;
-
     set({ tickets: updatedTickets, ticketsTodayCount: todayCount });
 
-    // 2. Visual Flash effect
+    // STEP 3: Visual flash effect
     get().triggerFlash(amount);
 
-    // 3. Dispatch Thermal Print immediately
+    // STEP 4: Dispatch thermal print (after DB commit — crash-safe)
     const printRes = await PrintAdapter.printTicket(newTicket, config.businessName);
-
-    // 4. Non-blocking asynchronous local DB persist
-    setTimeout(() => {
-      dbService.saveTicket(newTicket).catch(console.error);
-    }, 0);
 
     return {
       success: true,

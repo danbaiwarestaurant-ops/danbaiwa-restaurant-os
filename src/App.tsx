@@ -1,5 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { supabase, isSupabaseConfigured } from './services/supabase/supabaseClient';
+import React, { useEffect, useState, useRef } from 'react';
 import { useDeviceStore } from './store/useDeviceStore';
 import { useTicketStore } from './store/useTicketStore';
 import { useShiftStore } from './store/useShiftStore';
@@ -27,12 +26,6 @@ import { ManagerDashboard } from './components/manager/ManagerDashboard';
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 
-// Detect if the current URL contains a Supabase password recovery token hash
-function isPasswordRecoveryUrl(): boolean {
-  const hash = window.location.hash;
-  return hash.includes('type=recovery') || hash.includes('type=signup');
-}
-
 export function App() {
   const { loadConfig } = useDeviceStore();
   const { loadTickets, voidTicket } = useTicketStore();
@@ -50,9 +43,6 @@ export function App() {
     openPinModal,
     closePinModal,
   } = useAuthStore();
-
-  // Detect a Supabase password recovery redirect (magic link click)
-  const [isRecoveryMode, setIsRecoveryMode] = useState(() => isPasswordRecoveryUrl());
 
   // Modals state
   const [isConfigOpen, setIsConfigOpen] = useState(false);
@@ -81,21 +71,6 @@ export function App() {
     setToastMsg(msg);
     setToastType('error');
   };
-
-  // Listen for Supabase PASSWORD_RECOVERY events in case hash arrives asynchronously
-  useEffect(() => {
-    if (!isSupabaseConfigured) return;
-    const { data: listener } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'PASSWORD_RECOVERY') {
-        setIsRecoveryMode(true);
-      }
-      // Once the user has completed recovery and signed in normally, clear recovery mode
-      if (event === 'SIGNED_IN' && !isPasswordRecoveryUrl()) {
-        setIsRecoveryMode(false);
-      }
-    });
-    return () => listener.subscription.unsubscribe();
-  }, []);
 
   useEffect(() => {
     loadConfig();
@@ -173,9 +148,8 @@ export function App() {
     }
   };
 
-  // Show AuthPage when user is unauthenticated OR when arriving via Supabase reset email link
-  if (isAuthLoaded && (!isAuthenticated || isRecoveryMode)) {
-    return <AuthPage initialMode={isRecoveryMode ? 'recovery_complete' : 'login'} />;
+  if (isAuthLoaded && !isAuthenticated) {
+    return <AuthPage />;
   }
 
   return (

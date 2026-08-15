@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { SyncState, OutboxItem } from '../types/sync';
-import { dbService } from '../services/db/LocalStorageDbService';
+import { dbService } from '../services/db/SqliteDbService';
 
 interface SyncStoreState extends SyncState {
   pendingItems: OutboxItem[];

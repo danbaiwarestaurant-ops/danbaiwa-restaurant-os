@@ -10,6 +10,17 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  // Prevent Vite from pre-bundling sql.js — it ships its own WASM loader
+  optimizeDeps: {
+    exclude: ['sql.js'],
+  },
+  // Required headers for SharedArrayBuffer (used internally by sql.js WASM)
+  server: {
+    headers: {
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Opener-Policy': 'same-origin',
+    },
+  },
   test: {
     globals: true,
     environment: 'node',

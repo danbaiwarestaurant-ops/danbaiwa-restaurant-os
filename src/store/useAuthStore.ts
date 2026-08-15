@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { UserAccount, UserRole } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
-import { dbService } from '../services/db/LocalStorageDbService';
+import { dbService } from '../services/db/SqliteDbService';
 import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase } from '../services/supabase/supabaseClient';
 
 interface AuthState {

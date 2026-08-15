@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { DeviceConfig } from '../types/config';
-import { dbService } from '../services/db/LocalStorageDbService';
+import { dbService } from '../services/db/SqliteDbService';
 
 interface DeviceState {
   config: DeviceConfig;
