@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { UserAccount, UserRole } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/SqliteDbService';
-import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase } from '../services/supabase/supabaseClient';
+import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
 
@@ -79,6 +79,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const existing = await dbService.getUserByEmail(cleanEmail);
     if (existing) {
       throw new Error(`An account with email "${cleanEmail}" already exists. Please log in instead.`);
+    }
+
+    // 2. Prevent cloud-side duplicate signup by querying the synced users table
+    if (isSupabaseConfigured) {
+      const { data: cloudUser } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', cleanEmail)
+        .maybeSingle();
+
+      if (cloudUser) {
+        throw new Error(`An account with email "${cleanEmail}" is already registered. Please log in instead.`);
+      }
     }
 
     // 2. Perform Supabase Cloud Signup
@@ -212,14 +225,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   updatePasswordAfterRecovery: async (email: string, newPassword: string, newPin: string) => {
     const cleanEmail = email.trim().toLowerCase();
-    const user = await dbService.getUserByEmail(cleanEmail);
-    if (!user) return false;
 
     // 1. Update Supabase Cloud password
-    try {
-      await updateSupabaseUserPassword(newPassword);
-    } catch (e) {
-      console.warn('Supabase password update warning:', e);
+    if (isSupabaseConfigured) {
+      try {
+        await updateSupabaseUserPassword(newPassword);
+      } catch (e: any) {
+        throw new Error(`Supabase password update failed: ${e.message}`);
+      }
     }
 
     // 2. Generate new salted password and PIN hashes for local SQLite
@@ -229,6 +242,47 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(newPin, pinSalt);
 
+    // 3. Retrieve user profile (locally or self-heal by querying Supabase synced users profile)
+    let user = await dbService.getUserByEmail(cleanEmail);
+
+    if (!user && isSupabaseConfigured) {
+      const { data: cloudUser } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', cleanEmail)
+        .maybeSingle();
+
+      if (cloudUser) {
+        user = {
+          id: cloudUser.id,
+          name: cloudUser.name || 'Admin',
+          email: cleanEmail,
+          username: cleanEmail,
+          role: cloudUser.role || 'admin',
+          createdAt: cloudUser.created_at || new Date().toISOString(),
+          status: cloudUser.status || 'active',
+          pinHash: '',
+          pinSalt: '',
+        };
+      }
+    }
+
+    // Fallback: Rebuild from current active session metadata if still missing
+    if (!user) {
+      const sessionUser = (await supabase.auth.getUser()).data.user;
+      user = {
+        id: sessionUser?.id || crypto.randomUUID(),
+        name: sessionUser?.user_metadata?.name || 'Admin',
+        email: cleanEmail,
+        username: cleanEmail,
+        role: 'admin',
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        pinHash: '',
+        pinSalt: '',
+      };
+    }
+
     const updatedUser: UserAccount = {
       ...user,
       passwordHash,
@@ -237,7 +291,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       pinSalt,
     };
 
-    await dbService.updateUser(updatedUser);
+    // Save or update locally depending on presence
+    const localCheck = await dbService.getUserByEmail(cleanEmail);
+    if (localCheck) {
+      await dbService.updateUser(updatedUser);
+    } else {
+      await dbService.saveUser(updatedUser);
+    }
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
