@@ -149,10 +149,20 @@ type SqlJsDatabase = import('sql.js').Database;
 
 let _sqlJsModule: any = null;
 
-/** Load sql.js WASM or fallback to JS in Node test context */
 async function loadSqlJs(): Promise<any> {
   if (_sqlJsModule) return _sqlJsModule;
-  const initSqlJs = (await import('sql.js')).default;
+  const sqlModule = await import('sql.js');
+  
+  // Resolve wrapper differences across Vite bundles vs Node environment
+  const initSqlJs = (typeof sqlModule === 'function' ? sqlModule : null) ||
+                    (sqlModule as any).default ||
+                    (sqlModule as any).initSqlJs ||
+                    sqlModule;
+
+  if (typeof initSqlJs !== 'function') {
+    throw new Error('SqliteDbService: initSqlJs is not a function. Resolved module contents: ' + Object.keys(sqlModule).join(', '));
+  }
+
   const isNode = typeof window === 'undefined';
   _sqlJsModule = isNode
     ? await initSqlJs()
