@@ -2,16 +2,120 @@ import { create } from 'zustand';
 import { UserAccount, UserRole } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/SqliteDbService';
-import { authenticateAdminWithSupabase, updateSupabaseUserPassword, supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
+import { authenticateAdminWithSupabase, updateSupabaseUserPassword, deriveSupabasePassword, supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
+import {
+  LoginFailure,
+  LoginResult,
+  buildLoginFailure,
+  hasWebCrypto,
+  isPinShaped,
+} from '../services/auth/loginErrors';
+
+const MAX_FAILED_ATTEMPTS = 3;
+const LOCKOUT_MS = 30_000;
+
+/**
+ * Registers a failed attempt and returns how many are left before the lockout kicks in,
+ * so the message can say exactly where the user stands.
+ */
+function registerFailedAttempt(get: () => AuthState, set: (partial: Partial<AuthState>) => void): number {
+  const fails = get().failedAttempts + 1;
+  const lockoutUntil = fails >= MAX_FAILED_ATTEMPTS ? Date.now() + LOCKOUT_MS : null;
+  set({ failedAttempts: fails, lockoutUntil });
+  return Math.max(0, MAX_FAILED_ATTEMPTS - fails);
+}
+
+/**
+ * Signing in on a machine that has never held this account.
+ *
+ * Without this the till is a dead end: a replacement machine has no local user row, so
+ * the login is rejected outright and the cloud restore — which only ever runs *after* a
+ * successful login — can never fire. The cloud is the authority on identity here, so we
+ * authenticate against it first and let a successful sign-in pull the account down.
+ */
+async function adoptAccountFromCloud(
+  cleanEmail: string,
+  secret: string
+): Promise<{ ok: true; user: UserAccount; authUserId: string; restored: boolean } | LoginFailure> {
+  if (!isSupabaseConfigured) {
+    return buildLoginFailure('unknown_account_local_only', { email: cleanEmail });
+  }
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return buildLoginFailure('unknown_account_offline', { email: cleanEmail });
+  }
+
+  // Deliberately NOT authenticateAdminWithSupabase(): that helper signs the user UP when
+  // sign-in fails, which here would mint a brand-new cloud account out of a typo'd email.
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: cleanEmail,
+    password: deriveSupabasePassword(secret),
+  });
+
+  if (error || !data?.user) {
+    const raw = (error?.message || '').toLowerCase();
+    if (raw.includes('invalid login credentials') || raw.includes('invalid credentials')) {
+      return buildLoginFailure('cloud_credentials_rejected', { email: cleanEmail });
+    }
+    return buildLoginFailure('cloud_lookup_failed', {
+      email: cleanEmail,
+      detail: error?.message || 'no session returned',
+    });
+  }
+
+  // Authenticated — pull this account's newest snapshot down onto the machine.
+  const restore = await dbService.restoreFromCloud();
+  let user = await dbService.getUserByEmail(cleanEmail);
+
+  // No snapshot, or a snapshot predating this account: fall back to the synced users
+  // row, which RLS always lets an account read for itself (id = auth.uid()).
+  if (!user) {
+    const { data: row } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', data.user.id)
+      .maybeSingle();
+
+    if (row?.pin_hash && row?.pin_salt) {
+      user = {
+        id: row.id,
+        name: row.name || 'Admin',
+        email: row.email || cleanEmail,
+        username: row.username || cleanEmail,
+        passwordHash: row.password_hash || undefined,
+        passwordSalt: row.password_salt || undefined,
+        pinHash: row.pin_hash,
+        pinSalt: row.pin_salt,
+        recoveryKeyHash: row.recovery_key_hash || undefined,
+        recoveryKeySalt: row.recovery_key_salt || undefined,
+        role: row.role || 'cashier',
+        createdAt: row.created_at || new Date().toISOString(),
+        status: row.status || 'active',
+      };
+      await dbService.saveUser(user);
+    }
+  }
+
+  if (!user) {
+    return buildLoginFailure('cloud_profile_missing', {
+      email: cleanEmail,
+      detail: restore.reason,
+    });
+  }
+
+  return { ok: true, user, authUserId: data.user.id, restored: Boolean(restore.restored) };
+}
 
 interface AuthState {
   users: UserAccount[];
   activeUser: UserAccount | null;
   isAuthenticated: boolean;
   isLoaded: boolean;
-  
+  // True once at least one account has ever been created on this device — gates
+  // public self-registration to true first-launch setup only.
+  hasAnyUsers: boolean;
+
   // Rate-limiting & Brute-force protection
   failedAttempts: number;
   lockoutUntil: number | null; // Timestamp in ms
@@ -22,7 +126,7 @@ interface AuthState {
 
   loadUsers: () => Promise<void>;
   registerUser: (name: string, email: string, password: string, pin: string, role?: UserRole) => Promise<UserAccount>;
-  loginUser: (email: string, passwordOrPin: string) => Promise<boolean>;
+  loginUser: (email: string, passwordOrPin: string) => Promise<LoginResult>;
   logoutUser: () => Promise<void>;
   
   updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
@@ -43,6 +147,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   activeUser: null,
   isAuthenticated: false,
   isLoaded: false,
+  hasAnyUsers: true,
 
   failedAttempts: 0,
   lockoutUntil: null,
@@ -69,12 +174,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       activeUser,
       isAuthenticated,
       isLoaded: true,
+      hasAnyUsers: users.length > 0,
     });
   },
 
   registerUser: async (name: string, email: string, password: string, pin: string, role: UserRole = 'admin') => {
+    // Public self-registration is only allowed for true first-launch setup — once
+    // this device has any account at all, further accounts must be created by an
+    // already-logged-in admin (see createStaffCashier).
+    if (get().hasAnyUsers) {
+      throw new Error('This till already has an account. Please log in, or ask an admin to create your account.');
+    }
+
     const cleanEmail = email.trim().toLowerCase();
-    
+
     // 1. Check SQLite local database first
     const existing = await dbService.getUserByEmail(cleanEmail);
     if (existing) {
@@ -128,6 +241,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({
       activeUser: newUser,
       isAuthenticated: true,
+      hasAnyUsers: true,
       failedAttempts: 0,
       lockoutUntil: null,
     });
@@ -136,21 +250,78 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return newUser;
   },
 
-  loginUser: async (email: string, passwordOrPin: string) => {
+  loginUser: async (email: string, passwordOrPin: string): Promise<LoginResult> => {
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Every branch below returns one specific reason rather than a shared "invalid
+    // details" — see services/auth/loginErrors.ts for the full vocabulary.
+    if (!cleanEmail) return buildLoginFailure('missing_email');
+    if (!passwordOrPin) return buildLoginFailure('missing_secret');
+
     const lockout = get().lockoutUntil;
     if (lockout && Date.now() < lockout) {
-      const remainingSeconds = Math.ceil((lockout - Date.now()) / 1000);
-      throw new Error(`Security Lockout: Too many failed attempts. Try again in ${remainingSeconds}s.`);
+      return buildLoginFailure('locked_out', {
+        retryAfterSeconds: Math.ceil((lockout - Date.now()) / 1000),
+      });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
+    // Served over plain http:// on a LAN address, crypto.subtle is simply absent and
+    // every hash comparison throws — which used to surface as "login failed".
+    if (!hasWebCrypto()) return buildLoginFailure('crypto_unavailable');
+
     const user = await dbService.getUserByEmail(cleanEmail);
-    
+
+    // Account unknown to this machine — try to bring it down from the cloud instead of
+    // pretending the credentials were wrong.
     if (!user) {
-      const fails = get().failedAttempts + 1;
-      const lockoutTime = fails >= 3 ? Date.now() + 30000 : null;
-      set({ failedAttempts: fails, lockoutUntil: lockoutTime });
-      return false;
+      const adopted = await adoptAccountFromCloud(cleanEmail, passwordOrPin);
+      if (!adopted.ok) {
+        // Only a rejected credential counts toward the lockout; being offline or
+        // hitting an unconfigured cloud is not a guessing attempt.
+        if (adopted.code === 'cloud_credentials_rejected') {
+          const attemptsRemaining = registerFailedAttempt(get, set);
+          return { ...adopted, attemptsRemaining };
+        }
+        return adopted;
+      }
+
+      if (adopted.user.status !== 'active') {
+        return buildLoginFailure('account_disabled', { email: cleanEmail });
+      }
+
+      // The cloud already authenticated this exact identity, so no second local check is
+      // needed when the restored profile is that same account. If the ids differ, the
+      // snapshot's record is a different person — fall back to verifying the secret.
+      if (adopted.user.id !== adopted.authUserId) {
+        const matches =
+          (await verifySecret(passwordOrPin, adopted.user.pinHash, adopted.user.pinSalt)) ||
+          (adopted.user.passwordHash && adopted.user.passwordSalt
+            ? await verifySecret(passwordOrPin, adopted.user.passwordHash, adopted.user.passwordSalt)
+            : false);
+
+        if (!matches) {
+          const attemptsRemaining = registerFailedAttempt(get, set);
+          return buildLoginFailure(isPinShaped(passwordOrPin) ? 'wrong_pin' : 'wrong_password', {
+            email: cleanEmail,
+            attemptsRemaining,
+          });
+        }
+      }
+
+      localStorage.setItem('ticket_pos_session_user_id', adopted.user.id);
+      set({
+        activeUser: adopted.user,
+        isAuthenticated: true,
+        failedAttempts: 0,
+        lockoutUntil: null,
+      });
+      await get().loadUsers();
+      await useSyncStore.getState().checkOutbox();
+      return { ok: true, restoredFromCloud: adopted.restored };
+    }
+
+    if (user.status !== 'active') {
+      return buildLoginFailure('account_disabled', { email: cleanEmail });
     }
 
     const isPasswordValid = user.passwordHash && user.passwordSalt
@@ -167,14 +338,39 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         failedAttempts: 0,
         lockoutUntil: null,
       });
-      return true;
+
+      // Logging out destroys the cloud (Supabase) session, and day-to-day PIN login
+      // never re-establishes one — silently leaving cloud sync (and cloud backups)
+      // permanently broken after the very first logout. Re-authenticate to the cloud
+      // in the background whenever we can (admin + verified via PIN, since that's the
+      // same secret their cloud account password is derived from). Never let this
+      // block or fail the actual local login — this is best-effort healing only.
+      if (isSupabaseConfigured && user.role === 'admin' && isPinValid) {
+        const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
+        authenticateAdminWithSupabase(cleanEmail, passwordOrPin, locationId)
+          .then(async () => {
+            // A cloud session now exists, so a fresh/wiped device can pull its data
+            // back down. restoreFromCloud() no-ops when local records already exist.
+            const result = await dbService.restoreFromCloud();
+            if (result.restored) {
+              await get().loadUsers();
+              await useSyncStore.getState().checkOutbox();
+            }
+          })
+          .catch((e) => {
+            console.warn('[Auth] Background cloud session refresh failed (will retry next login):', e);
+          });
+      }
+      return { ok: true };
     }
 
-    // Rate-limiting calculation
-    const fails = get().failedAttempts + 1;
-    const lockoutTime = fails >= 3 ? Date.now() + 30000 : null;
-    set({ failedAttempts: fails, lockoutUntil: lockoutTime });
-    return false;
+    // The account exists here and is active, so the only thing left that can be wrong is
+    // the secret itself — name which one they typed rather than listing all three.
+    const attemptsRemaining = registerFailedAttempt(get, set);
+    return buildLoginFailure(isPinShaped(passwordOrPin) ? 'wrong_pin' : 'wrong_password', {
+      email: cleanEmail,
+      attemptsRemaining,
+    });
   },
 
   logoutUser: async () => {
@@ -214,6 +410,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       pinSalt,
     };
 
+    // The cloud password is derived from the PIN, so changing the PIN locally without
+    // updating it in Supabase would silently break cloud sign-in (and therefore sync
+    // and backups) on the next login.
+    if (newPin && newPin.length >= 4 && isSupabaseConfigured && user.role === 'admin') {
+      try {
+        await updateSupabaseUserPassword(deriveSupabasePassword(newPin));
+      } catch (e: any) {
+        throw new Error(
+          `PIN not changed: the cloud account could not be updated (${e.message}). ` +
+          `Check your internet connection and try again.`
+        );
+      }
+    }
+
     await dbService.updateUser(updatedUser);
     set({ activeUser: updatedUser });
     await get().loadUsers();
@@ -224,10 +434,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   updatePasswordAfterRecovery: async (email: string, newPassword: string, newPin: string) => {
-    const cleanEmail = email.trim().toLowerCase();
+    let cleanEmail = email.trim().toLowerCase();
 
-    // 1. Update Supabase Cloud password
+    // 1. Update Supabase Cloud password. The recovery target MUST be derived from the
+    // authenticated recovery session itself, never from the (user-editable) email field
+    // the caller passes in — otherwise anyone with a valid recovery link for their own
+    // account could type in a different email and hijack that account's local login.
     if (isSupabaseConfigured) {
+      const sessionUser = (await supabase.auth.getUser()).data.user;
+      if (!sessionUser?.email) {
+        throw new Error('No authenticated recovery session found. Please use the reset link from your email again.');
+      }
+      cleanEmail = sessionUser.email.trim().toLowerCase();
+
       try {
         await updateSupabaseUserPassword(newPassword);
       } catch (e: any) {
@@ -258,7 +477,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           name: cloudUser.name || 'Admin',
           email: cleanEmail,
           username: cleanEmail,
-          role: cloudUser.role || 'admin',
+          role: cloudUser.role || 'cashier',
           createdAt: cloudUser.created_at || new Date().toISOString(),
           status: cloudUser.status || 'active',
           pinHash: '',
@@ -267,20 +486,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     }
 
-    // Fallback: Rebuild from current active session metadata if still missing
+    // No local or cloud profile exists for this authenticated identity — refuse to
+    // fabricate one rather than minting an unverified admin account from nothing.
     if (!user) {
-      const sessionUser = (await supabase.auth.getUser()).data.user;
-      user = {
-        id: sessionUser?.id || crypto.randomUUID(),
-        name: sessionUser?.user_metadata?.name || 'Admin',
-        email: cleanEmail,
-        username: cleanEmail,
-        role: 'admin',
-        createdAt: new Date().toISOString(),
-        status: 'active',
-        pinHash: '',
-        pinSalt: '',
-      };
+      throw new Error(`No account profile found for "${cleanEmail}". Please contact an administrator.`);
     }
 
     const updatedUser: UserAccount = {

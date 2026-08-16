@@ -254,6 +254,20 @@ export class LocalStorageDbService implements IDbService {
     }
   }
 
+  async markOutboxAttemptFailed(id: string, retryCount: number): Promise<void> {
+    const MAX_OUTBOX_RETRIES = 8;
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
+    const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
+    const index = outbox.findIndex(o => o.id === id);
+    if (index !== -1) {
+      outbox[index].retryCount = retryCount + 1;
+      if (outbox[index].retryCount >= MAX_OUTBOX_RETRIES) {
+        outbox[index].status = 'failed';
+      }
+      setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
+    }
+  }
+
   private async queueOutbox(tableName: string, action: 'INSERT' | 'UPDATE' | 'DELETE', payload: Record<string, any>): Promise<void> {
     const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];

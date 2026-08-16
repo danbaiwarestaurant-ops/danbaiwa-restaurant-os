@@ -24,6 +24,14 @@ export const supabase = createClient(
   }
 );
 
+// The admin's cloud (Supabase Auth) password is always derived from their PIN,
+// never entered separately. Shared here so every call site derives it identically —
+// authenticateAdminWithSupabase() and any code that changes the PIN and must keep
+// the cloud password in lockstep with it.
+export function deriveSupabasePassword(pin: string): string {
+  return `Danbaiwa_POS_#2026_${pin}_Secret`;
+}
+
 /**
  * Real Supabase Cloud Email Authentication Engine
  */
@@ -44,7 +52,7 @@ export async function authenticateAdminWithSupabase(email: string, pin: string, 
     throw new Error('Internet connection required for initial Supabase Cloud Admin activation.');
   }
 
-  const derivedPassword = `Danbaiwa_POS_#2026_${pin}_Secret`;
+  const derivedPassword = deriveSupabasePassword(pin);
 
   // 1. Attempt Supabase Auth Sign In first
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({

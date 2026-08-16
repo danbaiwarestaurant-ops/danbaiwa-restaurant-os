@@ -10,12 +10,11 @@ export const AuthPage: React.FC = () => {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginSecret, setLoginSecret] = useState('');
   
-  // Register State
+  // Register State (first-launch primary Admin setup only — see hasAnyUsers gating below)
   const [regName, setRegName] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
   const [regPin, setRegPin] = useState('');
-  const [regRole, setRegRole] = useState<'admin' | 'cashier'>('admin');
 
   // Supabase Online Email Reset & Recovery State
   const [resetEmail, setResetEmail] = useState('');
@@ -23,11 +22,15 @@ export const AuthPage: React.FC = () => {
   const [newRecoveryPin, setNewRecoveryPin] = useState('');
   const [resetSuccessMsg, setResetSuccessMsg] = useState<string | null>(null);
   
-  // UI State
-  const [error, setError] = useState<string | null>(null);
+  // UI State — an error is a specific reason plus the "what to do about it" line that
+  // goes with it, so the banner never degrades to a bare "login failed".
+  const [error, setErrorState] = useState<{ message: string; hint?: string | null } | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const { loginUser, registerUser, updatePasswordAfterRecovery, lockoutUntil, failedAttempts } = useAuthStore();
+  const clearError = () => setErrorState(null);
+  const showError = (message: string, hint?: string | null) => setErrorState({ message, hint });
+
+  const { loginUser, registerUser, updatePasswordAfterRecovery, lockoutUntil, failedAttempts, hasAnyUsers } = useAuthStore();
 
   // Check if user arrives via Supabase Email Reset Link (#type=recovery or PASSWORD_RECOVERY event)
   useEffect(() => {
@@ -47,31 +50,36 @@ export const AuthPage: React.FC = () => {
     }
   }, []);
 
+  // Account creation is only for first-launch setup. If this device already has an
+  // account, never leave the visitor sitting on the registration form.
+  useEffect(() => {
+    if (hasAnyUsers && mode === 'register') {
+      setMode('login');
+    }
+  }, [hasAnyUsers, mode]);
+
   const isLockedOut = lockoutUntil ? Date.now() < lockoutUntil : false;
   const remainingLockoutSec = lockoutUntil ? Math.ceil((lockoutUntil - Date.now()) / 1000) : 0;
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
-
-    if (isLockedOut) {
-      setError(`Security Lockout Active: Too many failed attempts. Try again in ${remainingLockoutSec}s.`);
-      return;
-    }
-
-    if (!loginEmail.trim() || !loginSecret) {
-      setError('Please enter your email and password or PIN');
-      return;
-    }
+    clearError();
+    setResetSuccessMsg(null);
 
     try {
       setLoading(true);
-      const success = await loginUser(loginEmail, loginSecret);
-      if (!success) {
-        setError('Invalid email address, password, or PIN.');
+      // The store owns every failure reason (empty field, lockout, unknown account,
+      // wrong PIN, cloud restore problems) so the banner can state the actual one.
+      const result = await loginUser(loginEmail, loginSecret);
+      if (!result.ok) {
+        showError(result.message, result.hint);
+        return;
+      }
+      if (result.restoredFromCloud) {
+        setResetSuccessMsg('Account restored to this till from the cloud backup. Signing in...');
       }
     } catch (err: any) {
-      setError(err?.message || 'Login failed.');
+      showError(err?.message || 'Login failed for an unexpected reason.', 'Check the browser console for details.');
     } finally {
       setLoading(false);
     }
@@ -79,33 +87,33 @@ export const AuthPage: React.FC = () => {
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    clearError();
 
     if (!regName.trim() || !regEmail.trim() || !regPassword || !regPin) {
-      setError('Please fill in all registration fields');
+      showError('Please fill in all registration fields');
       return;
     }
 
     if (!regEmail.includes('@') || !regEmail.includes('.')) {
-      setError('Please enter a valid email address');
+      showError('Please enter a valid email address');
       return;
     }
 
     if (regPassword.length < 6) {
-      setError('Password must be at least 6 characters long');
+      showError('Password must be at least 6 characters long');
       return;
     }
 
     if (regPin.length < 4 || regPin.length > 8) {
-      setError('PIN must be 4 to 8 numeric digits');
+      showError('PIN must be 4 to 8 numeric digits');
       return;
     }
 
     try {
       setLoading(true);
-      await registerUser(regName, regEmail, regPassword, regPin, regRole);
+      await registerUser(regName, regEmail, regPassword, regPin);
     } catch (err: any) {
-      setError(err?.message || 'Registration failed.');
+      showError(err?.message || 'Registration failed.');
     } finally {
       setLoading(false);
     }
@@ -113,17 +121,17 @@ export const AuthPage: React.FC = () => {
 
   const handleOnlineSupabaseReset = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    clearError();
     setResetSuccessMsg(null);
 
     const cleanEmail = resetEmail.trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@')) {
-      setError('Please enter a valid email address');
+      showError('Please enter a valid email address');
       return;
     }
 
     if (!isSupabaseConfigured) {
-      setError('Supabase is not configured yet. Please paste your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY into your .env file to enable live cloud email resets.');
+      showError('Supabase is not configured yet. Please paste your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY into your .env file to enable live cloud email resets.');
       return;
     }
 
@@ -143,7 +151,7 @@ export const AuthPage: React.FC = () => {
 
       setResetSuccessMsg(`Password reset instructions sent to ${cleanEmail}. Please check your inbox.`);
     } catch (err: any) {
-      setError(err?.message || 'Failed to send reset email.');
+      showError(err?.message || 'Failed to send reset email.');
     } finally {
       setLoading(false);
     }
@@ -151,10 +159,10 @@ export const AuthPage: React.FC = () => {
 
   const handleCompletePasswordRecovery = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    clearError();
 
     if (!resetEmail || !newRecoveryPassword || newRecoveryPin.length < 4) {
-      setError('Please fill in all recovery password fields');
+      showError('Please fill in all recovery password fields');
       return;
     }
 
@@ -163,7 +171,7 @@ export const AuthPage: React.FC = () => {
       await updatePasswordAfterRecovery(resetEmail, newRecoveryPassword, newRecoveryPin);
       setResetSuccessMsg('Account Password & PIN updated successfully! Logging in...');
     } catch (err: any) {
-      setError(err?.message || 'Failed to update recovery password.');
+      showError(err?.message || 'Failed to update recovery password.');
     } finally {
       setLoading(false);
     }
@@ -187,37 +195,39 @@ export const AuthPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Tab Toggle */}
+        {/* Tab Toggle — "Create Account" only ever appears for true first-launch setup */}
         {mode === 'login' || mode === 'register' ? (
-          <div className="grid grid-cols-2 border-2 border-slate-300 rounded-none overflow-hidden">
-            <button
-              type="button"
-              onClick={() => { setMode('login'); setError(null); }}
-              className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
-                mode === 'login'
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-            >
-              Log In
-            </button>
-            <button
-              type="button"
-              onClick={() => { setMode('register'); setError(null); }}
-              className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
-                mode === 'register'
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-            >
-              Create Account
-            </button>
-          </div>
+          hasAnyUsers ? null : (
+            <div className="grid grid-cols-2 border-2 border-slate-300 rounded-none overflow-hidden">
+              <button
+                type="button"
+                onClick={() => { setMode('login'); clearError(); }}
+                className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
+                  mode === 'login'
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                Log In
+              </button>
+              <button
+                type="button"
+                onClick={() => { setMode('register'); clearError(); }}
+                className={`py-2.5 text-xs font-black uppercase tracking-wider transition ${
+                  mode === 'register'
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                Create Account
+              </button>
+            </div>
+          )
         ) : (
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => { setMode('login'); setError(null); }}
+              onClick={() => { setMode('login'); clearError(); }}
               className="text-xs font-bold uppercase text-slate-600 hover:text-slate-900 flex items-center gap-1 border border-slate-300 px-3 py-1.5 rounded-none"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
@@ -237,11 +247,16 @@ export const AuthPage: React.FC = () => {
           </div>
         )}
 
-        {/* Error Display */}
+        {/* Error Display — one specific reason, plus the concrete next step */}
         {error && (
-          <div className="p-3 bg-rose-50 border-2 border-rose-400 text-rose-950 text-xs font-bold uppercase rounded-none flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
-            <span>{error}</span>
+          <div className="p-3 bg-rose-50 border-2 border-rose-400 text-rose-950 text-xs font-bold uppercase rounded-none flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div>{error.message}</div>
+              {error.hint && (
+                <div className="text-[11px] font-semibold normal-case text-rose-800">{error.hint}</div>
+              )}
+            </div>
           </div>
         )}
 
@@ -280,7 +295,7 @@ export const AuthPage: React.FC = () => {
                 </label>
                 <button
                   type="button"
-                  onClick={() => { setMode('forgot'); setError(null); }}
+                  onClick={() => { setMode('forgot'); clearError(); }}
                   className="text-[11px] font-bold text-amber-600 hover:text-amber-800 uppercase"
                 >
                   Forgot Password?
@@ -308,9 +323,13 @@ export const AuthPage: React.FC = () => {
           </form>
         )}
 
-        {/* Registration Form */}
-        {mode === 'register' && (
+        {/* Registration Form — first-launch primary Admin setup only */}
+        {mode === 'register' && !hasAnyUsers && (
           <form onSubmit={handleRegisterSubmit} className="space-y-3">
+            <div className="p-3 bg-slate-50 border border-slate-300 text-slate-700 text-[11px] font-bold uppercase rounded-none">
+              First-time setup — this creates the primary Admin account for this till.
+              Add staff cashier accounts later from the Admin dashboard.
+            </div>
             <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
                 Full Name
@@ -368,20 +387,6 @@ export const AuthPage: React.FC = () => {
                   required
                 />
               </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-                Account Role
-              </label>
-              <select
-                value={regRole}
-                onChange={e => setRegRole(e.target.value as 'admin' | 'cashier')}
-                className="w-full p-2.5 border-2 border-slate-300 rounded-none text-xs font-bold text-slate-900 bg-white"
-              >
-                <option value="admin">Primary Admin / Manager</option>
-                <option value="cashier">Staff Cashier</option>
-              </select>
             </div>
 
             <button
@@ -450,9 +455,10 @@ export const AuthPage: React.FC = () => {
               <input
                 type="email"
                 value={resetEmail}
-                onChange={e => setResetEmail(e.target.value)}
+                readOnly
                 placeholder="registered@danbaiwarestaurant.com"
-                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 bg-slate-100"
+                className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 bg-slate-100 cursor-not-allowed"
+                title="This is determined by the authenticated reset link and cannot be changed here."
                 required
               />
             </div>

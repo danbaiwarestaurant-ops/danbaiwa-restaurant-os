@@ -61,28 +61,34 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
 
       for (const item of items) {
-        // Prepare payload with camelCase -> snake_case conversion
-        const supabasePayload = toSnakeCase(item.payload);
+        try {
+          // Prepare payload with camelCase -> snake_case conversion
+          const supabasePayload = toSnakeCase(item.payload);
 
-        // Inject location_id scope for users table to satisfy RLS policies (cashiers list)
-        if (item.tableName === 'users') {
-          supabasePayload.location_id = locationId;
+          // Inject location_id scope for users table to satisfy RLS policies (cashiers list)
+          if (item.tableName === 'users') {
+            supabasePayload.location_id = locationId;
+          }
+
+          // Perform real cloud upsert using Client UUID primary key
+          const { error } = await supabase
+            .from(item.tableName)
+            .upsert(supabasePayload, { onConflict: 'id' });
+
+          if (error) throw new Error(error.message);
+
+          // Mark local item as successfully synced
+          await dbService.markOutboxSynced(item.id);
+        } catch (itemError: any) {
+          // One rejected record (bad RLS scope, stale data, etc.) must never block
+          // every other queued ticket/shift/expense stuck behind it in the batch.
+          // Track attempts per item and park it after repeated failures instead.
+          console.error(
+            `[Sync Store] Sync failed for ${item.tableName} record ${item.id} (attempt ${item.retryCount + 1}):`,
+            itemError.message || itemError
+          );
+          await dbService.markOutboxAttemptFailed(item.id, item.retryCount);
         }
-
-        // Perform real cloud upsert using Client UUID primary key
-        const { error } = await supabase
-          .from(item.tableName)
-          .upsert(supabasePayload, { onConflict: 'id' });
-
-        if (error) {
-          // Check for RLS scope violation or permission error
-          console.error(`[Sync Store] Sync failed for ${item.tableName} record ${item.id}:`, error.message);
-          // Stop worker on failure to prevent transaction ordering issues
-          throw new Error(`Cloud Sync Blocked: ${error.message}`);
-        }
-
-        // Mark local item as successfully synced
-        await dbService.markOutboxSynced(item.id);
       }
 
       // Re-fetch remaining outbox queue size

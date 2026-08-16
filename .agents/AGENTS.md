@@ -22,3 +22,8 @@
 
 ## 5. MANDATORY DEEP END-TO-END FUNCTIONAL TESTING RULE
 - **Complete End-to-End Life-Cycle Verification**: When testing a feature or bug fix, verifying UI rendering or page navigation alone is NOT sufficient. You MUST verify the complete end-to-end functional lifecycle down to the final target outcome (e.g. for password/PIN resets: verify credential update in database, verify old password/PIN is rejected, and verify logging in with the new password/PIN authenticates the user and hydrates their session).
+
+## 6. MANDATORY BUG DOCUMENTATION RULE
+- **Log Every Bug You Fix**: Whenever a bug is found and fixed, add an entry to `BUGFIXES.md` (project root) before considering the work done. This applies whether the bug was reported by the user or discovered while working on something else.
+- **What to write**: what broke, what the user actually saw, the root cause, the fix, and the file(s) touched. Written so someone with no memory of this conversation can understand it later.
+- **Why this rule exists**: so the same bug never gets silently reintroduced or re-debugged from scratch months later.

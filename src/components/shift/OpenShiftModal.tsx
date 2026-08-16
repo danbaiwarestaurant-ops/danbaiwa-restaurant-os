@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Lock, X, Play } from 'lucide-react';
 import { useShiftStore } from '../../store/useShiftStore';
+import { useAuthStore } from '../../store/useAuthStore';
 
 interface OpenShiftModalProps {
   isOpen: boolean;
@@ -9,8 +10,11 @@ interface OpenShiftModalProps {
 }
 
 export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({ isOpen, onClose, onSuccess }) => {
-  const [openingFloat, setOpeningFloat] = useState('5000');
-  const [cashierName, setCashierName] = useState('Main Cashier');
+  const { activeUser } = useAuthStore();
+  const [openingFloat, setOpeningFloat] = useState('');
+  // Default to whoever is actually logged in, rather than a placeholder name that
+  // could get submitted unchanged and mislabel real shift/reconciliation records.
+  const [cashierName, setCashierName] = useState(activeUser?.name || '');
   const { openShift } = useShiftStore();
 
   if (!isOpen) return null;

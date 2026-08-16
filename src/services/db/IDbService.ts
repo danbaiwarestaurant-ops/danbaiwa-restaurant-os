@@ -38,4 +38,5 @@ export interface IDbService {
   // Outbox Sync
   getPendingOutbox(): Promise<OutboxItem[]>;
   markOutboxSynced(id: string): Promise<void>;
+  markOutboxAttemptFailed(id: string, retryCount: number): Promise<void>;
 }

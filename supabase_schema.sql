@@ -159,9 +159,38 @@ WITH CHECK (
 -- Storage Bucket Setup for SQL.js Binary Backups
 -- =============================================================================
 
+-- Snapshots live at snapshots/<LOCATION>/<DEVICE>/latest.db (plus dated dailies).
+-- The device id is only ever the LAST segment: a replacement till knows the account
+-- it signed in as, but can never guess the device id of the machine it is replacing,
+-- so restores list the location folder and take the newest snapshot in it.
+
+-- Create the bucket up front. The app also tries this at startup, but createBucket()
+-- normally needs a service role, so a client-side attempt quietly fails and the very
+-- first backup upload 404s with no bucket to write into.
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('db-backups', 'db-backups', false)
+ON CONFLICT (id) DO NOTHING;
+
 -- Allow authenticated users to perform snapshot DB backup writes
 DROP POLICY IF EXISTS "authenticated users can upload backups" ON storage.objects;
 CREATE POLICY "authenticated users can upload backups"
 ON storage.objects FOR INSERT
 TO authenticated
+WITH CHECK (bucket_id = 'db-backups');
+
+-- Required for restores. Without SELECT, listing and downloading snapshots is denied
+-- by RLS, so a replacement machine can never find a backup no matter how it is keyed.
+DROP POLICY IF EXISTS "authenticated users can read backups" ON storage.objects;
+CREATE POLICY "authenticated users can read backups"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (bucket_id = 'db-backups');
+
+-- Required for `upsert: true`. latest.db is overwritten on every snapshot; with only
+-- an INSERT policy every write after the first one is rejected.
+DROP POLICY IF EXISTS "authenticated users can overwrite backups" ON storage.objects;
+CREATE POLICY "authenticated users can overwrite backups"
+ON storage.objects FOR UPDATE
+TO authenticated
+USING (bucket_id = 'db-backups')
 WITH CHECK (bucket_id = 'db-backups');

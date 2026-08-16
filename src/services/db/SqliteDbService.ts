@@ -27,6 +27,16 @@ import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
+import {
+  SNAPSHOT_ROOT,
+  LATEST_FILE,
+  SnapshotCandidate,
+  candidateLocationDirs,
+  isSnapshotFile,
+  pickNewestSnapshot,
+  snapshotDir,
+  snapshotTimestamp,
+} from '../../utils/backupPaths';
 
 const MIGRATION_FLAG = 'ticket_pos_migrated_v3';
 
@@ -289,7 +299,40 @@ async function clearJournalIDB(): Promise<void> {
 // ─── Tier 3: Supabase Storage Backup configuration ─────────────────────────
 
 let _deviceId = 'DEV01';
+let _locationId = 'LOC01';
 let _backupTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * The location a snapshot belongs to is a property of the ACCOUNT, not of the machine
+ * holding it. A freshly installed till has never been configured, so its local device
+ * config still reads the seeded default — asking the signed-in cloud session which
+ * location this account belongs to is the only way that machine can find snapshots
+ * written by the till it is replacing.
+ *
+ * Deliberately uncached: it is only read during a restore attempt, and caching it
+ * would pin the first account of the session onto every later sign-in.
+ */
+async function resolveCloudLocationId(): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const { data } = await supabase.auth.getUser();
+    const meta = (data?.user?.user_metadata ?? {}) as Record<string, unknown>;
+    const loc = typeof meta.location_id === 'string' ? meta.location_id.trim() : '';
+    return loc || null;
+  } catch (_) {
+    // Offline or no session — fall back to the locally configured location.
+    return null;
+  }
+}
+
+/**
+ * Where THIS machine writes its snapshots. Writes stay keyed to the locally configured
+ * location (that is the operational truth of which outlet this till serves); discovery
+ * is what widens — see findNewestCloudSnapshot().
+ */
+function backupPrefix(): string {
+  return snapshotDir(_locationId, _deviceId);
+}
 
 function scheduleSupabaseBackup(data: Uint8Array): void {
   if (!isSupabaseConfigured || typeof window === 'undefined') return;
@@ -301,14 +344,21 @@ function scheduleSupabaseBackup(data: Uint8Array): void {
       const blob = new Blob([data], { type: 'application/octet-stream' });
 
       // Overwrite latest hot snapshot
-      await supabase.storage
+      const latestResult = await supabase.storage
         .from(SUPABASE_BUCKET)
-        .upload(`snapshots/${_deviceId}/latest.db`, blob, { upsert: true });
+        .upload(`${backupPrefix()}/${LATEST_FILE}`, blob, { upsert: true });
 
       // Daily versioned snapshot
-      await supabase.storage
+      const dailyResult = await supabase.storage
         .from(SUPABASE_BUCKET)
-        .upload(`snapshots/${_deviceId}/${date}.db`, blob, { upsert: true });
+        .upload(`${backupPrefix()}/${date}.db`, blob, { upsert: true });
+
+      // supabase-js resolves (rather than throws) on a rejected upload, so this must
+      // be checked explicitly — otherwise a silently-blocked backup (missing bucket,
+      // RLS policy, no session) gets logged as a false-positive success.
+      if (latestResult.error || dailyResult.error) {
+        throw new Error(latestResult.error?.message || dailyResult.error?.message);
+      }
 
       console.info(`[SqliteDbService] Cloud backup sync complete (${(data.byteLength / 1024).toFixed(1)} KB)`);
     } catch (e) {
@@ -328,6 +378,89 @@ async function ensureBackupBucket(): Promise<void> {
       console.warn('[SqliteDbService] Backup bucket creation notice:', error.message);
     }
   } catch (_) {}
+}
+
+// ─── Cloud snapshot discovery ──────────────────────────────────────────────
+
+/** Lists one storage folder. Throws with the real Supabase message so a blocked
+ *  listing (missing bucket, RLS) is never mistaken for "no backup exists". */
+async function listStorageDir(prefix: string): Promise<Array<Record<string, any>>> {
+  const { data, error } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .list(prefix, { limit: 1000, sortBy: { column: 'updated_at', order: 'desc' } });
+  if (error) throw new Error(error.message);
+  return data ?? [];
+}
+
+/**
+ * Newest snapshot beneath a location folder, across every device that ever backed up
+ * there. Any *.db file counts — not just latest.db — so a till whose hot snapshot
+ * upload failed can still be recovered from its last daily copy.
+ */
+async function newestSnapshotUnder(locationPrefix: string): Promise<SnapshotCandidate | null> {
+  const entries = await listStorageDir(locationPrefix);
+  const found: SnapshotCandidate[] = [];
+
+  for (const entry of entries) {
+    const name: string = entry.name;
+    if (!name) continue;
+
+    if (isSnapshotFile(name)) {
+      // A snapshot written straight into the location folder (no device segment).
+      found.push({ path: `${locationPrefix}/${name}`, updatedAt: snapshotTimestamp(entry) });
+      continue;
+    }
+
+    // Otherwise it is a device folder — descend one level.
+    const files = await listStorageDir(`${locationPrefix}/${name}`);
+    for (const file of files) {
+      if (!isSnapshotFile(file.name)) continue;
+      found.push({
+        path: `${locationPrefix}/${name}/${file.name}`,
+        updatedAt: snapshotTimestamp(file),
+      });
+    }
+  }
+
+  return pickNewestSnapshot(found);
+}
+
+/**
+ * Finds the snapshot a restoring machine should pull, widening the search until
+ * something turns up:
+ *   1. the location on the signed-in cloud account,
+ *   2. the location configured on this machine,
+ *   3. every location in the bucket.
+ *
+ * Step 3 is what makes a brand-new machine work at all: it has never been configured,
+ * so its local location is still the seeded default and would otherwise only ever look
+ * in the wrong folder.
+ */
+async function findNewestCloudSnapshot(): Promise<{ candidate: SnapshotCandidate | null; reason?: string }> {
+  const cloudLocation = await resolveCloudLocationId();
+  const preferred = candidateLocationDirs(cloudLocation, _locationId);
+
+  try {
+    for (const dir of preferred) {
+      const hit = await newestSnapshotUnder(dir);
+      if (hit) return { candidate: hit };
+    }
+
+    // Widen to every location this account can see.
+    const locations = await listStorageDir(SNAPSHOT_ROOT);
+    const scanned: SnapshotCandidate[] = [];
+    for (const entry of locations) {
+      const prefix = `${SNAPSHOT_ROOT}/${entry.name}`;
+      if (!entry.name || preferred.includes(prefix)) continue;
+      const hit = await newestSnapshotUnder(prefix);
+      if (hit) scanned.push(hit);
+    }
+
+    const widest = pickNewestSnapshot(scanned);
+    return widest ? { candidate: widest } : { candidate: null, reason: 'no cloud backup found' };
+  } catch (e: any) {
+    return { candidate: null, reason: `cloud backup lookup failed: ${e?.message || e}` };
+  }
 }
 
 // ─── SQL execute helpers ───────────────────────────────────────────────────
@@ -372,31 +505,42 @@ export class SqliteDbService implements IDbService {
       if (journalEntries.length > 0) {
         console.info(`[SqliteDbService] Replaying ${journalEntries.length} WAL journal transactions...`);
         db.run('BEGIN TRANSACTION');
+        let replaySucceeded = true;
         try {
           for (const entry of journalEntries) {
             for (const stmt of entry.statements) {
+              // Each entry already carries its own BEGIN TRANSACTION/COMMIT pair from
+              // when it was journaled (runWrite buffers those calls too). Skip them here
+              // since the whole replay batch is already wrapped in one outer transaction —
+              // running them verbatim would nest a transaction inside a transaction.
+              const normalized = stmt.sql.trim().toUpperCase();
+              if (normalized === 'BEGIN TRANSACTION' || normalized === 'COMMIT' || normalized === 'ROLLBACK') continue;
               db.run(stmt.sql, stmt.params);
             }
           }
           db.run('COMMIT');
         } catch (e) {
           db.run('ROLLBACK');
+          replaySucceeded = false;
           console.error('[SqliteDbService] WAL replay failed, database may be inconsistent:', e);
         }
-        
-        // Export fully replayed database baseline and clear the replayed journal log
-        const updatedData = db.export();
-        if (isIDBAvailable()) {
-          const idb = await _openIDB();
-          await new Promise<void>((resolve, reject) => {
-            const tx = idb.transaction([IDB_SNAPSHOT_STORE, IDB_JOURNAL_STORE], 'readwrite');
-            tx.objectStore(IDB_SNAPSHOT_STORE).put(updatedData, IDB_KEY);
-            tx.objectStore(IDB_JOURNAL_STORE).clear();
-            tx.oncomplete = () => { idb.close(); resolve(); };
-            tx.onerror    = () => { idb.close(); reject(tx.error); };
-          });
+
+        // Only fold the journal into a new baseline snapshot if replay actually succeeded —
+        // otherwise the queued mutations would be silently discarded with no way to retry.
+        if (replaySucceeded) {
+          const updatedData = db.export();
+          if (isIDBAvailable()) {
+            const idb = await _openIDB();
+            await new Promise<void>((resolve, reject) => {
+              const tx = idb.transaction([IDB_SNAPSHOT_STORE, IDB_JOURNAL_STORE], 'readwrite');
+              tx.objectStore(IDB_SNAPSHOT_STORE).put(updatedData, IDB_KEY);
+              tx.objectStore(IDB_JOURNAL_STORE).clear();
+              tx.oncomplete = () => { idb.close(); resolve(); };
+              tx.onerror    = () => { idb.close(); reject(tx.error); };
+            });
+          }
+          console.info('[SqliteDbService] WAL journal cleared and baseline snapshot updated.');
         }
-        console.info('[SqliteDbService] WAL journal cleared and baseline snapshot updated.');
       }
 
       // Seed default device config if missing
@@ -417,6 +561,7 @@ export class SqliteDbService implements IDbService {
         try {
           const cfg: DeviceConfig = JSON.parse(cfgRows[0].value as string);
           _deviceId = cfg.deviceId || 'DEV01';
+          _locationId = cfg.locationId || 'LOC01';
         } catch (_) {}
       }
 
@@ -439,6 +584,61 @@ export class SqliteDbService implements IDbService {
   private get DB(): SqlJsDatabase {
     if (!this.db) throw new Error('SqliteDbService: call init() first.');
     return this.db;
+  }
+
+  /** True when this device holds no operational records yet (fresh/wiped install). */
+  async isLocalDataEmpty(): Promise<boolean> {
+    const [tickets] = querySql<{ n: number }>(this.DB, 'SELECT COUNT(*) AS n FROM tickets');
+    const [shifts] = querySql<{ n: number }>(this.DB, 'SELECT COUNT(*) AS n FROM shifts');
+    return (tickets?.n ?? 0) === 0 && (shifts?.n ?? 0) === 0;
+  }
+
+  /**
+   * Pulls the newest cloud snapshot for this location and replaces the in-memory
+   * database with it. Intended for a fresh or wiped device signing in again.
+   *
+   * Refuses to run when local records already exist, since this overwrites the whole
+   * database — reconciling two diverged copies is a merge, not a restore, and would
+   * silently destroy unsynced local tickets.
+   */
+  async restoreFromCloud(): Promise<{ restored: boolean; reason?: string; source?: string }> {
+    if (!isSupabaseConfigured) return { restored: false, reason: 'cloud not configured' };
+    await this.init();
+
+    if (!(await this.isLocalDataEmpty())) {
+      return { restored: false, reason: 'local data present — refusing to overwrite' };
+    }
+
+    const { candidate, reason } = await findNewestCloudSnapshot();
+    if (!candidate) return { restored: false, reason: reason || 'no cloud backup found' };
+    const newestPath = candidate.path;
+
+    const { data: blob, error: dlError } = await supabase.storage.from(SUPABASE_BUCKET).download(newestPath);
+    if (dlError || !blob) return { restored: false, reason: dlError?.message || 'download failed' };
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const SQL = await loadSqlJs();
+    const restoredDb: SqlJsDatabase = new SQL.Database(bytes);
+    restoredDb.run(SCHEMA_SQL); // tolerate snapshots taken before a newer table existed
+
+    this.db?.close();
+    this.db = restoredDb;
+    this.pendingStatements = [];
+
+    // Persist immediately so the restore survives a reload even if nothing else writes.
+    if (isIDBAvailable()) {
+      const idb = await _openIDB();
+      await new Promise<void>((resolve, reject) => {
+        const tx = idb.transaction([IDB_SNAPSHOT_STORE, IDB_JOURNAL_STORE], 'readwrite');
+        tx.objectStore(IDB_SNAPSHOT_STORE).put(restoredDb.export(), IDB_KEY);
+        tx.objectStore(IDB_JOURNAL_STORE).clear();
+        tx.oncomplete = () => { idb.close(); resolve(); };
+        tx.onerror    = () => { idb.close(); reject(tx.error); };
+      });
+    }
+
+    console.info(`[SqliteDbService] Restored cloud backup from ${newestPath}`);
+    return { restored: true, source: newestPath };
   }
 
   /** Run a write query (in-memory SQLite + buffer statement for journal) */
@@ -508,6 +708,7 @@ export class SqliteDbService implements IDbService {
     this.runWrite("BEGIN TRANSACTION");
     this.runWrite("INSERT OR REPLACE INTO config (key, value) VALUES ('device_config', ?)", [JSON.stringify(config)]);
     this.runWrite("COMMIT");
+    _locationId = config.locationId || 'LOC01';
     _deviceId = config.deviceId || 'DEV01';
     await this._persist();
   }
@@ -741,6 +942,21 @@ export class SqliteDbService implements IDbService {
   async markOutboxSynced(id: string): Promise<void> {
     this.runWrite('BEGIN TRANSACTION');
     this.runWrite("UPDATE outbox SET status='synced' WHERE id=?", [id]);
+    this.runWrite('COMMIT');
+    await this._persist();
+  }
+
+  /**
+   * Records a failed sync attempt for one outbox item. After MAX_OUTBOX_RETRIES
+   * consecutive failures, the item is parked as 'failed' (dropped out of
+   * getPendingOutbox's 'pending' filter) so a single bad/rejected record can't
+   * block every other queued ticket/shift/expense behind it forever.
+   */
+  async markOutboxAttemptFailed(id: string, retryCount: number): Promise<void> {
+    const MAX_OUTBOX_RETRIES = 8;
+    const nextStatus = retryCount + 1 >= MAX_OUTBOX_RETRIES ? 'failed' : 'pending';
+    this.runWrite('BEGIN TRANSACTION');
+    this.runWrite("UPDATE outbox SET retry_count = retry_count + 1, status=? WHERE id=?", [nextStatus, id]);
     this.runWrite('COMMIT');
     await this._persist();
   }

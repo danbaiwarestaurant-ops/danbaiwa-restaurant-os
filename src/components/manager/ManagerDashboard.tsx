@@ -29,10 +29,10 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({ onRequirePin
 
   const grossProfit = totalSales - approvedExpenses;
 
-  // Multi-location aggregation simulation (NFR12 / FR15)
+  // This till's own location. Real cross-location rollups (aggregating sales from
+  // other physical tills) aren't implemented yet — this only ever lists this device.
   const locations = [
     { id: config.locationId || 'LOC01', name: config.businessName || 'Danbaiwa Restraunt', sales: totalSales, active: true },
-    { id: 'LOC02', name: 'Danbaiwa Annex (Outlet #2)', sales: 48500, active: false },
   ];
 
   return (
