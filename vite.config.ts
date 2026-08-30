@@ -28,18 +28,33 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Pre-cache EVERYTHING at service worker install time.
+        // After the first online visit these files are available forever offline.
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
         navigateFallback: '/index.html',
+        // Never let the service worker expire the pre-cached shell
+        navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
-            // The outbox pattern (src/store/useSyncStore.ts) already owns retry/backoff
-            // for Supabase calls — the service worker must never cache or intercept them.
+            // Supabase calls are NEVER cached — the outbox pattern in
+            // useSyncStore.ts owns all retry/backoff for offline mutations.
             urlPattern: ({ url }) => url.hostname.endsWith('.supabase.co'),
             handler: 'NetworkOnly',
           },
           {
+            // App shell HTML — try network first, fall back to cache.
+            // networkTimeoutSeconds ensures a slow connection doesn't block boot.
             urlPattern: ({ request }) => request.destination === 'document',
             handler: 'NetworkFirst',
             options: { cacheName: 'html-shell', networkTimeoutSeconds: 3 },
+          },
+          {
+            // JS/CSS/fonts — serve from cache instantly, revalidate in background.
+            // This means the app opens at full speed even with a slow connection.
+            urlPattern: ({ request }) =>
+              ['script', 'style', 'font'].includes(request.destination),
+            handler: 'StaleWhileRevalidate',
+            options: { cacheName: 'static-assets' },
           },
         ],
       },
