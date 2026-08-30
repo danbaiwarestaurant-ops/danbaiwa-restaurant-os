@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { Ticket } from '../types/ticket';
-import { dbService } from '../services/db/SqliteDbService';
+import { dbService } from '../services/db/IndexedDbService';
 import { generateCompositeKey } from '../utils/compositeKey';
 import { PrintAdapter } from '../services/print/PrintAdapter';
 import { useDeviceStore } from './useDeviceStore';
@@ -70,8 +70,11 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // Commit to DB (synchronous — ticket row is durable before print fires)
     await dbService.saveTicket(newTicket);
 
-    // STEP 2: Update UI state with committed ticket
-    const currentTickets = get().tickets;
+    // STEP 2: Update UI state with committed ticket. Filter out any existing entry
+    // for this id first — a concurrent reload (reconciliation pull, realtime echo)
+    // can land between the saveTicket() above and this point and already have
+    // picked up the just-saved row, which would otherwise duplicate it here.
+    const currentTickets = get().tickets.filter(t => t.id !== newTicket.id);
     const updatedTickets = [newTicket, ...currentTickets];
     const todayStr = nowIso.split('T')[0];
     const todayCount = updatedTickets.filter(t => t.createdAt.startsWith(todayStr) && t.status !== 'void').length;

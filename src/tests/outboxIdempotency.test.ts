@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useSyncStore } from '../store/useSyncStore';
 import { dbService } from '../services/db/LocalStorageDbService'; // use test DB
 import { supabase } from '../services/supabase/supabaseClient';
+import { toSnakeCase } from '../utils/caseMapping';
 
 // Mock Supabase Client calls
 vi.mock('../services/supabase/supabaseClient', () => {
@@ -15,20 +16,6 @@ vi.mock('../services/supabase/supabaseClient', () => {
     },
   };
 });
-
-// Helper utility to transform camelCase JavaScript objects into snake_case database rows (copied to test locally)
-function toSnakeCase(obj: Record<string, any>): Record<string, any> {
-  const result: Record<string, any> = {};
-  for (const key of Object.keys(obj)) {
-    const snakeKey = key.replace(/([A-Z])/g, "_$1").toLowerCase();
-    let val = obj[key];
-    if (val && typeof val === 'object' && !Array.isArray(val)) {
-      val = toSnakeCase(val);
-    }
-    result[snakeKey] = val;
-  }
-  return result;
-}
 
 describe('Outbox Sync Worker & Payload Mapping (FR16, FR17, NFR1)', () => {
   beforeEach(() => {

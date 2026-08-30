@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { Shift } from '../types/shift';
-import { dbService } from '../services/db/SqliteDbService';
+import { dbService } from '../services/db/IndexedDbService';
 import { calculateShiftReconciliation } from '../utils/reconciliation';
 import { useTicketStore } from './useTicketStore';
 import { useAuthStore } from './useAuthStore';

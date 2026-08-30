@@ -30,6 +30,7 @@ describe('Atomic login failure vocabulary', () => {
       'unknown_account_local_only',
       'unknown_account_offline',
       'cloud_credentials_rejected',
+      'cloud_email_unconfirmed',
       'cloud_profile_missing',
       'cloud_lookup_failed',
       'wrong_pin',

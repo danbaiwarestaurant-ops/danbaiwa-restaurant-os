@@ -13,4 +13,7 @@ export interface Expense {
   reviewedBy?: string;
   reviewedAt?: string;
   rejectionReason?: string;
+  /** Server-authoritative, set by the Postgres trigger — used for last-write-wins
+   *  merges when reconciling remote changes into the local copy. */
+  updatedAt?: string;
 }

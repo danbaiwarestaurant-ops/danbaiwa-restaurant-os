@@ -29,8 +29,11 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({ onRequirePin
 
   const grossProfit = totalSales - approvedExpenses;
 
-  // This till's own location. Real cross-location rollups (aggregating sales from
-  // other physical tills) aren't implemented yet — this only ever lists this device.
+  // tickets/expenses above are already a location-wide rollup for admins (every
+  // till at this location, via cross-device sync — see realtimeSync.ts), not just
+  // this device. What's still out of scope is true multi-*location* rollups
+  // (aggregating sales across different restaurant locations) — this list stays
+  // single-entry for that reason, not because cross-device data is missing.
   const locations = [
     { id: config.locationId || 'LOC01', name: config.businessName || 'Danbaiwa Restraunt', sales: totalSales, active: true },
   ];

@@ -23,6 +23,7 @@ export type LoginFailureCode =
   | 'unknown_account_local_only'
   | 'unknown_account_offline'
   | 'cloud_credentials_rejected'
+  | 'cloud_email_unconfirmed'
   | 'cloud_profile_missing'
   | 'cloud_lookup_failed'
   // Account is on this machine
@@ -97,6 +98,10 @@ export function buildLoginFailure(code: LoginFailureCode, ctx: LoginFailureConte
     cloud_credentials_rejected: {
       message: `${who} is not set up on this till, and the cloud rejected that email and PIN.`,
       hint: 'On a machine the account has never used, sign in with the admin PIN — not the account password. Check the email spelling too.',
+    },
+    cloud_email_unconfirmed: {
+      message: `The cloud account for ${who} exists but its email has not been confirmed yet.`,
+      hint: 'Check that inbox (and spam folder) for a confirmation link from Supabase, then try again. An admin can also confirm it manually from the Supabase dashboard under Authentication > Users.',
     },
     cloud_profile_missing: {
       message: `Cloud sign-in for ${who} worked, but no backup or profile was found to restore onto this till${detail}.`,

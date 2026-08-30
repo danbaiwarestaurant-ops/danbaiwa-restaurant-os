@@ -1,10 +1,11 @@
 import { create } from 'zustand';
 import { UserAccount, UserRole } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
-import { dbService } from '../services/db/SqliteDbService';
+import { dbService } from '../services/db/IndexedDbService';
 import { authenticateAdminWithSupabase, updateSupabaseUserPassword, deriveSupabasePassword, supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
+import { runCloudCatchUp, startRealtimeSync, stopRealtimeSync } from '../services/db/realtimeSync';
 import {
   LoginFailure,
   LoginResult,
@@ -58,18 +59,22 @@ async function adoptAccountFromCloud(
     if (raw.includes('invalid login credentials') || raw.includes('invalid credentials')) {
       return buildLoginFailure('cloud_credentials_rejected', { email: cleanEmail });
     }
+    if (raw.includes('email not confirmed') || raw.includes('email_not_confirmed')) {
+      return buildLoginFailure('cloud_email_unconfirmed', { email: cleanEmail });
+    }
     return buildLoginFailure('cloud_lookup_failed', {
       email: cleanEmail,
       detail: error?.message || 'no session returned',
     });
   }
 
-  // Authenticated — pull this account's newest snapshot down onto the machine.
-  const restore = await dbService.restoreFromCloud();
+  // Authenticated — pull this account's data down onto the machine.
+  const restored = await runCloudCatchUp();
   let user = await dbService.getUserByEmail(cleanEmail);
 
-  // No snapshot, or a snapshot predating this account: fall back to the synced users
-  // row, which RLS always lets an account read for itself (id = auth.uid()).
+  // Nothing came down (brand-new account, or the pull came up empty): fall back to the
+  // synced users row directly, which RLS always lets an account read for itself
+  // (id = auth.uid()).
   if (!user) {
     const { data: row } = await supabase
       .from('users')
@@ -98,13 +103,10 @@ async function adoptAccountFromCloud(
   }
 
   if (!user) {
-    return buildLoginFailure('cloud_profile_missing', {
-      email: cleanEmail,
-      detail: restore.reason,
-    });
+    return buildLoginFailure('cloud_profile_missing', { email: cleanEmail });
   }
 
-  return { ok: true, user, authUserId: data.user.id, restored: Boolean(restore.restored) };
+  return { ok: true, user, authUserId: data.user.id, restored };
 }
 
 interface AuthState {
@@ -136,6 +138,14 @@ interface AuthState {
   recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
   switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
   
+  /**
+   * Re-establishes this browser's Supabase session from the admin PIN, without needing
+   * a full log out / log back in. Needed because the cloud password is derived from the
+   * PIN specifically (deriveSupabasePassword), so a password login — or any cashier
+   * login — leaves the till with no cloud session and no way to get one back.
+   */
+  reconnectCloudSession: (pin: string) => Promise<{ ok: boolean; message?: string }>;
+
   openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
@@ -176,6 +186,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isLoaded: true,
       hasAnyUsers: users.length > 0,
     });
+
+    // A resumed session (app reload while already logged in) is the most common way
+    // this app is actually running most of the day — realtime sync needs to restart
+    // here too, not just on a fresh interactive login. No-ops if this browser holds
+    // no Supabase session (e.g. a cashier-only till that no admin has ever signed into).
+    if (isAuthenticated) {
+      startRealtimeSync();
+      runCloudCatchUp().catch(() => {});
+    }
   },
 
   registerUser: async (name: string, email: string, password: string, pin: string, role: UserRole = 'admin') => {
@@ -315,6 +334,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         failedAttempts: 0,
         lockoutUntil: null,
       });
+      startRealtimeSync();
       await get().loadUsers();
       await useSyncStore.getState().checkOutbox();
       return { ok: true, restoredFromCloud: adopted.restored };
@@ -339,27 +359,49 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         lockoutUntil: null,
       });
 
+      // Reuses whatever Supabase session this browser already holds (e.g. from a
+      // prior admin login) — the gate inside checks the actual session, not which
+      // local role just signed in, so this safely no-ops on a cashier-only till.
+      startRealtimeSync();
+      runCloudCatchUp().catch(() => {});
+
       // Logging out destroys the cloud (Supabase) session, and day-to-day PIN login
-      // never re-establishes one — silently leaving cloud sync (and cloud backups)
-      // permanently broken after the very first logout. Re-authenticate to the cloud
-      // in the background whenever we can (admin + verified via PIN, since that's the
-      // same secret their cloud account password is derived from). Never let this
-      // block or fail the actual local login — this is best-effort healing only.
+      // never re-establishes one — silently leaving cloud sync (and cross-device
+      // sync) permanently broken after the very first logout. Re-authenticate to the
+      // cloud in the background whenever we can (admin + verified via PIN, since
+      // that's the same secret their cloud account password is derived from). Never
+      // let this block or fail the actual local login — this is best-effort healing.
       if (isSupabaseConfigured && user.role === 'admin' && isPinValid) {
         const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
         authenticateAdminWithSupabase(cleanEmail, passwordOrPin, locationId)
           .then(async () => {
-            // A cloud session now exists, so a fresh/wiped device can pull its data
-            // back down. restoreFromCloud() no-ops when local records already exist.
-            const result = await dbService.restoreFromCloud();
-            if (result.restored) {
+            startRealtimeSync();
+            const changed = await runCloudCatchUp();
+            if (changed) {
               await get().loadUsers();
               await useSyncStore.getState().checkOutbox();
             }
           })
           .catch((e) => {
             console.warn('[Auth] Background cloud session refresh failed (will retry next login):', e);
+            // Don't leave the reason console-only — the badge turns red and the reconnect
+            // dialog needs something better than "it didn't work" to show the operator.
+            useSyncStore.setState({
+              cloudConnected: false,
+              cloudError: e?.message || 'Cloud sign-in failed during login.',
+            });
           });
+      } else if (isSupabaseConfigured && !isPinValid) {
+        // Signed in with the account password (or as a cashier). The Supabase password is
+        // derived from the PIN, which we can't recover from a password login, so this till
+        // has no cloud session — say so plainly instead of letting it look connected.
+        useSyncStore.setState({
+          cloudConnected: false,
+          cloudError:
+            user.role === 'admin'
+              ? 'Signed in with the account password, which cannot unlock cloud sync — the cloud credential is derived from your PIN. Reconnect below with your admin PIN.'
+              : 'Cashier accounts have no cloud identity of their own, so this till is not connected to the cloud. Work is queued safely; an admin PIN will send it.',
+        });
       }
       return { ok: true };
     }
@@ -373,7 +415,67 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
   },
 
+  reconnectCloudSession: async (pin: string) => {
+    const user = get().activeUser;
+
+    if (!user) {
+      return { ok: false, message: 'No one is signed in on this till.' };
+    }
+    if (!isSupabaseConfigured) {
+      return {
+        ok: false,
+        message: 'This build has no Supabase credentials configured, so there is no cloud to connect to.',
+      };
+    }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return {
+        ok: false,
+        message: 'This device is offline. Your work stays queued — reconnect once the internet is back.',
+      };
+    }
+
+    // The cloud identity belongs to the admin account. A cashier PIN can't unlock it,
+    // and saying so is more useful than a generic failure.
+    const admin =
+      user.role === 'admin' ? user : get().users.find((u) => u.role === 'admin' && u.status === 'active');
+
+    if (!admin) {
+      return {
+        ok: false,
+        message: 'Only the admin account can reconnect this till to the cloud, and no admin account exists on this device.',
+      };
+    }
+
+    const pinMatches = await verifySecret(pin, admin.pinHash, admin.pinSalt);
+    if (!pinMatches) {
+      return { ok: false, message: `That PIN does not match the admin account (${admin.email}).` };
+    }
+
+    try {
+      const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
+      await authenticateAdminWithSupabase(admin.email, pin, locationId);
+
+      useSyncStore.setState({ cloudConnected: true, cloudError: null });
+      startRealtimeSync();
+      await runCloudCatchUp();
+      await get().loadUsers();
+      await useSyncStore.getState().checkOutbox();
+      await useSyncStore.getState().triggerSyncWorker();
+
+      return { ok: true };
+    } catch (e: any) {
+      // Surfaced verbatim in the reconnect dialog. The common case is an admin whose PIN
+      // was changed locally while the cloud password stayed derived from the old one —
+      // the raw Supabase message ("Invalid login credentials") is the clue for that.
+      const message = e?.message || 'Cloud sign-in failed for an unknown reason.';
+      useSyncStore.setState({ cloudConnected: false, cloudError: message });
+      return { ok: false, message };
+    }
+  },
+
   logoutUser: async () => {
+    stopRealtimeSync();
+
     try {
       if (navigator.onLine && supabase) {
         await supabase.auth.signOut();

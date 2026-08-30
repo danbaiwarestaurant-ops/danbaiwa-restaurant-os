@@ -78,14 +78,20 @@ export function App() {
     checkOutbox();
   }, []);
 
-  // Reload user-scoped data whenever activeUser changes
+  // Reload user-scoped data whenever activeUser changes. Tickets/expenses show a
+  // location-wide rollup for admins (so the Manager Dashboard reflects every till,
+  // not just this device) but stay scoped to "my own" for cashiers. currentShift is
+  // never rolled up — it's a personal "is my shift open" gate, always the signed-in
+  // user's own shift regardless of role (see realtimeSync.ts's scheduleStoreReload
+  // for the same distinction on the sync side).
   useEffect(() => {
     if (isAuthenticated && activeUser) {
-      loadTickets(activeUser.id);
+      const rollupScope = activeUser.role === 'admin' ? undefined : activeUser.id;
+      loadTickets(rollupScope);
       loadShift(activeUser.id);
-      loadExpenses(undefined, activeUser.id);
+      loadExpenses(undefined, rollupScope);
     }
-  }, [isAuthenticated, activeUser?.id]);
+  }, [isAuthenticated, activeUser?.id, activeUser?.role]);
 
   // 5-Minute Inactivity Idle Auto-Lock Timer
   useEffect(() => {

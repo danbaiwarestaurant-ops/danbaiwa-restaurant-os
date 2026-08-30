@@ -58,6 +58,14 @@ export class LocalStorageDbService implements IDbService {
     this.isInitialized = true;
   }
 
+  async isLocalDataEmpty(): Promise<boolean> {
+    return true;
+  }
+
+  async restoreFromCloud(): Promise<{ restored: boolean; reason?: string; source?: string }> {
+    return { restored: false, reason: 'not supported in test double' };
+  }
+
   async getDeviceConfig(): Promise<DeviceConfig | null> {
     const raw = getItem(STORAGE_KEYS.CONFIG);
     return raw ? JSON.parse(raw) : null;
@@ -238,10 +246,69 @@ export class LocalStorageDbService implements IDbService {
     }
   }
 
+  async getAuditLogs(entityId?: string, actorId?: string): Promise<any[]> {
+    const raw = getItem(STORAGE_KEYS.AUDIT);
+    let logs: any[] = raw ? JSON.parse(raw) : [];
+    if (entityId) logs = logs.filter(l => l.entityId === entityId);
+    if (actorId) logs = logs.filter(l => l.actorId === actorId);
+    return logs;
+  }
+
   async getPendingOutbox(): Promise<OutboxItem[]> {
     const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
-    return outbox.filter(o => o.status === 'pending');
+    const now = Date.now();
+    return outbox.filter(
+      o => o.status === 'pending' && (!o.nextAttemptAt || Date.parse(o.nextAttemptAt) <= now)
+    );
+  }
+
+  async countUnsyncedOutbox(): Promise<{ total: number; stuck: number }> {
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
+    const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
+    const unsynced = outbox.filter(o => o.status === 'pending' || o.status === 'failed');
+    return { total: unsynced.length, stuck: unsynced.filter(o => o.retryCount >= 8).length };
+  }
+
+  async revivePendingOutbox(): Promise<number> {
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
+    const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
+    let revived = 0;
+    for (const o of outbox) {
+      if (o.status !== 'pending' && o.status !== 'failed') continue;
+      if (o.status === 'failed') revived++;
+      o.status = 'pending';
+      o.retryCount = 0;
+      delete o.nextAttemptAt;
+    }
+    setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
+    return revived;
+  }
+
+  async enqueueBackfill(tableName: string, payloads: Record<string, any>[]): Promise<number> {
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
+    const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
+    const already = new Set(
+      outbox
+        .filter(o => o.tableName === tableName && (o.status === 'pending' || o.status === 'failed'))
+        .map(o => (o.payload as any)?.id)
+    );
+    let queued = 0;
+    for (const payload of payloads) {
+      if (already.has(payload.id)) continue;
+      outbox.push({
+        id: crypto.randomUUID(),
+        tableName,
+        action: 'INSERT',
+        payload,
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+        retryCount: 0,
+      });
+      queued++;
+    }
+    setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
+    return queued;
   }
 
   async markOutboxSynced(id: string): Promise<void> {
@@ -254,16 +321,19 @@ export class LocalStorageDbService implements IDbService {
     }
   }
 
-  async markOutboxAttemptFailed(id: string, retryCount: number): Promise<void> {
-    const MAX_OUTBOX_RETRIES = 8;
+  async markOutboxAttemptFailed(id: string, retryCount: number, lastError?: string): Promise<void> {
     const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
     const index = outbox.findIndex(o => o.id === id);
     if (index !== -1) {
-      outbox[index].retryCount = retryCount + 1;
-      if (outbox[index].retryCount >= MAX_OUTBOX_RETRIES) {
-        outbox[index].status = 'failed';
-      }
+      const next = retryCount + 1;
+      // Mirrors IndexedDbService: back off, never park. Unsynced data is never dropped.
+      outbox[index].retryCount = next;
+      outbox[index].status = 'pending';
+      outbox[index].nextAttemptAt = new Date(
+        Date.now() + Math.min(5_000 * 2 ** Math.min(next, 12), 30 * 60_000)
+      ).toISOString();
+      outbox[index].lastError = lastError;
       setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
     }
   }

@@ -18,16 +18,27 @@ In Windows CMD / PowerShell:
 
 ---
 
-## 2. Desktop Shell Build (Tauri v2 Native .exe)
-To package as an isolated Windows `.exe` desktop application:
-1. Initialize Tauri:
+## 2. Installable PWA (Kiosk Mode)
+The app is a installable Progressive Web App — no native desktop shell required.
+
+1. Build the production bundle:
    ```bash
-   npx @tauri-apps/cli init
+   npm run build && npm run preview
    ```
-2. Build standalone executable:
-   ```bash
-   npx tauri build
+2. Open the preview URL in Chrome/Edge and install it (address-bar install icon, or
+   the "Install Ticket POS" menu item) — this creates a standalone app window with
+   its own taskbar/Start Menu entry, backed by the app's service worker for offline
+   shell loading.
+3. For unattended kiosk operation, launch the installed app directly in kiosk mode:
+   ```cmd
+   "C:\Program Files\Google\Chrome\Application\chrome.exe" --kiosk --kiosk-printing --app=http://127.0.0.1:5173/
    ```
+   Combined with the silent thermal printing setup in Section 1, this gives the same
+   locked-down, always-on till experience a native desktop shell would have, without
+   needing a separate Tauri build step.
+4. Updates: the service worker checks for a new version on load. A small in-app
+   banner ("A new version of Ticket POS is ready") lets the cashier reload when idle
+   — it never force-reloads mid-transaction.
 
 ---
 

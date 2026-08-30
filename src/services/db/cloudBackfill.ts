@@ -1,0 +1,84 @@
+/**
+ * cloudBackfill.ts
+ *
+ * Reconciles the *upward* direction of sync: finds local rows the cloud has never
+ * received and queues them for push.
+ *
+ * The outbox only ever captures rows at the moment they are mutated. Anything whose
+ * outbox entry was lost — parked as permanently 'failed' by an older build, or created
+ * during a stretch where this till held no Supabase session — was stranded on the
+ * device with nothing in the system that would ever push it again. Reconciliation
+ * (realtimeSync.ts) only pulls *down*, so it could never repair that either: a device
+ * holding the only copy of a month of tickets would keep reporting itself as synced.
+ *
+ * This sweep closes that hole by comparing local ids against the ids the cloud actually
+ * holds, and re-queueing the difference. It is additive only — it never deletes a local
+ * row for being absent from the cloud, and never deletes a cloud row for being absent
+ * locally.
+ */
+
+import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
+import { db, stripUserRow, UserRow } from './dexieSchema';
+import { dbService } from './IndexedDbService';
+import { SyncablePgTable } from './remoteMerge';
+
+const BACKFILL_TABLES: { pg: SyncablePgTable; dexie: 'users' | 'tickets' | 'shifts' | 'expenses' | 'auditLogs' }[] = [
+  // Order matters: shifts must exist in the cloud before expenses, which carry a
+  // NOT NULL foreign key onto them.
+  { pg: 'users', dexie: 'users' },
+  { pg: 'shifts', dexie: 'shifts' },
+  { pg: 'tickets', dexie: 'tickets' },
+  { pg: 'expenses', dexie: 'expenses' },
+  { pg: 'audit_logs', dexie: 'auditLogs' },
+];
+
+/** Strips fields that exist only in the local Dexie row and have no Postgres column. */
+function toCloudPayload(pgTable: SyncablePgTable, row: any): Record<string, any> {
+  if (pgTable === 'users') return stripUserRow(row as UserRow);
+  return row;
+}
+
+/**
+ * Compares local ids against cloud ids for every syncable table and queues whatever the
+ * cloud is missing. Returns the number of rows queued. Safe to call repeatedly —
+ * enqueueBackfill skips rows already in flight.
+ */
+export async function runBackfillPush(): Promise<number> {
+  if (!isSupabaseConfigured) return 0;
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (!sessionData?.session) return 0;
+
+  let queuedTotal = 0;
+
+  for (const { pg, dexie } of BACKFILL_TABLES) {
+    try {
+      const localRows: any[] = await (db as any)[dexie].toArray();
+      if (!localRows.length) continue;
+
+      // Only ids are needed for the diff, so this stays cheap even on a long history.
+      const { data, error } = await supabase.from(pg).select('id');
+      if (error) {
+        console.warn(`[cloudBackfill] could not read cloud ids for ${pg}:`, error.message);
+        continue;
+      }
+
+      const remoteIds = new Set((data ?? []).map((r: any) => r.id));
+      const missing = localRows
+        .filter((r) => r?.id && !remoteIds.has(r.id))
+        .map((r) => toCloudPayload(pg, r));
+
+      if (!missing.length) continue;
+
+      const queued = await dbService.enqueueBackfill(pg, missing);
+      queuedTotal += queued;
+      if (queued) {
+        console.info(`[cloudBackfill] queued ${queued} local ${pg} row(s) the cloud was missing`);
+      }
+    } catch (e) {
+      console.warn(`[cloudBackfill] backfill sweep failed for ${pg}:`, e);
+    }
+  }
+
+  return queuedTotal;
+}

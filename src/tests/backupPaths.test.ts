@@ -21,7 +21,7 @@ import {
 
 describe('Cloud snapshot addressing', () => {
   it('keys snapshots by location first and device last', () => {
-    expect(snapshotPath('LOC01', 'DEV01', LATEST_FILE)).toBe('snapshots/LOC01/DEV01/latest.db');
+    expect(snapshotPath('LOC01', 'DEV01', LATEST_FILE)).toBe('snapshots/LOC01/DEV01/latest.json');
     // The device id must never appear before the location, otherwise a restoring
     // machine would have to guess it before it could even list the folder.
     expect(snapshotDir('LOC01', 'DEV01').startsWith(locationDir('LOC01'))).toBe(true);
@@ -59,34 +59,34 @@ describe('Cloud snapshot addressing', () => {
   });
 
   it('recognises hot and dated snapshot files', () => {
-    expect(isSnapshotFile('latest.db')).toBe(true);
-    expect(isSnapshotFile('2026-08-16.db')).toBe(true);
+    expect(isSnapshotFile('latest.json')).toBe(true);
+    expect(isSnapshotFile('2026-08-16.json')).toBe(true);
     expect(isSnapshotFile('.emptyFolderPlaceholder')).toBe(false);
   });
 
   it('picks the newest snapshot across devices deterministically', () => {
     const newest = pickNewestSnapshot([
-      { path: 'snapshots/LOC01/DEV01/latest.db', updatedAt: 1000 },
-      { path: 'snapshots/LOC01/DEV02/latest.db', updatedAt: 5000 },
-      { path: 'snapshots/LOC01/DEV03/2026-08-01.db', updatedAt: 2000 },
+      { path: 'snapshots/LOC01/DEV01/latest.json', updatedAt: 1000 },
+      { path: 'snapshots/LOC01/DEV02/latest.json', updatedAt: 5000 },
+      { path: 'snapshots/LOC01/DEV03/2026-08-01.json', updatedAt: 2000 },
     ]);
-    expect(newest?.path).toBe('snapshots/LOC01/DEV02/latest.db');
+    expect(newest?.path).toBe('snapshots/LOC01/DEV02/latest.json');
 
     // Ties resolve the same way every run.
     const tied = pickNewestSnapshot([
-      { path: 'snapshots/LOC01/DEV02/latest.db', updatedAt: 42 },
-      { path: 'snapshots/LOC01/DEV01/latest.db', updatedAt: 42 },
+      { path: 'snapshots/LOC01/DEV02/latest.json', updatedAt: 42 },
+      { path: 'snapshots/LOC01/DEV01/latest.json', updatedAt: 42 },
     ]);
-    expect(tied?.path).toBe('snapshots/LOC01/DEV01/latest.db');
+    expect(tied?.path).toBe('snapshots/LOC01/DEV01/latest.json');
 
     expect(pickNewestSnapshot([])).toBeNull();
   });
 
   it('falls back to the filename date when storage reports no timestamps', () => {
-    expect(snapshotTimestamp({ name: 'latest.db', updated_at: '2026-08-16T10:00:00Z' }))
+    expect(snapshotTimestamp({ name: 'latest.json', updated_at: '2026-08-16T10:00:00Z' }))
       .toBe(new Date('2026-08-16T10:00:00Z').getTime());
-    expect(snapshotTimestamp({ name: '2026-08-01.db' })).toBe(new Date('2026-08-01').getTime());
-    expect(snapshotTimestamp({ name: 'latest.db' })).toBe(0);
+    expect(snapshotTimestamp({ name: '2026-08-01.json' })).toBe(new Date('2026-08-01').getTime());
+    expect(snapshotTimestamp({ name: 'latest.json' })).toBe(0);
   });
 
   it('keeps every snapshot under one scannable root', () => {

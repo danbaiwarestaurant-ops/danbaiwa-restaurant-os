@@ -8,15 +8,15 @@
  * restore has to know up front — a replacement till knows which account it just
  * signed in as, but it can never guess the device id of the machine that died.
  *
- * Layout:  snapshots/<LOCATION>/<DEVICE>/latest.db
- *          snapshots/<LOCATION>/<DEVICE>/<YYYY-MM-DD>.db
+ * Layout:  snapshots/<LOCATION>/<DEVICE>/latest.json
+ *          snapshots/<LOCATION>/<DEVICE>/<YYYY-MM-DD>.json
  *
  * A restore widens its search: the account's location first, then this machine's
  * configured location, then every location in the bucket.
  */
 
 export const SNAPSHOT_ROOT = 'snapshots';
-export const LATEST_FILE = 'latest.db';
+export const LATEST_FILE = 'latest.json';
 
 export const DEFAULT_LOCATION_ID = 'LOC01';
 export const DEFAULT_DEVICE_ID = 'DEV01';
@@ -88,7 +88,7 @@ export function pickNewestSnapshot(candidates: SnapshotCandidate[]): SnapshotCan
 }
 
 export function isSnapshotFile(name: string | null | undefined): boolean {
-  return /\.db$/i.test((name ?? '').trim());
+  return /\.json$/i.test((name ?? '').trim());
 }
 
 /**
@@ -105,7 +105,7 @@ export function snapshotTimestamp(entry: {
     const parsed = new Date(raw).getTime();
     if (!Number.isNaN(parsed)) return parsed;
   }
-  const dated = /(\d{4}-\d{2}-\d{2})\.db$/i.exec(entry.name ?? '');
+  const dated = /(\d{4}-\d{2}-\d{2})\.json$/i.exec(entry.name ?? '');
   if (dated) {
     const parsed = new Date(dated[1]).getTime();
     if (!Number.isNaN(parsed)) return parsed;

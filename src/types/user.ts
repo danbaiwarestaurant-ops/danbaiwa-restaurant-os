@@ -15,6 +15,9 @@ export interface UserAccount {
   role: UserRole;          // Admin or Cashier
   createdAt: string;       // ISO 8601 string
   status: UserStatus;
+  /** Server-authoritative, set by the Postgres trigger — used for last-write-wins
+   *  merges when reconciling remote changes into the local copy. */
+  updatedAt?: string;
 }
 
 export interface AuthSession {

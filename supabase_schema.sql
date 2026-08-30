@@ -194,3 +194,101 @@ ON storage.objects FOR UPDATE
 TO authenticated
 USING (bucket_id = 'db-backups')
 WITH CHECK (bucket_id = 'db-backups');
+
+-- =============================================================================
+-- Multi-Device Continuous Sync: updated_at columns, audit_logs table, Realtime
+-- =============================================================================
+--
+-- Local storage on every till is now a continuously-reconciled cache of these
+-- tables (see src/services/db/realtimeSync.ts), not each device's sole store of
+-- record. Two things make that safe: a server-authoritative `updated_at` on every
+-- row (so a stale pull can never win a last-write-wins merge over a newer one) and
+-- these tables being added to the `supabase_realtime` publication (so changes
+-- propagate to other signed-in devices live, not just on the next manual sync).
+
+-- `updated_at`, stamped by Postgres itself (never trusted from the client) so
+-- clock skew between tills can't corrupt the merge order.
+ALTER TABLE users    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+ALTER TABLE shifts   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = timezone('utc'::text, now());
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
+CREATE TRIGGER trg_users_updated_at BEFORE INSERT OR UPDATE ON users
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_tickets_updated_at ON tickets;
+CREATE TRIGGER trg_tickets_updated_at BEFORE INSERT OR UPDATE ON tickets
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_shifts_updated_at ON shifts;
+CREATE TRIGGER trg_shifts_updated_at BEFORE INSERT OR UPDATE ON shifts
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_expenses_updated_at ON expenses;
+CREATE TRIGGER trg_expenses_updated_at BEFORE INSERT OR UPDATE ON expenses
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- audit_logs table — previously local-only; closes a gap where void/approve/
+-- reject actions were never synced, so a manager on a different till could never
+-- see them.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id          UUID PRIMARY KEY,
+  entity      TEXT NOT NULL,
+  entity_id   TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  actor_id    TEXT NOT NULL,
+  reason      TEXT,
+  "timestamp" TIMESTAMPTZ NOT NULL,
+  location_id TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_sb   ON audit_logs(entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_location_sb ON audit_logs(location_id);
+
+DROP TRIGGER IF EXISTS trg_audit_logs_updated_at ON audit_logs;
+CREATE TRIGGER trg_audit_logs_updated_at BEFORE INSERT OR UPDATE ON audit_logs
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+
+-- Deliberately no UPDATE/DELETE policy — with RLS enabled, no policy means those
+-- operations are denied outright. This makes "immutable audit log" true at the
+-- database level, not just by convention.
+DROP POLICY IF EXISTS "Scope audit_logs read by location" ON audit_logs;
+CREATE POLICY "Scope audit_logs read by location" ON audit_logs
+FOR SELECT TO authenticated
+USING (location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id'));
+
+DROP POLICY IF EXISTS "Scope audit_logs insert by location" ON audit_logs;
+CREATE POLICY "Scope audit_logs insert by location" ON audit_logs
+FOR INSERT TO authenticated
+WITH CHECK (location_id = (auth.jwt() -> 'user_metadata' ->> 'location_id'));
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Realtime publication — required for postgres_changes subscriptions. A plain
+-- `ALTER PUBLICATION ... ADD TABLE` errors on re-run if the table is already a
+-- member, unlike this file's other statements, hence the existence check.
+-- ─────────────────────────────────────────────────────────────────────────────
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['users', 'tickets', 'shifts', 'expenses', 'audit_logs'] LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_publication_tables
+      WHERE pubname = 'supabase_realtime' AND tablename = t
+    ) THEN
+      EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I', t);
+    END IF;
+  END LOOP;
+END $$;

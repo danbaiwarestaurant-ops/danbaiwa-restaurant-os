@@ -280,7 +280,7 @@ export const AuthPage: React.FC = () => {
                 type="email"
                 value={loginEmail}
                 onChange={e => setLoginEmail(e.target.value)}
-                placeholder="user@danbaiwarestaurant.com"
+                placeholder="owner@gmail.com"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
                 disabled={isLockedOut}
                 required
@@ -352,10 +352,14 @@ export const AuthPage: React.FC = () => {
                 type="email"
                 value={regEmail}
                 onChange={e => setRegEmail(e.target.value)}
-                placeholder="john@danbaiwarestaurant.com"
+                placeholder="john@gmail.com"
                 className="w-full p-2.5 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
                 required
               />
+              <p className="mt-1 text-[10px] font-semibold text-slate-500 normal-case">
+                Any email you can check works — personal or business. A confirmation
+                may be sent here, and it doubles as your cloud account for backup &amp; recovery.
+              </p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -424,7 +428,7 @@ export const AuthPage: React.FC = () => {
                 type="email"
                 value={resetEmail}
                 onChange={e => setResetEmail(e.target.value)}
-                placeholder="owner@danbaiwarestaurant.com"
+                placeholder="owner@gmail.com"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
                 required
               />
@@ -456,7 +460,7 @@ export const AuthPage: React.FC = () => {
                 type="email"
                 value={resetEmail}
                 readOnly
-                placeholder="registered@danbaiwarestaurant.com"
+                placeholder="registered@gmail.com"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-xs font-bold text-slate-900 bg-slate-100 cursor-not-allowed"
                 title="This is determined by the authenticated reset link and cannot be changed here."
                 required

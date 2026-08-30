@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { Expense } from '../types/expense';
-import { dbService } from '../services/db/SqliteDbService';
+import { dbService } from '../services/db/IndexedDbService';
 import { useShiftStore } from './useShiftStore';
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';

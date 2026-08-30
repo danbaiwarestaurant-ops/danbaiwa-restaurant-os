@@ -209,7 +209,7 @@ export const FirstLaunchAdminSetup: React.FC<FirstLaunchAdminSetupProps> = ({ on
               type="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
-              placeholder="owner@danbaiwarestaurant.com"
+              placeholder="owner@gmail.com"
               className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
               required
             />

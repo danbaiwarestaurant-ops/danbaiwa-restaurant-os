@@ -8,7 +8,7 @@
 - **CRITICAL**: ABSOLUTELY NO hardcoded PINs, passwords, or fallback credentials anywhere in source code (e.g. no `DEFAULT_PINS = '9999'`).
 - **Dynamic Account Management**: System initializes via a First-Launch Admin Setup screen on first boot where the venue owner creates the primary Admin account.
 - **Salted Hashing**: All user PINs (Admin and Staff Cashiers) are hashed using `crypto.subtle.digest('SHA-256', salt + pin)` with a unique 16-byte cryptographically random salt generated via `crypto.getRandomValues()`.
-- **Stored in SQLite Only**: Hashes and salts are stored strictly in the SQLite `users` table (`id`, `name`, `username`, `role`, `pin_hash`, `pin_salt`, `created_at`, `status`).
+- **Stored in IndexedDB Only**: Hashes and salts are stored strictly in the local IndexedDB `users` table (via Dexie — `id`, `name`, `username`, `role`, `pin_hash`, `pin_salt`, `created_at`, `status`).
 
 ## 3. SUPABASE CLOUD SYNC FOR ALL DATA (OUTBOX PATTERN)
 - **Full Outbox Coverage**: ALL local database mutations across ALL tables (`users`, `tickets`, `shifts`, `expenses`, `audit_logs`) MUST be written to `sync_outbox` in the exact same database transaction.
