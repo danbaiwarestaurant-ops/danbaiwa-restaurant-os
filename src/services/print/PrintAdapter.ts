@@ -8,9 +8,49 @@ export interface PrintResult {
   message: string;
 }
 
+/**
+ * The print server always runs on the LOCAL till machine at port 9100.
+ * 127.0.0.1 always resolves to the machine the browser is running on —
+ * so this works identically whether the PWA is loaded from localhost (dev)
+ * or from the Vercel-hosted production URL (https://danbaiwa-restaurant-os.vercel.app).
+ * Chrome allows HTTPS pages to call http://127.0.0.1 via Private Network Access.
+ */
+const PRINT_SERVER_URL = 'http://127.0.0.1:9100';
+
+/**
+ * Check once per session if the local silent-print server is reachable.
+ * Cached so we don't /health-check on every single ticket.
+ */
+let _printServerAvailable: boolean | null = null;
+
+async function isPrintServerAvailable(): Promise<boolean> {
+  if (_printServerAvailable !== null) return _printServerAvailable;
+  try {
+    const res = await fetch(`${PRINT_SERVER_URL}/health`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    _printServerAvailable = res.ok;
+  } catch {
+    _printServerAvailable = false;
+  }
+  return _printServerAvailable;
+}
+
+/** Invalidate the cached availability so the next print re-checks. */
+export function resetPrintServerCache(): void {
+  _printServerAvailable = null;
+}
+
 export class PrintAdapter {
   /**
-   * Prints ticket instantly using thermal layout template and ESC/POS payload generator.
+   * Prints ticket instantly using thermal layout template.
+   *
+   * Strategy (in order):
+   *  1. POST receipt HTML to the local Node print server (print-server.cjs).
+   *     The server renders it with Playwright → PDF → pdf-to-printer.
+   *     Result: completely silent, zero browser or OS dialog.
+   *  2. If the print server is not running, fall back to window.print().
+   *     This still works for development / non-kiosk use.
    */
   static async printTicket(
     ticket: Ticket,
@@ -32,34 +72,37 @@ export class PrintAdapter {
         },
       });
 
-      // Update DOM Thermal Print Area
+      // Build the receipt HTML (shared by both print paths)
+      const receiptHtml = `
+        <div style="text-align: center; font-weight: bold; font-size: 16px; margin-bottom: 6px;">
+          ${businessName}
+        </div>
+        <div style="text-align: center; font-size: 12px; color: #333; margin-bottom: 4px;">
+          OFFICIAL RECEIPT / TICKET
+        </div>
+        <div style="border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 8px 0; margin: 8px 0; text-align: center;">
+          <div style="font-size: 34px; font-weight: 900; line-height: 1;">
+            ${formattedAmount}
+          </div>
+        </div>
+        <div style="text-align: center; font-size: 11px; margin-bottom: 6px; font-weight: bold;">
+          TICKET #${ticket.id}
+        </div>
+        <div style="text-align: center; font-size: 10px; color: #444; margin-bottom: 10px;">
+          ${formattedTime}
+        </div>
+        <div style="display: flex; justify-content: center; margin-bottom: 8px;">
+          ${qrSvgString}
+        </div>
+        <div style="text-align: center; font-size: 9px; color: #666; margin-top: 4px;">
+          Scan to Verify • Non-Transferable
+        </div>
+      `;
+
+      // Update DOM Thermal Print Area (used by the window.print() fallback)
       const printContainer = document.getElementById('thermalPrintArea');
       if (printContainer) {
-        printContainer.innerHTML = `
-          <div style="text-align: center; font-weight: bold; font-size: 16px; margin-bottom: 6px;">
-            ${businessName}
-          </div>
-          <div style="text-align: center; font-size: 12px; color: #333; margin-bottom: 4px;">
-            OFFICIAL RECEIPT / TICKET
-          </div>
-          <div style="border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 8px 0; margin: 8px 0; text-align: center;">
-            <div style="font-size: 34px; font-weight: 900; line-height: 1;">
-              ${formattedAmount}
-            </div>
-          </div>
-          <div style="text-align: center; font-size: 11px; margin-bottom: 6px; font-weight: bold;">
-            TICKET #${ticket.id}
-          </div>
-          <div style="text-align: center; font-size: 10px; color: #444; margin-bottom: 10px;">
-            ${formattedTime}
-          </div>
-          <div style="display: flex; justify-content: center; margin-bottom: 8px;">
-            ${qrSvgString}
-          </div>
-          <div style="text-align: center; font-size: 9px; color: #666; margin-top: 4px;">
-            Scan to Verify • Non-Transferable
-          </div>
-        `;
+        printContainer.innerHTML = receiptHtml;
       }
 
       // Console ESC/POS Payload Logging (per specification)
@@ -71,9 +114,34 @@ export class PrintAdapter {
         timestamp: ticket.createdAt,
       });
 
-      // Execute window.print() in browser preview
+      // ── Path 1: Silent local print server ─────────────────────────────────
+      const serverAvailable = await isPrintServerAvailable();
+
+      if (serverAvailable) {
+        console.log('[PrintAdapter] Using silent print server →', PRINT_SERVER_URL);
+        const resp = await fetch(`${PRINT_SERVER_URL}/print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ html: receiptHtml, ticketId: ticket.id }),
+          signal: AbortSignal.timeout(15000),
+        });
+
+        const result = await resp.json();
+
+        if (!resp.ok || !result.success) {
+          throw new Error(result.error || `Print server responded ${resp.status}`);
+        }
+
+        return {
+          success: true,
+          ticketId: ticket.id,
+          message: `Printed ticket #${ticket.id} (${formattedAmount}) — silent`,
+        };
+      }
+
+      // ── Path 2: Fallback — window.print() ─────────────────────────────────
+      console.warn('[PrintAdapter] Print server not available — falling back to window.print()');
       if (typeof window !== 'undefined' && window.print) {
-        // Trigger window print without blocking main thread
         setTimeout(() => {
           window.print();
         }, 50);
@@ -84,7 +152,11 @@ export class PrintAdapter {
         ticketId: ticket.id,
         message: `Printed ticket #${ticket.id} (${formattedAmount})`,
       };
+
     } catch (error: any) {
+      // If the print server call itself threw, invalidate the cache so the
+      // next ticket re-checks availability rather than hammering a broken server.
+      resetPrintServerCache();
       console.error('[Thermal Print Adapter Error]:', error);
       return {
         success: false,
