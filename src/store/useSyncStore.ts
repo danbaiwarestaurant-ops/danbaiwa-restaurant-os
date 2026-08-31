@@ -4,6 +4,7 @@ import { dbService } from '../services/db/IndexedDbService';
 import { supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { toSnakeCase } from '../utils/caseMapping';
+import { getAccountId } from '../services/db/accountScope';
 
 interface SyncStoreState extends SyncState {
   pendingItems: OutboxItem[];
@@ -13,24 +14,39 @@ interface SyncStoreState extends SyncState {
 }
 
 /**
- * True when a push was rejected for a reason that has nothing to do with the row
- * itself — no session, an expired JWT, or an RLS policy the anonymous role can't
- * satisfy. Those must never count against a row's retry budget: the row is fine, the
- * till just isn't authenticated, and charging it for that is exactly how a couple of
+ * Errors that unambiguously mean "this browser is not authenticated" — no session or a
+ * dead JWT. These must never count against a row's retry budget: the row is fine, the
+ * till just isn't signed in, and charging it for that is exactly how a couple of
  * cloud-less minutes used to orphan a day of tickets permanently.
  */
-function isAuthOrPolicyFailure(error: { code?: string; message?: string } | null): boolean {
+function isSessionFailure(error: { code?: string; message?: string } | null): boolean {
   if (!error) return false;
   const code = String(error.code ?? '');
   const msg = String(error.message ?? '').toLowerCase();
   return (
-    code === '42501' || // insufficient_privilege / RLS violation
     code === 'PGRST301' || // JWT expired or invalid
-    msg.includes('row-level security') ||
+    code === '401' ||
     msg.includes('jwt') ||
     msg.includes('not authenticated') ||
-    msg.includes('unauthorized') ||
-    msg.includes('invalid claim')
+    msg.includes('unauthorized')
+  );
+}
+
+/**
+ * An RLS violation is ambiguous and must not be read as "the session died".
+ *
+ * Postgres returns the identical 42501 for two completely different situations: an
+ * unauthenticated caller, and a perfectly authenticated caller pushing a row scoped to
+ * a tenant its token doesn't cover (a shift stamped LOC01 against a token carrying a
+ * different location_id, or none at all). Only checking the live session tells them
+ * apart — treating every 42501 as a lost session made a successful reconnect flip
+ * straight back to "Not Signed In to Cloud" on the first mis-scoped row.
+ */
+function isRlsViolation(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  return (
+    String(error.code ?? '') === '42501' ||
+    String(error.message ?? '').toLowerCase().includes('row-level security')
   );
 }
 
@@ -102,25 +118,52 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     try {
       const items = await dbService.getPendingOutbox();
       const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
+      // The tenant key every RLS policy checks. Resolved once per batch rather than per
+      // row, and never cached across batches, so a different account signing in on this
+      // device can't push under the previous one's id.
+      const accountId = await getAccountId();
 
       for (const item of items) {
         try {
           // Prepare payload with camelCase -> snake_case conversion
           const supabasePayload = toSnakeCase(item.payload);
 
-          // Inject location_id scope for tables whose local payload has no locationId
-          // field of its own, to satisfy RLS policies.
+          // Every synced row is owned by an account — this is what the RLS policies
+          // compare against auth.uid(). Applied uniformly rather than per-table.
+          if (accountId) supabasePayload.account_id = accountId;
+
+          // location_id is descriptive now, not security-relevant, but audit_logs and
+          // users have no locationId of their own to carry, so still supply it.
           if (item.tableName === 'users' || item.tableName === 'audit_logs') {
             supabasePayload.location_id = locationId;
           }
 
-          // Perform real cloud upsert using Client UUID primary key
-          const { error } = await supabase
-            .from(item.tableName)
-            .upsert(supabasePayload, { onConflict: 'id' });
+          // account_settings is keyed by account_id (one row per account), every other
+          // table by the client-generated row id.
+          const conflictKey = item.tableName === 'account_settings' ? 'account_id' : 'id';
+
+          // Removals have to be sent as removals. This branch used to be absent — every
+          // queued row was upserted regardless of its action — so a DELETE would have
+          // written the row straight back into the cloud instead of taking it out.
+          // Scoped by account_id as well as id so a malformed queue entry can never reach
+          // beyond this tenant.
+          const { error } =
+            item.action === 'DELETE'
+              ? await supabase
+                  .from(item.tableName)
+                  .delete()
+                  .eq('id', item.payload.id)
+                  .eq('account_id', accountId ?? '')
+              : await supabase
+                  .from(item.tableName)
+                  .upsert(supabasePayload, { onConflict: conflictKey });
 
           if (error) {
-            if (isAuthOrPolicyFailure(error)) {
+            // An RLS rejection only means "signed out" if the session really is gone.
+            const sessionLost =
+              isSessionFailure(error) || (isRlsViolation(error) && !(await hasCloudSession()));
+
+            if (sessionLost) {
               // The till lost its cloud authorisation mid-batch. Abort without charging
               // this row — or any row behind it — for something none of them caused.
               console.warn(
@@ -134,6 +177,15 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
               });
               return;
             }
+
+            if (isRlsViolation(error)) {
+              // Signed in, but this row belongs to a scope the token doesn't cover. The
+              // session is healthy, so say what is actually wrong instead of blaming it.
+              set({
+                cloudError: `Signed in, but the cloud is refusing this ${item.tableName} record because it is scoped to a different location than your account (${error.message}). It stays queued and will be retried.`,
+              });
+            }
+
             throw Object.assign(new Error(error.message), { code: error.code });
           }
 

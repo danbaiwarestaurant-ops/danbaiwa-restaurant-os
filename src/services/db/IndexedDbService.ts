@@ -24,6 +24,15 @@ import { db, UserRow, AuditLogRow, computeLoginKeys, stripUserRow } from './dexi
 import { isLocalDataEmpty, restoreFromCloud } from './cloudBackup';
 
 const DEFAULT_CONFIG_KEY = 'device_config';
+const INSTALLATION_ID_KEY = 'installation_id';
+
+/** Short, readable, collision-resistant token identifying this browser install. */
+function generateInstallationId(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1 — these get printed
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+}
+
 /** Retry count past which a row is reported as "stuck" in the UI. It keeps retrying. */
 const STUCK_AFTER_RETRIES = 8;
 const BASE_BACKOFF_MS = 5_000;
@@ -68,9 +77,25 @@ export class IndexedDbService implements IDbService {
         };
         await db.config.put({ key: DEFAULT_CONFIG_KEY, value: defaultConfig });
       }
+
+      // Per-browser identity for ticket numbering. Deliberately NOT part of
+      // DeviceConfig: config follows the account to every device, so locationId and
+      // deviceId are necessarily shared between tills and cannot make an id unique.
+      // Generated once, never synced, never surfaced in settings.
+      const install = await db.config.get(INSTALLATION_ID_KEY);
+      if (!install?.value) {
+        await db.config.put({ key: INSTALLATION_ID_KEY, value: generateInstallationId() });
+      }
     })();
 
     return this.initPromise;
+  }
+
+  /** This browser's installation token, generated on first init(). */
+  async getInstallationId(): Promise<string> {
+    await this.init();
+    const row = await db.config.get(INSTALLATION_ID_KEY);
+    return (row?.value as string) || 'LOCAL';
   }
 
   /** True when this device holds no operational records yet (fresh/wiped install). */
@@ -95,8 +120,25 @@ export class IndexedDbService implements IDbService {
     return row ? row.value : null;
   }
 
+  /**
+   * Persists config and queues it for the account, so business settings follow the admin
+   * to every device they sign in on.
+   *
+   * Only user-initiated saves come through here — init()'s first-boot default writes
+   * straight to Dexie, so a fresh install doesn't push a default config over whatever
+   * the account already has. Remote settings arriving from another device are applied by
+   * applyRemoteSettings(), which likewise bypasses this to avoid a push/pull loop.
+   */
   async saveDeviceConfig(config: DeviceConfig): Promise<void> {
-    await db.config.put({ key: DEFAULT_CONFIG_KEY, value: config });
+    await db.transaction('rw', db.config, db.outbox, async () => {
+      await db.config.put({ key: DEFAULT_CONFIG_KEY, value: config });
+      await db.outbox.add(
+        queueOutboxRow('account_settings', 'UPDATE', {
+          settings: config,
+          updatedAt: new Date().toISOString(),
+        })
+      );
+    });
   }
 
   // ─── Users ───────────────────────────────────────────────────────────────
@@ -132,6 +174,34 @@ export class IndexedDbService implements IDbService {
       await db.users.put(row);
       await db.outbox.add(queueOutboxRow('users', 'UPDATE', stamped));
     });
+  }
+
+  /**
+   * Removes a staff account outright, queueing the removal for the cloud in the same
+   * transaction.
+   *
+   * The queued DELETE is what makes this real rather than local: without it the next
+   * reconciliation pull would find the row still in Supabase and put it straight back.
+   * Callers must establish that the account owns no records first — see
+   * countRecordsForUser — because nothing here cascades, and a ticket whose cashier no
+   * longer exists loses its name for good.
+   */
+  async deleteUser(userId: string): Promise<void> {
+    await db.transaction('rw', db.users, db.outbox, async () => {
+      await db.users.delete(userId);
+      await db.outbox.add(queueOutboxRow('users', 'DELETE', { id: userId }));
+    });
+  }
+
+  /** How much history a staff account owns, per table. All zero means nothing is lost by deleting it. */
+  async countRecordsForUser(userId: string): Promise<{ tickets: number; shifts: number; expenses: number; auditLogs: number }> {
+    const [tickets, shifts, expenses, auditLogs] = await Promise.all([
+      db.tickets.where('cashierId').equals(userId).count(),
+      db.shifts.where('cashierId').equals(userId).count(),
+      db.expenses.where('cashierId').equals(userId).count(),
+      db.auditLogs.where('actorId').equals(userId).count(),
+    ]);
+    return { tickets, shifts, expenses, auditLogs };
   }
 
   // ─── Tickets ─────────────────────────────────────────────────────────────
@@ -181,9 +251,15 @@ export class IndexedDbService implements IDbService {
     });
   }
 
-  /** Atomically increment sequence counter */
-  async getNextSeq(locationId: string, deviceId: string): Promise<number> {
-    const key = `${locationId}_${deviceId}`;
+  /**
+   * Atomically increment this installation's ticket counter.
+   *
+   * Keyed by installationId, not locationId/deviceId: those are account-level settings
+   * that follow the admin to every device, so keying on them would have two tills
+   * sharing one counter and minting duplicate ticket ids.
+   */
+  async getNextSeq(_locationId: string, _deviceId: string): Promise<number> {
+    const key = `seq_${await this.getInstallationId()}`;
     return db.transaction('rw', db.sequences, async () => {
       const row = await db.sequences.get(key);
       const val = (row?.nextVal ?? 0) + 1;

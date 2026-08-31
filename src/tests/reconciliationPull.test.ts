@@ -1,12 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db, TABLE_NAMES } from '../services/db/dexieSchema';
 
+const TEST_ACCOUNT_ID = 'acct-0000-1111';
+
 const fixtures: Record<string, any[]> = {
   users: [],
   tickets: [],
   shifts: [],
   expenses: [],
   audit_logs: [],
+  account_settings: [],
 };
 let failTable: string | null = null;
 
@@ -17,6 +20,7 @@ function makeQuery(table: string) {
   };
   const builder: any = {
     eq: () => builder,
+    maybeSingle: () => Promise.resolve({ data: (fixtures[table] ?? [])[0] ?? null, error: null }),
     then: (onFulfilled: any) => Promise.resolve(resolve()).then(onFulfilled),
   };
   return builder;
@@ -26,8 +30,13 @@ vi.mock('../services/supabase/supabaseClient', () => ({
   isSupabaseConfigured: true,
   supabase: {
     auth: {
-      getSession: vi.fn().mockResolvedValue({ data: { session: { access_token: 'test-token' } } }),
-      getUser: vi.fn().mockResolvedValue({ data: { user: { user_metadata: { location_id: 'LOC01' } } } }),
+      // The account id is the tenant key the whole pull scopes by, and it comes from
+      // the session's user id — so the mocked session must carry one. Inlined rather
+      // than referencing a const: vi.mock is hoisted above every top-level binding.
+      getSession: vi.fn().mockResolvedValue({
+        data: { session: { access_token: 'test-token', user: { id: 'acct-0000-1111' } } },
+      }),
+      getUser: vi.fn().mockResolvedValue({ data: { user: { id: 'acct-0000-1111' } } }),
     },
     from: vi.fn((table: string) => ({ select: () => makeQuery(table) })),
   },
@@ -43,6 +52,7 @@ describe('runReconciliationPull', () => {
     fixtures.shifts = [];
     fixtures.expenses = [];
     fixtures.audit_logs = [];
+    fixtures.account_settings = [];
     failTable = null;
   });
 

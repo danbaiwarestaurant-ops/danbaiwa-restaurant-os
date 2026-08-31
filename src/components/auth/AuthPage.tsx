@@ -274,13 +274,25 @@ export const AuthPage: React.FC = () => {
             <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
                 <Mail className="w-3.5 h-3.5 text-amber-600" />
-                <span>Email Address / Username</span>
+                <span>Email Address / Staff ID</span>
               </label>
+              {/*
+                Deliberately type="text", not type="email".
+                A cashier signs in with the staff ID the admin gave them ("amina", "till-2"),
+                which has no @ in it — so an email input's own validation blocked the form
+                before it could ever be submitted, and there was no way for a cashier to log
+                in at all. The lookup has always accepted either: getUserByEmail matches on
+                loginKeys, which holds both the email and the username.
+              */}
               <input
-                type="email"
+                type="text"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={loginEmail}
                 onChange={e => setLoginEmail(e.target.value)}
-                placeholder="owner@gmail.com"
+                placeholder="owner@gmail.com or staff ID"
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
                 disabled={isLockedOut}
                 required
@@ -291,7 +303,7 @@ export const AuthPage: React.FC = () => {
               <div className="flex justify-between items-center mb-1">
                 <label className="block text-xs font-bold uppercase text-slate-700 flex items-center gap-1">
                   <Lock className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Password or Custom PIN</span>
+                  <span>Password or PIN</span>
                 </label>
                 <button
                   type="button"

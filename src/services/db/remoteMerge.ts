@@ -27,6 +27,46 @@ const DEXIE_TABLE: Record<SyncablePgTable, 'users' | 'tickets' | 'shifts' | 'exp
   audit_logs: 'auditLogs',
 };
 
+const DEVICE_CONFIG_KEY = 'device_config';
+
+/**
+ * Applies account settings arriving from another device.
+ *
+ * Writes straight to the local config row rather than through
+ * IndexedDbService.saveDeviceConfig, which queues an outbox row — routing an incoming
+ * change through it would push it straight back, same push/pull loop applyRemoteRow
+ * avoids. Last-write-wins on the server-set updatedAt, and skipped entirely while this
+ * device has an unsynced config change of its own.
+ *
+ * Returns true if local config actually changed.
+ */
+export async function applyRemoteSettings(remote: {
+  settings?: Record<string, any>;
+  updatedAt?: string;
+}): Promise<boolean> {
+  if (!remote?.settings || typeof remote.settings !== 'object') return false;
+
+  const dirty = await db.outbox
+    .filter((o) => o.tableName === 'account_settings' && o.status !== 'synced')
+    .first();
+  if (dirty) return false;
+
+  const existing = await db.config.get(DEVICE_CONFIG_KEY);
+  const localUpdatedAt = (existing?.value as any)?.__updatedAt as string | undefined;
+  if (!shouldApplyRemote(localUpdatedAt ? { updatedAt: localUpdatedAt } : undefined, remote)) {
+    return false;
+  }
+
+  // deviceId/deviceName are account-level by explicit product decision, so they are
+  // carried across too. Ticket-id uniqueness does not depend on them — that comes from
+  // the never-synced installation id (see IndexedDbService.getInstallationId).
+  await db.config.put({
+    key: DEVICE_CONFIG_KEY,
+    value: { ...(existing?.value ?? {}), ...remote.settings, __updatedAt: remote.updatedAt },
+  });
+  return true;
+}
+
 /** True when a pending/failed outbox entry exists for this row — it hasn't synced up yet. */
 export async function isRowDirty(pgTable: SyncablePgTable, id: string): Promise<boolean> {
   const match = await db.outbox

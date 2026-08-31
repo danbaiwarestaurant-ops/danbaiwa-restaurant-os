@@ -2,21 +2,37 @@ import { create } from 'zustand';
 import { Shift } from '../types/shift';
 import { dbService } from '../services/db/IndexedDbService';
 import { calculateShiftReconciliation } from '../utils/reconciliation';
-import { useTicketStore } from './useTicketStore';
+import { shiftTickets, summariseTickets } from '../utils/analytics';
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';
+import { useDeviceStore } from './useDeviceStore';
 
 interface ShiftState {
   currentShift: Shift | null;
+  /**
+   * Every shift, for the console's reconciliation view. Separate from `currentShift`,
+   * which is strictly the signed-in user's own open shift and gates ticket issuing —
+   * conflating the two would make an admin's shift button reflect somebody else's shift.
+   */
+  shiftHistory: Shift[];
   isLoading: boolean;
   loadShift: (userId?: string) => Promise<void>;
-  openShift: (openingFloat: number, cashierName?: string, cashierId?: string) => Promise<Shift>;
+  loadShiftHistory: () => Promise<void>;
+  openShift: (openingFloat?: number, cashierName?: string, cashierId?: string) => Promise<Shift>;
   closeShift: (countedCash: number, notes?: string) => Promise<Shift>;
 }
 
 export const useShiftStore = create<ShiftState>((set, get) => ({
   currentShift: null,
+  shiftHistory: [],
   isLoading: false,
+
+  loadShiftHistory: async () => {
+    await dbService.init();
+    const shifts = await dbService.getShifts();
+    shifts.sort((a, b) => (b.openedAt || '').localeCompare(a.openedAt || ''));
+    set({ shiftHistory: shifts });
+  },
 
   loadShift: async (userId?: string) => {
     set({ isLoading: true });
@@ -25,16 +41,23 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     set({ currentShift: shift, isLoading: false });
   },
 
-  openShift: async (openingFloat: number, cashierName?: string, cashierId?: string) => {
+  // openingFloat defaults to 0: opening a shift is a one-click confirmation and no
+  // longer prompts for a cash float. calculateShiftReconciliation clamps it, so close-out
+  // simply reconciles tickets minus approved expenses.
+  openShift: async (openingFloat: number = 0, cashierName?: string, cashierId?: string) => {
     // Use active authenticated user if not provided
     const activeUser = useAuthStore.getState().activeUser;
     const resolvedCashierId = cashierId || activeUser?.id || '';
     const resolvedCashierName = cashierName || activeUser?.name || 'Cashier';
 
+    // Was hardcoded to LOC01/DEV01, ignoring config entirely — which is why a
+    // misconfigured scope surfaced as an RLS rejection on shifts before any other table.
+    const config = useDeviceStore.getState().config;
+
     const newShift: Shift = {
       id: crypto.randomUUID(),
-      locationId: 'LOC01',
-      deviceId: 'DEV01',
+      locationId: config.locationId || 'LOC01',
+      deviceId: config.deviceId || 'DEV01',
       cashierId: resolvedCashierId,
       cashierName: resolvedCashierName,
       status: 'open',
@@ -54,9 +77,17 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     const shift = get().currentShift;
     if (!shift) throw new Error('No active shift to close');
 
-    const tickets = useTicketStore.getState().tickets;
-    const shiftTickets = tickets.filter(t => t.status === 'paid' || t.status === 'collected');
-    const totalCashTickets = shiftTickets.reduce((sum, t) => sum + t.amount, 0);
+    // Read this cashier's tickets straight from the database rather than the store: the
+    // store is scoped to whoever is signed in, which for an admin is every cashier's
+    // tickets and for a cashier may be a stale subset.
+    //
+    // Previously this summed *every* ticket in the store with no window at all, so
+    // expected cash was the account's lifetime revenue and the variance written against
+    // the shift was nonsense. shiftTickets bounds it to this cashier, this shift.
+    const cashierTickets = await dbService.getTickets(shift.cashierId);
+    const totalCashTickets = summariseTickets(
+      shiftTickets(cashierTickets, { ...shift, closedAt: new Date().toISOString() })
+    ).revenue;
 
     const expenses = await dbService.getExpenses(shift.id);
     const approvedExpenses = expenses.filter(e => e.status === 'approved').reduce((sum, e) => sum + e.amount, 0);
@@ -66,7 +97,10 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     await dbService.closeShift(shift.id, recon.countedCash, recon.expectedCash, recon.variance, notes);
 
     set({ currentShift: null });
-    await get().loadShift();
+    // Scoped to the cashier who owned it — an unscoped reload could pick up a *different*
+    // user's open shift and present it as this till's own.
+    await get().loadShift(shift.cashierId);
+    await get().loadShiftHistory();
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });

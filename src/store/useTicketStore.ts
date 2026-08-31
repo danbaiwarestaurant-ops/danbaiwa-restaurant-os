@@ -11,6 +11,14 @@ interface TicketState {
   ticketsTodayCount: number;
   isLoading: boolean;
   activeFlashingAmount: number | null;
+  /**
+   * Whose tickets the list currently holds — undefined means the whole account.
+   *
+   * Remembered so that an internal refresh after a void or a collection reloads the *same*
+   * scope. Calling loadTickets() bare, as those used to, silently widened a cashier's till
+   * to every cashier's tickets the first time they voided anything.
+   */
+  scope: string | undefined;
   loadTickets: (userId?: string) => Promise<void>;
   createAndPrintTicket: (amount: number, cashierId?: string) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
@@ -23,9 +31,10 @@ export const useTicketStore = create<TicketState>((set, get) => ({
   ticketsTodayCount: 0,
   isLoading: false,
   activeFlashingAmount: null,
+  scope: undefined,
 
   loadTickets: async (userId?: string) => {
-    set({ isLoading: true });
+    set({ isLoading: true, scope: userId });
     await dbService.init();
     const tickets = await dbService.getTickets(userId);
     const todayStr = new Date().toISOString().split('T')[0];
@@ -50,8 +59,9 @@ export const useTicketStore = create<TicketState>((set, get) => ({
      * Either way the DB and receipt are always in sync.
      */
     await dbService.init();
+    const installationId = await dbService.getInstallationId();
     const nextSeq = await dbService.getNextSeq(locationId, deviceId);
-    const compositeId = generateCompositeKey(locationId, deviceId, nextSeq);
+    const compositeId = generateCompositeKey(locationId, deviceId, nextSeq, installationId);
     const nowIso = new Date().toISOString();
 
     const newTicket: Ticket = {
@@ -100,7 +110,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
 
   markCollected: async (ticketId: string) => {
     await dbService.updateTicketStatus(ticketId, 'collected');
-    await get().loadTickets();
+    await get().loadTickets(get().scope);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
@@ -108,7 +118,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
 
   voidTicket: async (ticketId: string, reason: string, voidedBy: string) => {
     await dbService.updateTicketStatus(ticketId, 'void', reason, voidedBy);
-    await get().loadTickets();
+    await get().loadTickets(get().scope);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });

@@ -8,6 +8,12 @@ import { useSyncStore } from './useSyncStore';
 interface ExpenseState {
   expenses: Expense[];
   isLoading: boolean;
+  /**
+   * The filter the list was last loaded with. Remembered for the same reason as the ticket
+   * store's: an internal refresh after logging or approving an expense must reload the
+   * scope the view is actually showing, not silently fall back to the whole account.
+   */
+  scope: { shiftId?: string; userId?: string };
   loadExpenses: (shiftId?: string, userId?: string) => Promise<void>;
   logExpense: (amount: number, category: string, description: string) => Promise<Expense>;
   approveExpense: (expenseId: string, reviewerName: string) => Promise<void>;
@@ -17,9 +23,10 @@ interface ExpenseState {
 export const useExpenseStore = create<ExpenseState>((set, get) => ({
   expenses: [],
   isLoading: false,
+  scope: {},
 
   loadExpenses: async (shiftId?: string, userId?: string) => {
-    set({ isLoading: true });
+    set({ isLoading: true, scope: { shiftId, userId } });
     await dbService.init();
     const expenses = await dbService.getExpenses(shiftId, userId);
     set({ expenses, isLoading: false });
@@ -41,7 +48,7 @@ export const useExpenseStore = create<ExpenseState>((set, get) => ({
     };
 
     await dbService.saveExpense(newExpense);
-    await get().loadExpenses();
+    await get().loadExpenses(get().scope.shiftId, get().scope.userId);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
@@ -50,7 +57,7 @@ export const useExpenseStore = create<ExpenseState>((set, get) => ({
 
   approveExpense: async (expenseId: string, reviewerName: string = 'Manager') => {
     await dbService.updateExpenseStatus(expenseId, 'approved', reviewerName);
-    await get().loadExpenses();
+    await get().loadExpenses(get().scope.shiftId, get().scope.userId);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
@@ -58,7 +65,7 @@ export const useExpenseStore = create<ExpenseState>((set, get) => ({
 
   rejectExpense: async (expenseId: string, reviewerName: string = 'Manager', reason: string) => {
     await dbService.updateExpenseStatus(expenseId, 'rejected', reviewerName, reason);
-    await get().loadExpenses();
+    await get().loadExpenses(get().scope.shiftId, get().scope.userId);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });

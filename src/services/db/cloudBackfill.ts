@@ -19,6 +19,7 @@
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
 import { db, stripUserRow, UserRow } from './dexieSchema';
+import { getAccountId } from './accountScope';
 import { dbService } from './IndexedDbService';
 import { SyncablePgTable } from './remoteMerge';
 
@@ -49,6 +50,9 @@ export async function runBackfillPush(): Promise<number> {
   const { data: sessionData } = await supabase.auth.getSession();
   if (!sessionData?.session) return 0;
 
+  const accountId = await getAccountId();
+  if (!accountId) return 0;
+
   let queuedTotal = 0;
 
   for (const { pg, dexie } of BACKFILL_TABLES) {
@@ -57,7 +61,9 @@ export async function runBackfillPush(): Promise<number> {
       if (!localRows.length) continue;
 
       // Only ids are needed for the diff, so this stays cheap even on a long history.
-      const { data, error } = await supabase.from(pg).select('id');
+      // Scoped to this account: without the filter another tenant's ids could read as
+      // "already present" and this sweep would skip uploads it needed to make.
+      const { data, error } = await supabase.from(pg).select('id').eq('account_id', accountId);
       if (error) {
         console.warn(`[cloudBackfill] could not read cloud ids for ${pg}:`, error.message);
         continue;

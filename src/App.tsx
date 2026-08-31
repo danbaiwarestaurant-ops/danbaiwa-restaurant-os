@@ -5,12 +5,14 @@ import { useShiftStore } from './store/useShiftStore';
 import { useExpenseStore } from './store/useExpenseStore';
 import { useSyncStore } from './store/useSyncStore';
 import { useAuthStore } from './store/useAuthStore';
+import { useAuditStore } from './store/useAuditStore';
 
 import { Header } from './components/common/Header';
 import { Toast } from './components/common/Toast';
 import { PinModal } from './components/common/PinModal';
 import { QuickConfigModal } from './components/common/QuickConfigModal';
 import { AuthPage } from './components/auth/AuthPage';
+import { RecoveryKeyNotice } from './components/auth/RecoveryKeyNotice';
 
 import { PresetCardGrid } from './components/ticket/PresetCardGrid';
 import { CustomAmountInput } from './components/ticket/CustomAmountInput';
@@ -22,16 +24,17 @@ import { ScanCollectorModal } from './components/ticket/ScanCollectorModal';
 import { OpenShiftModal } from './components/shift/OpenShiftModal';
 import { CloseShiftModal } from './components/shift/CloseShiftModal';
 import { ExpenseLoggerModal } from './components/expense/ExpenseLoggerModal';
-import { ManagerDashboard } from './components/manager/ManagerDashboard';
+import { ManagerConsole } from './components/manager/ManagerConsole';
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 
 export function App() {
   const { loadConfig } = useDeviceStore();
   const { loadTickets, voidTicket } = useTicketStore();
-  const { currentShift, loadShift } = useShiftStore();
+  const { currentShift, loadShift, loadShiftHistory } = useShiftStore();
   const { loadExpenses } = useExpenseStore();
   const { checkOutbox } = useSyncStore();
+  const { loadAuditLogs } = useAuditStore();
 
   const {
     activeUser,
@@ -42,6 +45,8 @@ export function App() {
     pinModalPurpose,
     openPinModal,
     closePinModal,
+    grantAdminAuthority,
+    revokeAdminAuthority,
   } = useAuthStore();
 
   // Modals state
@@ -78,20 +83,35 @@ export function App() {
     checkOutbox();
   }, []);
 
-  // Reload user-scoped data whenever activeUser changes. Tickets/expenses show a
-  // location-wide rollup for admins (so the Manager Dashboard reflects every till,
-  // not just this device) but stay scoped to "my own" for cashiers. currentShift is
-  // never rolled up — it's a personal "is my shift open" gate, always the signed-in
-  // user's own shift regardless of role (see realtimeSync.ts's scheduleStoreReload
-  // for the same distinction on the sync side).
+  // Reload data whenever the signed-in user or the view changes.
+  //
+  // At the till, tickets and expenses roll up across the account for an admin but stay
+  // scoped to "my own" for a cashier. currentShift is never rolled up — it's a personal
+  // "is my shift open" gate, always the signed-in user's own shift regardless of role (see
+  // realtimeSync.ts's scheduleStoreReload for the same distinction on the sync side).
+  //
+  // The manager console is different: it is the account's books, so it always loads the
+  // whole account. Entering it already requires the admin PIN, and whichever cashier is
+  // signed in at the till has no bearing on what the owner is entitled to read — a console
+  // that narrowed itself to the logged-in cashier would report that month's revenue as
+  // whatever that one person happened to take.
   useEffect(() => {
-    if (isAuthenticated && activeUser) {
-      const rollupScope = activeUser.role === 'admin' ? undefined : activeUser.id;
-      loadTickets(rollupScope);
-      loadShift(activeUser.id);
-      loadExpenses(undefined, rollupScope);
+    if (!isAuthenticated || !activeUser) return;
+
+    if (isManagerView) {
+      loadTickets();
+      loadExpenses();
+      loadUsers();
+      loadShiftHistory();
+      loadAuditLogs();
+      return;
     }
-  }, [isAuthenticated, activeUser?.id, activeUser?.role]);
+
+    const rollupScope = activeUser.role === 'admin' ? undefined : activeUser.id;
+    loadTickets(rollupScope);
+    loadShift(activeUser.id);
+    loadExpenses(undefined, rollupScope);
+  }, [isAuthenticated, activeUser?.id, activeUser?.role, isManagerView]);
 
   // 5-Minute Inactivity Idle Auto-Lock Timer
   useEffect(() => {
@@ -101,11 +121,18 @@ export function App() {
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       idleTimerRef.current = setTimeout(() => {
         if (!isPinModalOpen) {
-          openPinModal('Screen Auto-Locked due to Inactivity', (verified) => {
-            if (!verified) {
-              showError('Authentication required to unlock till');
-            }
-          });
+          openPinModal(
+            'Screen Auto-Locked due to Inactivity',
+            (verified) => {
+              if (!verified) {
+                showError('Authentication required to unlock till');
+              }
+            },
+            // The signed-in cashier's own PIN reopens it. This used to demand an admin
+            // PIN, so a cashier working a shift alone was locked out of the till by the
+            // idle timer until the owner came over.
+            'session'
+          );
         }
       }, INACTIVITY_TIMEOUT_MS);
     };
@@ -144,12 +171,17 @@ export function App() {
     if (!isManagerView) {
       openPinModal('Access Manager Mode', (verified) => {
         if (verified) {
+          // validatePin only ever matches an *admin* PIN, so a successful unlock is proof
+          // of admin authority regardless of who is signed in at the till. The console's
+          // admin-only actions check this rather than the signed-in role.
+          grantAdminAuthority();
           setIsManagerView(true);
         } else {
           showError('Invalid Manager PIN');
         }
       });
     } else {
+      revokeAdminAuthority();
       setIsManagerView(false);
     }
   };
@@ -171,6 +203,37 @@ export function App() {
     return <AuthPage />;
   }
 
+  // Renders only in the moment after a recovery key is issued — see RecoveryKeyNotice.
+  // Mounted above every view so it cannot be skipped past by whatever screen follows
+  // registration.
+
+  const requireManagerPin = (purpose: string, onVerified: () => void) => {
+    openPinModal(purpose, (verified) => {
+      if (verified) onVerified();
+      else showError('Manager PIN required');
+    });
+  };
+
+  // The console takes the whole screen rather than rendering beneath the till header:
+  // leaving the till is explicit, and the till's own controls are out of reach while
+  // someone is doing back-office work.
+  if (isManagerView) {
+    return (
+      <div className="font-sans text-slate-900 selection:bg-amber-100 selection:text-amber-900">
+        <ManagerConsole
+          onBackToTill={() => {
+            revokeAdminAuthority();
+            setIsManagerView(false);
+          }}
+          onRequirePin={requireManagerPin}
+        />
+        <Toast message={toastMsg} type={toastType} onClose={() => setToastMsg(null)} />
+        <PinModal isOpen={isPinModalOpen} purpose={pinModalPurpose} onClose={closePinModal} />
+        <RecoveryKeyNotice />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 font-sans text-slate-900 selection:bg-amber-100 selection:text-amber-900">
       {/* Top Header */}
@@ -182,39 +245,31 @@ export function App() {
         }}
         onOpenExpenseModal={() => setIsExpenseModalOpen(true)}
         onToggleManagerView={handleToggleManagerView}
+        onLockTill={() =>
+          openPinModal('Till Locked — Enter Your PIN to Resume', () => {}, 'session')
+        }
         isManagerView={isManagerView}
       />
 
       {/* Main Workspace Body */}
-      {isManagerView ? (
-        <ManagerDashboard
-          onRequirePin={(purpose, onVerified) => {
-            openPinModal(purpose, (verified) => {
-              if (verified) onVerified();
-              else showError('Manager PIN required');
-            });
-          }}
-        />
-      ) : (
-        <main className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-0 max-w-[1920px] mx-auto w-full">
-          {/* Main Till Area */}
-          <div className="p-6 space-y-6 overflow-y-auto">
-            {/* Custom Amount Section */}
-            <CustomAmountInput onTicketCreated={showSuccess} onError={showError} />
+      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-0 max-w-[1920px] mx-auto w-full">
+        {/* Main Till Area */}
+        <div className="p-6 space-y-6 overflow-y-auto">
+          {/* Custom Amount Section */}
+          <CustomAmountInput onTicketCreated={showSuccess} onError={showError} />
 
-            {/* Quick Amount Grid */}
-            <div className="bg-white border-2 border-slate-300 rounded-none p-5 shadow-xs">
-              <PresetCardGrid onTicketCreated={showSuccess} onError={showError} />
-            </div>
+          {/* Quick Amount Grid */}
+          <div className="bg-white border-2 border-slate-300 rounded-none p-5 shadow-xs">
+            <PresetCardGrid onTicketCreated={showSuccess} onError={showError} />
           </div>
+        </div>
 
-          {/* Right Sidebar: Recent Tickets */}
-          <RecentTicketsSidebar
-            onOpenVoidModal={handleOpenVoidModal}
-            onOpenScanModal={() => setIsScanModalOpen(true)}
-          />
-        </main>
-      )}
+        {/* Right Sidebar: Recent Tickets */}
+        <RecentTicketsSidebar
+          onOpenVoidModal={handleOpenVoidModal}
+          onOpenScanModal={() => setIsScanModalOpen(true)}
+        />
+      </main>
 
       {/* Hidden Thermal Receipt Printable Area */}
       <ThermalReceiptTemplate />
@@ -241,6 +296,8 @@ export function App() {
         onClose={() => setIsVoidModalOpen(false)}
         onConfirmVoid={handleConfirmVoid}
       />
+
+      <RecoveryKeyNotice />
     </div>
   );
 }

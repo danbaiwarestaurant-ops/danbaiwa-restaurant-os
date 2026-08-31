@@ -5,6 +5,7 @@ import { useTicketStore } from '../../store/useTicketStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
 import { formatCurrency } from '../../utils/currency';
 import { calculateShiftReconciliation } from '../../utils/reconciliation';
+import { shiftTickets, shiftExpenses, summariseTickets, sumApprovedExpenses } from '../../utils/analytics';
 
 interface CloseShiftModalProps {
   isOpen: boolean;
@@ -21,14 +22,12 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
 
   if (!isOpen || !currentShift) return null;
 
-  // Calculate live shift totals
-  const totalCashTickets = tickets
-    .filter(t => t.status === 'paid' || t.status === 'collected')
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const approvedExpenses = expenses
-    .filter(e => e.status === 'approved')
-    .reduce((sum, e) => sum + e.amount, 0);
+  // Live shift totals, bounded to *this* shift: the cashier's own tickets, taken since the
+  // shift opened, and the expenses charged to it. Summing the whole store instead — which
+  // is what this did — showed the cashier an expected-cash figure covering every ticket
+  // the till had ever issued, so the drawer could never balance.
+  const totalCashTickets = summariseTickets(shiftTickets(tickets, currentShift)).revenue;
+  const approvedExpenses = sumApprovedExpenses(shiftExpenses(expenses, currentShift));
 
   const countedNum = parseFloat(countedCash) || 0;
   const recon = calculateShiftReconciliation(
@@ -63,10 +62,14 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           {/* Summary Rollup Box */}
           <div className="bg-slate-50 border-2 border-slate-200 p-4 space-y-2 text-xs rounded-none">
-            <div className="flex justify-between text-slate-600 font-medium">
-              <span>Opening Cash Float:</span>
-              <span className="font-mono font-bold">{formatCurrency(recon.openingFloat)}</span>
-            </div>
+            {/* Shifts no longer record an opening float, so this line would read ₦0 on
+                every new shift. Still shown for older shifts that did record one. */}
+            {recon.openingFloat > 0 && (
+              <div className="flex justify-between text-slate-600 font-medium">
+                <span>Opening Cash Float:</span>
+                <span className="font-mono font-bold">{formatCurrency(recon.openingFloat)}</span>
+              </div>
+            )}
             <div className="flex justify-between text-slate-600 font-medium">
               <span>(+) Total Cash Ticket Sales:</span>
               <span className="font-mono font-bold text-emerald-600">+{formatCurrency(recon.totalCashTickets)}</span>

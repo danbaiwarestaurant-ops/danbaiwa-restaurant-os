@@ -42,6 +42,9 @@ export interface AuditLogRow {
   /** Not set by the local writer — filled in at outbox-push time (see useSyncStore.ts),
    *  same reason `UserAccount` has no locationId field of its own. */
   locationId?: string;
+  /** Owning account: the admin's Supabase auth user id, and the tenant key the
+   *  whole sync layer scopes by. */
+  accountId?: string;
   updatedAt?: string;
 }
 

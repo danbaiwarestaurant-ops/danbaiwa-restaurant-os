@@ -29,6 +29,28 @@ describe('IndexedDbService — Atomic Sequence & Persistence', () => {
     expect(config?.currencySymbol).toBe('₦');
   });
 
+  it('generates a stable installation id, and never regenerates it', async () => {
+    const first = await svc.getInstallationId();
+    expect(first).toMatch(/^[A-Z2-9]{6}$/); // no I/O/0/1 — these get printed on stubs
+
+    await svc.init();
+    expect(await svc.getInstallationId()).toBe(first);
+
+    // A second install (separate service over the same schema) must not inherit it, or
+    // two tills under one account would mint colliding ticket ids.
+    const other = new IndexedDbService();
+    await other.init();
+    expect(await other.getInstallationId()).toBe(first); // same browser, same DB
+  });
+
+  it('keys the ticket sequence by installation, not by account-level config', async () => {
+    // locationId/deviceId follow the account to every device, so they cannot key a
+    // per-till counter. Changing them must not restart or share the sequence.
+    const a = await svc.getNextSeq('LOC01', 'DEV01');
+    const b = await svc.getNextSeq('LOC99', 'DEV99');
+    expect(b).toBe(a + 1);
+  });
+
   it('should return gapless sequential numbers (1,2,3,4,5) under rapid calls', async () => {
     const seqs = await Promise.all([
       svc.getNextSeq('LOC01', 'DEV01'),

@@ -86,13 +86,14 @@ describe('sync worker cloud-session gate', () => {
     expect(useSyncStore.getState().cloudConnected).toBe(false);
   });
 
-  it('aborts the batch without charging retries when authorisation is lost mid-sync', async () => {
+  it('aborts the batch without charging retries when the session is genuinely gone', async () => {
     sessionValue = { access_token: 'valid-at-first' };
     await svc.saveTicket(ticket);
     await svc.saveTicket({ ...ticket, id: 'LOC01-DEV01-GATE002', localSeq: 2 });
     await useSyncStore.getState().checkOutbox();
 
-    // The server rejects with an RLS violation — e.g. the JWT expired mid-batch.
+    // The JWT died mid-batch, and the session check confirms it.
+    sessionValue = null;
     upsertError = { code: '42501', message: 'new row violates row-level security policy' };
     await useSyncStore.getState().triggerSyncWorker();
 
@@ -102,6 +103,27 @@ describe('sync worker cloud-session gate', () => {
       expect(row.retryCount).toBe(0); // not this row's fault — nothing written off
     }
     expect(useSyncStore.getState().cloudConnected).toBe(false);
+  });
+
+  it('keeps the session marked healthy when RLS rejects a row but the session is valid', async () => {
+    // Postgres returns 42501 both for "not authenticated" and for "this row is scoped to
+    // a tenant your token does not cover". Reading the second as the first made a
+    // successful reconnect flip straight back to "Not Signed In to Cloud".
+    sessionValue = { access_token: 'perfectly-valid' };
+    await svc.saveTicket(ticket);
+    await useSyncStore.getState().checkOutbox();
+
+    upsertError = { code: '42501', message: 'new row violates row-level security policy for table "shifts"' };
+    await useSyncStore.getState().triggerSyncWorker();
+
+    // Still connected — the token is fine, the row's scope is not.
+    expect(useSyncStore.getState().cloudConnected).toBe(true);
+    // And it is treated as a row fault: backed off, still queued, never dropped.
+    const rows = await db.outbox.toArray();
+    expect(rows[0].retryCount).toBe(1);
+    expect(rows[0].status).toBe('pending');
+    // The reported reason must name the real problem, not blame the credentials.
+    expect(useSyncStore.getState().cloudError).toMatch(/different location/i);
   });
 
   it('does charge a retry when the row itself is genuinely rejected', async () => {

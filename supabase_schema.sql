@@ -292,3 +292,135 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+
+-- =============================================================================
+-- ACCOUNT-SCOPED TENANCY  (supersedes the location_id scoping above)
+-- =============================================================================
+--
+-- Why this replaces location scoping entirely:
+--
+-- The old policies compared `location_id` against
+-- `auth.jwt() -> 'user_metadata' ->> 'location_id'`. That claim is only ever written
+-- at signup, so every account created before it existed carries no claim at all — the
+-- comparison runs against NULL, matches nothing, and the account can neither write
+-- (42501) nor read (0 rows) anything, with no error visible in the app. Worse, every
+-- install defaults location_id to the literal 'LOC01', so all accounts that DID carry
+-- the claim shared a single data pool and could read each other's tickets.
+--
+-- `auth.uid()` reads the `sub` claim, which is native to every Supabase JWT and always
+-- present. There is nothing to populate at signup, nothing to drift when settings
+-- change, and nothing to backfill onto existing auth users. The tenant is the admin's
+-- auth user id; cashiers hold no cloud identity of their own and simply carry their
+-- admin's account_id.
+--
+-- location_id columns are KEPT as descriptive/reporting fields (the UI still shows
+-- them) but are no longer security-relevant.
+
+ALTER TABLE users      ADD COLUMN IF NOT EXISTS account_id UUID;
+ALTER TABLE tickets    ADD COLUMN IF NOT EXISTS account_id UUID;
+ALTER TABLE shifts     ADD COLUMN IF NOT EXISTS account_id UUID;
+ALTER TABLE expenses   ADD COLUMN IF NOT EXISTS account_id UUID;
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS account_id UUID;
+
+CREATE INDEX IF NOT EXISTS idx_users_account_sb      ON users(account_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_account_sb    ON tickets(account_id);
+CREATE INDEX IF NOT EXISTS idx_shifts_account_sb     ON shifts(account_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_account_sb   ON expenses(account_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_account_sb ON audit_logs(account_id);
+
+-- audit_logs.location_id was NOT NULL under the old scoping. It is descriptive now, and
+-- a till whose config carries no location must still be able to write an audit entry.
+ALTER TABLE audit_logs ALTER COLUMN location_id DROP NOT NULL;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- NOTE: a one-time clean slate ran here on 2026-08-30, clearing rows that predated
+-- account_id. Those rows were owned by nobody, so no policy below could match them —
+-- and because an upsert of the same primary key would have to UPDATE a row the policy
+-- cannot see, they would have permanently BLOCKED re-uploading those ids from a device.
+-- Each till's history was restored from its own local copy by the backfill sweep
+-- (src/services/db/cloudBackfill.ts) on the next sign-in.
+--
+-- The DELETE statements have been removed deliberately: real multi-device data now
+-- lives in these tables and is NOT all recoverable from any single device, so this file
+-- must stay safe to re-run. Do not reintroduce them.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Account-scoped policies
+-- ─────────────────────────────────────────────────────────────────────────────
+DROP POLICY IF EXISTS "Scope users by location" ON users;
+DROP POLICY IF EXISTS "Scope tickets by location" ON tickets;
+DROP POLICY IF EXISTS "Scope shifts by location" ON shifts;
+DROP POLICY IF EXISTS "Scope expenses by location" ON expenses;
+DROP POLICY IF EXISTS "Scope audit_logs read by location" ON audit_logs;
+DROP POLICY IF EXISTS "Scope audit_logs insert by location" ON audit_logs;
+
+-- The `id = auth.uid()` disjunct is load-bearing: adoptAccountFromCloud() reads the
+-- admin's own row on a device that has pulled nothing yet, before any account_id is
+-- known locally. Without it, first-time device adoption cannot bootstrap.
+DROP POLICY IF EXISTS "Scope users by account" ON users;
+CREATE POLICY "Scope users by account" ON users
+FOR ALL TO authenticated
+USING      (id = auth.uid() OR account_id = auth.uid())
+WITH CHECK (id = auth.uid() OR account_id = auth.uid());
+
+DROP POLICY IF EXISTS "Scope tickets by account" ON tickets;
+CREATE POLICY "Scope tickets by account" ON tickets
+FOR ALL TO authenticated
+USING (account_id = auth.uid()) WITH CHECK (account_id = auth.uid());
+
+DROP POLICY IF EXISTS "Scope shifts by account" ON shifts;
+CREATE POLICY "Scope shifts by account" ON shifts
+FOR ALL TO authenticated
+USING (account_id = auth.uid()) WITH CHECK (account_id = auth.uid());
+
+-- Direct account check, replacing the old `shift_id IN (SELECT ... FROM shifts)`
+-- subquery: an expense is no longer unsyncable merely because its shift has not
+-- arrived in the cloud yet.
+DROP POLICY IF EXISTS "Scope expenses by account" ON expenses;
+CREATE POLICY "Scope expenses by account" ON expenses
+FOR ALL TO authenticated
+USING (account_id = auth.uid()) WITH CHECK (account_id = auth.uid());
+
+-- Still deliberately no UPDATE/DELETE policy — immutability enforced by the database.
+DROP POLICY IF EXISTS "Scope audit_logs read by account" ON audit_logs;
+CREATE POLICY "Scope audit_logs read by account" ON audit_logs
+FOR SELECT TO authenticated
+USING (account_id = auth.uid());
+
+DROP POLICY IF EXISTS "Scope audit_logs insert by account" ON audit_logs;
+CREATE POLICY "Scope audit_logs insert by account" ON audit_logs
+FOR INSERT TO authenticated
+WITH CHECK (account_id = auth.uid());
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- account_settings — business settings follow the account to every device.
+-- Stored as a single JSONB blob because these are read and written as one unit
+-- (the whole DeviceConfig), and adding a field must not require a migration.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS account_settings (
+  account_id UUID PRIMARY KEY,
+  settings   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+DROP TRIGGER IF EXISTS trg_account_settings_updated_at ON account_settings;
+CREATE TRIGGER trg_account_settings_updated_at BEFORE INSERT OR UPDATE ON account_settings
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE account_settings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Scope account_settings by account" ON account_settings;
+CREATE POLICY "Scope account_settings by account" ON account_settings
+FOR ALL TO authenticated
+USING (account_id = auth.uid()) WITH CHECK (account_id = auth.uid());
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'account_settings'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE account_settings;
+  END IF;
+END $$;

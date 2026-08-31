@@ -14,6 +14,9 @@ export interface Ticket {
   voidedBy?: string;
   voidedAt?: string;
   qrPayload: string;
+  /** Owning account: the admin's Supabase auth user id, and the tenant key the
+   *  whole sync layer scopes by. */
+  accountId?: string;
   /** Server-authoritative, set by the Postgres trigger — used for last-write-wins
    *  merges when reconciling remote changes into the local copy. */
   updatedAt?: string;

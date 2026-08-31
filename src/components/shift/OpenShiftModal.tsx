@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Lock, X, Play } from 'lucide-react';
+import { Lock, X, Play, User, MapPin, Clock, Loader2 } from 'lucide-react';
 import { useShiftStore } from '../../store/useShiftStore';
 import { useAuthStore } from '../../store/useAuthStore';
+import { useDeviceStore } from '../../store/useDeviceStore';
 
 interface OpenShiftModalProps {
   isOpen: boolean;
@@ -9,24 +10,45 @@ interface OpenShiftModalProps {
   onSuccess: (msg: string) => void;
 }
 
+/**
+ * Confirmation only — no data entry.
+ *
+ * This used to ask for a cashier name and an opening cash float before every shift. The
+ * name was already known (whoever is signed in) and re-typing it only created a way to
+ * mislabel a shift, so both fields are gone: the shift opens for the signed-in user on
+ * one click. Opening float is recorded as 0, which
+ * calculateShiftReconciliation already handles — close-out reconciles tickets minus
+ * approved expenses.
+ */
 export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({ isOpen, onClose, onSuccess }) => {
   const { activeUser } = useAuthStore();
-  const [openingFloat, setOpeningFloat] = useState('');
-  // Default to whoever is actually logged in, rather than a placeholder name that
-  // could get submitted unchanged and mislabel real shift/reconciliation records.
-  const [cashierName, setCashierName] = useState(activeUser?.name || '');
+  const { config } = useDeviceStore();
   const { openShift } = useShiftStore();
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const float = parseFloat(openingFloat);
-    if (isNaN(float) || float < 0) return;
+  const handleConfirm = async () => {
+    if (isSubmitting) return;
 
-    await openShift(float, cashierName);
-    onSuccess(`Shift opened with declared cash float ₦${float.toLocaleString()}`);
-    onClose();
+    if (!activeUser) {
+      setError('No one is signed in on this till, so there is no cashier to open a shift for.');
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setError(null);
+      await openShift(0, activeUser.name, activeUser.id);
+      onSuccess(`Shift opened for ${activeUser.name}`);
+      onClose();
+    } catch (e: any) {
+      setError(e?.message || 'Could not open the shift.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -42,36 +64,50 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({ isOpen, onClose,
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div>
-            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-              Cashier Name
-            </label>
-            <input
-              type="text"
-              value={cashierName}
-              onChange={e => setCashierName(e.target.value)}
-              className="w-full p-2.5 border-2 border-slate-300 rounded-none font-semibold text-slate-800 focus:border-emerald-500 focus:outline-none"
-              required
-            />
+        <div className="p-6 space-y-5">
+          <p className="text-xs font-bold uppercase text-slate-600">
+            Start a new shift on this till?
+          </p>
+
+          <div className="border-2 border-slate-200 divide-y divide-slate-200 rounded-none">
+            <div className="flex items-center gap-3 px-4 py-3">
+              <User className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[10px] font-bold uppercase text-slate-500">Cashier</div>
+                <div className="text-sm font-black text-slate-900 truncate">
+                  {activeUser?.name || 'Not signed in'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 px-4 py-3">
+              <MapPin className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[10px] font-bold uppercase text-slate-500">Till</div>
+                <div className="text-sm font-mono font-bold text-slate-900 truncate">
+                  {config.locationId}-{config.deviceId}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 px-4 py-3">
+              <Clock className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[10px] font-bold uppercase text-slate-500">Opening At</div>
+                <div className="text-sm font-mono font-bold text-slate-900">
+                  {new Date().toLocaleString()}
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-              Opening Cash Float (₦)
-            </label>
-            <input
-              type="number"
-              value={openingFloat}
-              onChange={e => setOpeningFloat(e.target.value)}
-              min="0"
-              step="100"
-              className="w-full p-2.5 border-2 border-slate-300 rounded-none font-mono font-bold text-lg text-slate-900 focus:border-emerald-500 focus:outline-none"
-              required
-            />
-          </div>
+          {error && (
+            <div className="p-3 bg-rose-50 border-2 border-rose-400 text-rose-900 text-[11px] font-semibold normal-case rounded-none">
+              {error}
+            </div>
+          )}
 
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2">
             <button
               type="button"
               onClick={onClose}
@@ -80,14 +116,26 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({ isOpen, onClose,
               Cancel
             </button>
             <button
-              type="submit"
-              className="flex items-center gap-1 px-4 py-2 text-xs font-black uppercase bg-emerald-600 hover:bg-emerald-700 text-white rounded-none shadow-xs"
+              type="button"
+              onClick={handleConfirm}
+              disabled={isSubmitting || !activeUser}
+              autoFocus
+              className="flex items-center gap-1 px-4 py-2 text-xs font-black uppercase bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-none shadow-xs"
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>Start Shift</span>
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Opening...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Start Shift</span>
+                </>
+              )}
             </button>
           </div>
-        </form>
+        </div>
       </div>
     </div>
   );

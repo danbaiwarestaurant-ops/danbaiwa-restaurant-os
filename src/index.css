@@ -55,11 +55,24 @@
   }
 }
 
-/* Thermal Printable Area Rules (80mm width) */
+/* Thermal printable area — the window.print() fallback used when the silent print
+   server isn't running. Kept in step with print-server.cjs, which is the normal path.
+
+   58mm, not the 80mm this used to declare: the till's printer is a POS-58, so an 80mm
+   layout overflowed the roll and had its right-hand edge cut off.
+
+   `size: <width> auto` lets the page grow to the receipt and stop, and the padding is
+   side-only — vertical padding here prints as blank roll above and below every ticket. */
 @media print {
   @page {
-    size: 80mm auto;
+    size: 58mm auto;
     margin: 0;
+  }
+
+  html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
   }
 
   body * {
@@ -76,8 +89,8 @@
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
-    width: 80mm !important;
-    padding: 4mm !important;
+    width: 58mm !important;
+    padding: 0 1mm !important;
     font-family: 'Courier New', monospace !important;
     color: #000000 !important;
     background: #ffffff !important;

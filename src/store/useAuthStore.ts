@@ -1,11 +1,13 @@
 import { create } from 'zustand';
-import { UserAccount, UserRole } from '../types/user';
+import { UserAccount, UserRole, UserStatus } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/IndexedDbService';
 import { authenticateAdminWithSupabase, updateSupabaseUserPassword, deriveSupabasePassword, supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
 import { runCloudCatchUp, startRealtimeSync, stopRealtimeSync } from '../services/db/realtimeSync';
+import { getAccountId } from '../services/db/accountScope';
+import { generateRecoveryKey, normaliseRecoveryKey } from '../utils/recoveryKey';
 import {
   LoginFailure,
   LoginResult,
@@ -109,6 +111,26 @@ async function adoptAccountFromCloud(
   return { ok: true, user, authUserId: data.user.id, restored };
 }
 
+/**
+ * Outcome of a staff-roster action.
+ *
+ * These fail for ordinary, explainable reasons — a name already taken, an account that
+ * still owns records — and the admin needs to be told which. A bare boolean would leave
+ * the UI guessing, so every refusal carries the reason it refused.
+ */
+export interface StaffActionResult {
+  ok: boolean;
+  message?: string;
+}
+
+export interface StaffRecordCounts {
+  tickets: number;
+  shifts: number;
+  expenses: number;
+  auditLogs: number;
+  total: number;
+}
+
 interface AuthState {
   users: UserAccount[];
   activeUser: UserAccount | null;
@@ -125,6 +147,37 @@ interface AuthState {
   isPinModalOpen: boolean;
   pinModalPurpose: string | null;
   pinChallengeCallback: ((success: boolean) => void) | null;
+  /**
+   * Whose PIN opens this particular challenge.
+   *
+   * 'admin' — an authority check: manager mode, voiding a ticket, approving an expense.
+   *           Only an active admin's PIN will do.
+   * 'session' — merely proving the same person is still standing there, for the screen
+   *           lock. The signed-in user's own PIN works, and an admin's always does too so
+   *           a manager can take over a till someone walked away from.
+   *
+   * Without the distinction, locking the screen was an admin-only door: a cashier working
+   * alone who locked the till — or simply let the five-minute idle timer fire — could not
+   * get back into it without fetching the owner.
+   */
+  pinModalScope: 'admin' | 'session';
+
+  /**
+   * True while an admin PIN has unlocked the manager console.
+   *
+   * The console is admin territory regardless of which cashier happens to be signed in at
+   * the till — entering it already requires the admin PIN, and `validatePin` accepts admin
+   * PINs only. Without this, a cashier who unlocked the console with the owner's PIN could
+   * read every panel but not create staff or reset a PIN, because those checked the
+   * *signed-in role* rather than the authority that was actually proven at the door.
+   *
+   * Granted only by the console gate and revoked on leaving it, on cashier switch, and on
+   * logout — never by the PIN prompts used for voids or expense approvals, which prove
+   * authority for that single action and nothing more.
+   */
+  hasAdminAuthority: boolean;
+  grantAdminAuthority: () => void;
+  revokeAdminAuthority: () => void;
 
   loadUsers: () => Promise<void>;
   registerUser: (name: string, email: string, password: string, pin: string, role?: UserRole) => Promise<UserAccount>;
@@ -135,7 +188,47 @@ interface AuthState {
   updatePasswordAfterRecovery: (email: string, newPassword: string, newPin: string) => Promise<boolean>;
   createStaffCashier: (name: string, username: string, pin: string) => Promise<UserAccount>;
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
-  recoverAdminPinWithKey: (usernameOrEmail: string, recoveryKey: string, newPin: string) => Promise<boolean>;
+
+  /** Rename a staff account or change its login username. */
+  updateStaffMember: (userId: string, name: string, username: string) => Promise<StaffActionResult>;
+  /**
+   * Switch a staff account between active and deactivated. Deactivating blocks sign-in
+   * while keeping every record they created intact — the reversible counterpart to
+   * deleteStaffMember, and what should be reached for in almost every case.
+   */
+  setStaffStatus: (userId: string, status: UserStatus) => Promise<StaffActionResult>;
+  /** How much history an account owns; zero everywhere is what makes deletion safe. */
+  countStaffRecords: (userId: string) => Promise<StaffRecordCounts>;
+  /** Permanently remove a staff account. Refuses if it owns any record. */
+  deleteStaffMember: (userId: string) => Promise<StaffActionResult>;
+  /**
+   * Reset the admin PIN offline using the master recovery key.
+   *
+   * `cloudRealigned` is false whenever the reset happened without a cloud session: the
+   * Supabase password is derived from the PIN, so a PIN changed offline no longer matches
+   * it and sync stays down until the emailed password reset is run. Reported rather than
+   * hidden — a till that silently stops syncing is the failure this whole area exists to
+   * avoid.
+   */
+  recoverAdminPinWithKey: (
+    usernameOrEmail: string,
+    recoveryKey: string,
+    newPin: string
+  ) => Promise<{ ok: boolean; message?: string; cloudRealigned?: boolean }>;
+
+  /**
+   * The freshly issued recovery key, held in memory for the one screen that shows it.
+   *
+   * Only its hash is stored, so this is the only moment it can ever be read. Cleared by
+   * acknowledgeRecoveryKey once the admin confirms they have written it down.
+   */
+  pendingRecoveryKey: string | null;
+  acknowledgeRecoveryKey: () => void;
+  /**
+   * Issue a new master recovery key for the admin, replacing any previous one. Gated by
+   * the current admin PIN, since holding the key is equivalent to knowing the PIN.
+   */
+  regenerateRecoveryKey: (pin: string) => Promise<{ ok: boolean; key?: string; message?: string }>;
   switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
   
   /**
@@ -146,7 +239,11 @@ interface AuthState {
    */
   reconnectCloudSession: (pin: string) => Promise<{ ok: boolean; message?: string }>;
 
-  openPinModal: (purpose: string, onVerify: (success: boolean) => void) => void;
+  openPinModal: (
+    purpose: string,
+    onVerify: (success: boolean) => void,
+    scope?: 'admin' | 'session'
+  ) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
   assertAdminRole: () => void;
@@ -165,6 +262,34 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isPinModalOpen: false,
   pinModalPurpose: null,
   pinChallengeCallback: null,
+  pinModalScope: 'admin',
+
+  hasAdminAuthority: false,
+  grantAdminAuthority: () => set({ hasAdminAuthority: true }),
+  revokeAdminAuthority: () => set({ hasAdminAuthority: false }),
+
+  pendingRecoveryKey: null,
+  acknowledgeRecoveryKey: () => set({ pendingRecoveryKey: null }),
+
+  regenerateRecoveryKey: async (pin: string) => {
+    const admin = get().users.find((u) => u.role === 'admin' && u.status === 'active');
+    if (!admin) return { ok: false, message: 'No active admin account on this device.' };
+
+    const pinOk = await verifySecret(pin, admin.pinHash, admin.pinSalt);
+    if (!pinOk) return { ok: false, message: 'That is not the current admin PIN.' };
+
+    const key = generateRecoveryKey();
+    const recoveryKeySalt = generateSalt();
+    const recoveryKeyHash = await hashSecretWithSalt(normaliseRecoveryKey(key), recoveryKeySalt);
+
+    await dbService.updateUser({ ...admin, recoveryKeyHash, recoveryKeySalt });
+    await get().loadUsers();
+    set({ pendingRecoveryKey: key });
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
+    return { ok: true, key };
+  },
 
   loadUsers: async () => {
     await dbService.init();
@@ -180,7 +305,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
 
     set({
-      users: users.filter(u => u.status === 'active'),
+      // Every account, deactivated ones included. They have to stay visible: the roster is
+      // where an admin reactivates someone, and a deactivated cashier's past tickets must
+      // still resolve to their name rather than reading "Unknown cashier" for ever.
+      // Anywhere that must not *offer* a disabled account filters on status itself — the
+      // switch-cashier picker and switchCashierSession below, loginUser, validatePin.
+      users,
       activeUser,
       isAuthenticated,
       isLoaded: true,
@@ -237,6 +367,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
 
+    // The offline break-glass key. This was never issued before — recoverAdminPinWithKey
+    // checked for a recoveryKeyHash that nothing ever wrote, so the "Forgot Admin PIN?"
+    // route advertised on the PIN pad could not succeed for any account ever created.
+    const recoveryKey = generateRecoveryKey();
+    const recoveryKeySalt = generateSalt();
+    const recoveryKeyHash = await hashSecretWithSalt(normaliseRecoveryKey(recoveryKey), recoveryKeySalt);
+
     const newUser: UserAccount = {
       id: supabaseAuthResult.userId || crypto.randomUUID(),
       name: name.trim(),
@@ -246,12 +383,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       passwordSalt,
       pinHash,
       pinSalt,
+      recoveryKeyHash,
+      recoveryKeySalt,
       role,
       createdAt: new Date().toISOString(),
       status: 'active',
     };
 
     await dbService.saveUser(newUser);
+    // Held for the one screen that can ever show it; only the hash was stored.
+    set({ pendingRecoveryKey: recoveryKey });
     localStorage.setItem('ticket_pos_session_user_id', newUser.id);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
@@ -486,6 +627,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({
       activeUser: null,
       isAuthenticated: false,
+      hasAdminAuthority: false,
     });
   },
 
@@ -550,7 +692,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       cleanEmail = sessionUser.email.trim().toLowerCase();
 
       try {
-        await updateSupabaseUserPassword(newPassword);
+        // The cloud password is *always* derived from the PIN — every sign-in path
+        // (authenticateAdminWithSupabase, reconnectCloudSession) computes it that way.
+        // This used to set it to the typed password instead, which meant completing an
+        // email recovery left the cloud password and the PIN permanently out of step:
+        // the local login worked, and the till could never establish a cloud session
+        // again. The typed password stays the local login secret, hashed below.
+        await updateSupabaseUserPassword(deriveSupabasePassword(newPin));
       } catch (e: any) {
         throw new Error(`Supabase password update failed: ${e.message}`);
       }
@@ -625,6 +773,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   createStaffCashier: async (name: string, username: string, pin: string) => {
     get().assertAdminRole();
+    // Cashiers hold no cloud identity of their own — they belong to the admin's account,
+    // which is what makes them appear on every device that admin signs in on.
+    const accountId = await getAccountId();
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
     const passwordSalt = generateSalt();
@@ -642,6 +793,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       role: 'cashier',
       createdAt: new Date().toISOString(),
       status: 'active',
+      accountId: accountId ?? undefined,
     };
 
     await dbService.saveUser(cashierUser);
@@ -650,6 +802,116 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       useSyncStore.getState().triggerSyncWorker();
     });
     return cashierUser;
+  },
+
+  updateStaffMember: async (userId: string, name: string, username: string) => {
+    get().assertAdminRole();
+    const user = get().users.find(u => u.id === userId);
+    if (!user) return { ok: false, message: 'That staff account no longer exists.' };
+
+    const cleanName = name.trim();
+    const cleanUsername = username.trim().toLowerCase();
+    if (!cleanName) return { ok: false, message: 'A name is required.' };
+    if (!cleanUsername) return { ok: false, message: 'A staff ID is required.' };
+
+    // The username is a login key, so a collision would make one of the two accounts
+    // unreachable — caught here rather than left to fail obscurely at the next sign-in.
+    const clash = get().users.find(
+      (u) => u.id !== userId && (u.username || '').toLowerCase() === cleanUsername
+    );
+    if (clash) {
+      return { ok: false, message: `The staff ID "${cleanUsername}" is already used by ${clash.name}.` };
+    }
+
+    await dbService.updateUser({
+      ...user,
+      name: cleanName,
+      username: cleanUsername,
+      // An admin's email is their cloud identity and is changed through the profile
+      // screen, which also updates Supabase. Only a cashier's email tracks the username.
+      email: user.role === 'admin' ? user.email : cleanUsername,
+    });
+    await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
+    return { ok: true };
+  },
+
+  setStaffStatus: async (userId: string, status: UserStatus) => {
+    get().assertAdminRole();
+    const user = get().users.find(u => u.id === userId);
+    if (!user) return { ok: false, message: 'That staff account no longer exists.' };
+    if (user.status === status) return { ok: true };
+
+    if (status === 'deactivated') {
+      // Locking out the only admin would leave the account with no way back in: manager
+      // mode, staff management and the cloud sign-in all key off an active admin PIN.
+      if (user.role === 'admin') {
+        const otherAdmins = get().users.filter(
+          (u) => u.id !== userId && u.role === 'admin' && u.status === 'active'
+        );
+        if (otherAdmins.length === 0) {
+          return { ok: false, message: 'This is the only admin account. Deactivating it would lock everyone out of the console.' };
+        }
+      }
+      if (get().activeUser?.id === userId) {
+        return { ok: false, message: 'This account is signed in at the till. Switch cashier first, then deactivate it.' };
+      }
+    }
+
+    await dbService.updateUser({ ...user, status });
+    await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
+    return { ok: true };
+  },
+
+  countStaffRecords: async (userId: string) => {
+    const counts = await dbService.countRecordsForUser(userId);
+    return {
+      ...counts,
+      total: counts.tickets + counts.shifts + counts.expenses + counts.auditLogs,
+    };
+  },
+
+  deleteStaffMember: async (userId: string) => {
+    get().assertAdminRole();
+    const user = get().users.find(u => u.id === userId);
+    if (!user) return { ok: false, message: 'That staff account no longer exists.' };
+
+    // The admin *is* the account — its id is the tenant key every synced row is scoped by.
+    if (user.role === 'admin') {
+      return { ok: false, message: 'The admin account owns this business and cannot be deleted here.' };
+    }
+    if (get().activeUser?.id === userId) {
+      return { ok: false, message: 'This account is signed in at the till. Switch cashier first.' };
+    }
+
+    // Nothing cascades. A ticket keeps only a cashierId, so deleting an account that took
+    // even one of them leaves that history permanently nameless — which is why this is
+    // refused outright and deactivation offered instead, rather than warned about.
+    const counts = await get().countStaffRecords(userId);
+    if (counts.total > 0) {
+      const parts = [
+        counts.tickets && `${counts.tickets} ticket${counts.tickets === 1 ? '' : 's'}`,
+        counts.shifts && `${counts.shifts} shift${counts.shifts === 1 ? '' : 's'}`,
+        counts.expenses && `${counts.expenses} expense${counts.expenses === 1 ? '' : 's'}`,
+        counts.auditLogs && `${counts.auditLogs} audit entr${counts.auditLogs === 1 ? 'y' : 'ies'}`,
+      ].filter(Boolean);
+      return {
+        ok: false,
+        message: `${user.name} owns ${parts.join(', ')}. Deleting the account would strip the name off those records for good — deactivate instead.`,
+      };
+    }
+
+    await dbService.deleteUser(userId);
+    await get().loadUsers();
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
+    return { ok: true };
   },
 
   resetCashierPin: async (cashierId: string, newPin: string) => {
@@ -676,21 +938,55 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   recoverAdminPinWithKey: async (usernameOrEmail: string, recoveryKey: string, newPin: string) => {
     const target = usernameOrEmail.trim().toLowerCase();
-    const cleanKey = recoveryKey.trim().toUpperCase().replace(/-/g, '');
-    
+    const cleanKey = normaliseRecoveryKey(recoveryKey);
+
     const user = get().users.find(u => (u.username === target || u.email === target) && u.role === 'admin');
-    if (!user || !user.recoveryKeyHash || !user.recoveryKeySalt) return false;
+    if (!user) {
+      return { ok: false, message: `No admin account on this till matches "${usernameOrEmail.trim()}".` };
+    }
+    if (!user.recoveryKeyHash || !user.recoveryKeySalt) {
+      return {
+        ok: false,
+        message:
+          'This account has no recovery key. Accounts created before recovery keys existed have none — ' +
+          'sign in and issue one under Settings → Admin Recovery Key, or use the emailed password reset.',
+      };
+    }
 
     const isValidKey = await verifySecret(cleanKey, user.recoveryKeyHash, user.recoveryKeySalt);
-    if (!isValidKey) return false;
+    if (!isValidKey) return { ok: false, message: 'That recovery key does not match this account.' };
 
     const newSalt = generateSalt();
     const newPinHash = await hashSecretWithSalt(newPin, newSalt);
 
+    // The cloud password is derived from the PIN, so the PIN cannot move without it.
+    // Offline — which is the whole point of this route — there is no session to change it
+    // through, so the till comes back but sync does not. Attempt it when we can, and be
+    // explicit when we cannot rather than leaving a till quietly unable to reach the cloud.
+    let cloudRealigned = false;
+    if (isSupabaseConfigured && typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session) {
+          await updateSupabaseUserPassword(deriveSupabasePassword(newPin));
+          cloudRealigned = true;
+        }
+      } catch (_) {
+        cloudRealigned = false;
+      }
+    }
+
+    // A break-glass key is single use. Once it has been spent it is cleared, so a copy
+    // that has been photographed, emailed to oneself or left in a drawer cannot be used
+    // a second time. A replacement is issued from Settings.
     const updatedAdmin: UserAccount = {
       ...user,
       pinHash: newPinHash,
       pinSalt: newSalt,
+      // null, not undefined — see the note on UserAccount.recoveryKeyHash. An undefined
+      // never reaches Supabase, so the spent key would be pulled straight back.
+      recoveryKeyHash: null,
+      recoveryKeySalt: null,
     };
 
     await dbService.updateUser(updatedAdmin);
@@ -698,26 +994,38 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
-    return true;
+
+    return {
+      ok: true,
+      cloudRealigned,
+      message: cloudRealigned
+        ? 'PIN reset, and the cloud password was updated to match. Issue a new recovery key under Settings — this one is now spent.'
+        : 'PIN reset on this till. Cloud sync will stay disconnected until you run the emailed password reset, because the cloud password is tied to the PIN. Issue a new recovery key under Settings — this one is now spent.',
+    };
   },
 
   switchCashierSession: async (userId: string, pin: string) => {
     const user = get().users.find(u => u.id === userId);
-    if (!user) return false;
+    // A deactivated account must not be a way back in. The roster now lists them, so this
+    // check is what keeps "visible in the console" from meaning "usable at the till".
+    if (!user || user.status !== 'active') return false;
 
     const isValid = await verifySecret(pin, user.pinHash, user.pinSalt);
     if (isValid) {
       localStorage.setItem('ticket_pos_session_user_id', user.id);
-      set({ activeUser: user });
+      // Handing the till to a different person ends any admin authority the previous
+      // console session had proven.
+      set({ activeUser: user, hasAdminAuthority: false });
     }
     return isValid;
   },
 
-  openPinModal: (purpose: string, onVerify: (success: boolean) => void) => {
+  openPinModal: (purpose: string, onVerify: (success: boolean) => void, scope = 'admin' as const) => {
     set({
       isPinModalOpen: true,
       pinModalPurpose: purpose,
       pinChallengeCallback: onVerify,
+      pinModalScope: scope,
     });
   },
 
@@ -726,16 +1034,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isPinModalOpen: false,
       pinModalPurpose: null,
       pinChallengeCallback: null,
+      // Back to the stricter default, so a later challenge can never inherit a
+      // screen-lock's looser scope by accident.
+      pinModalScope: 'admin',
     });
   },
 
   validatePin: async (pin: string) => {
-    const users = get().users;
-    const admins = users.filter(u => u.role === 'admin' && u.status === 'active');
+    const { users, pinModalScope, activeUser } = get();
+
+    // An admin PIN satisfies every challenge, including a cashier's screen lock — a
+    // manager must always be able to take over a till.
+    const candidates = users.filter(u => u.role === 'admin' && u.status === 'active');
+
+    // A screen lock only asks "is this still the same person?", so the signed-in user's
+    // own PIN unlocks it too.
+    if (pinModalScope === 'session' && activeUser && !candidates.some(u => u.id === activeUser.id)) {
+      candidates.push(activeUser);
+    }
 
     let isValid = false;
-    for (const admin of admins) {
-      const match = await verifySecret(pin, admin.pinHash, admin.pinSalt);
+    for (const candidate of candidates) {
+      const match = await verifySecret(pin, candidate.pinHash, candidate.pinSalt);
       if (match) {
         isValid = true;
         break;
@@ -750,8 +1070,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   assertAdminRole: () => {
     const active = get().activeUser;
-    if (!active || active.role !== 'admin') {
-      throw new Error('Security Access Denied: Action requires an active Admin role');
-    }
+    if (active?.role === 'admin') return;
+    // An admin PIN entered at the console door proves the same authority as being signed
+    // in as the admin — see hasAdminAuthority.
+    if (get().hasAdminAuthority) return;
+    throw new Error('Security Access Denied: Action requires an active Admin role');
   },
 }));

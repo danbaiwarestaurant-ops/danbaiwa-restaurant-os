@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useTicketStore } from '../../store/useTicketStore';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
+import { Pager, usePagination } from '../common/Pager';
 import { Ticket as TicketIcon, CheckCircle2, Ban, QrCode } from 'lucide-react';
 
 interface RecentTicketsSidebarProps {
@@ -8,11 +9,28 @@ interface RecentTicketsSidebarProps {
   onOpenScanModal: () => void;
 }
 
+/** Cards are tall enough that more than this needs scrolling on a typical till screen. */
+const PAGE_SIZE = 8;
+
 export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
   onOpenVoidModal,
   onOpenScanModal,
 }) => {
   const { tickets, markCollected } = useTicketStore();
+  const { page, totalPages, start, visible, setPage, next, prev } = usePagination(tickets, PAGE_SIZE);
+  const total = tickets.length;
+
+  // Jump back to the first page when a genuinely new ticket lands at the top, so the
+  // ticket just issued is actually on screen. Keyed on the newest id rather than on the
+  // array itself: the list reloads constantly now that realtime sync is running, and
+  // resetting on every reload would yank the page out from under someone browsing back
+  // through history.
+  const newestId = tickets[0]?.id;
+  const prevNewestId = useRef<string | undefined>(newestId);
+  useEffect(() => {
+    if (newestId && prevNewestId.current !== newestId) setPage(1);
+    prevNewestId.current = newestId;
+  }, [newestId, setPage]);
 
   return (
     <div className="bg-white border-l-2 border-slate-300 p-5 flex flex-col h-full overflow-hidden rounded-none">
@@ -32,12 +50,12 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-        {tickets.length === 0 ? (
+        {total === 0 ? (
           <div className="text-center py-12 text-slate-400 text-xs font-bold uppercase tracking-wider">
             No tickets printed yet
           </div>
         ) : (
-          tickets.slice(0, 30).map(t => {
+          visible.map(t => {
             const isVoid = t.status === 'void';
             const isCollected = t.status === 'collected';
 
@@ -111,6 +129,20 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
           })
         )}
       </div>
+
+      {/* Pager — outside the scroll region so it stays reachable, and only when it earns
+          its space. Previously the sidebar hard-capped at the 30 newest tickets with no
+          way to reach anything older. */}
+      <Pager
+        page={page}
+        totalPages={totalPages}
+        start={start}
+        pageSize={PAGE_SIZE}
+        total={total}
+        onPrev={prev}
+        onNext={next}
+        className="pt-3 mt-3 border-t-2 border-slate-200"
+      />
     </div>
   );
 };

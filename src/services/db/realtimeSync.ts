@@ -18,8 +18,10 @@
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
 import { toCamelCase } from '../../utils/caseMapping';
-import { applyRemoteRow, SyncablePgTable } from './remoteMerge';
+import { applyRemoteRow, applyRemoteSettings, SyncablePgTable } from './remoteMerge';
+import { useDeviceStore } from '../../store/useDeviceStore';
 import { runBackfillPush } from './cloudBackfill';
+import { getAccountId, stampLocalRowsWithAccount } from './accountScope';
 import { dbService } from './IndexedDbService';
 import { db } from './dexieSchema';
 import { useSyncStore } from '../../store/useSyncStore';
@@ -27,6 +29,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useShiftStore } from '../../store/useShiftStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
+import { useAuditStore } from '../../store/useAuditStore';
 
 const DEVICE_CONFIG_KEY = 'device_config';
 const RECONCILIATION_INTERVAL_MS = 60_000;
@@ -39,25 +42,7 @@ let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let onlineListenerAttached = false;
 const reloadTimers: Partial<Record<SyncablePgTable, ReturnType<typeof setTimeout>>> = {};
 
-/** Same location resolution used everywhere else in the app: the signed-in account's
- *  cloud location first (an admin's identity is the source of truth for which location
- *  they belong to), falling back to this device's local config. */
-async function resolveEffectiveLocationId(): Promise<string> {
-  if (isSupabaseConfigured) {
-    try {
-      const { data } = await supabase.auth.getUser();
-      const meta = (data?.user?.user_metadata ?? {}) as Record<string, unknown>;
-      const loc = typeof meta.location_id === 'string' ? meta.location_id.trim() : '';
-      if (loc) return loc;
-    } catch (_) {
-      // offline or no session — fall back to local config below
-    }
-  }
-  const cfg = await db.config.get(DEVICE_CONFIG_KEY);
-  return cfg?.value?.locationId || 'LOC01';
-}
-
-/** Tickets/expenses show a location-wide rollup for admins, but only "my own" for
+/** Tickets/expenses show an account-wide rollup for admins, but only "my own" for
  *  cashiers — mirrors App.tsx's loading scope so realtime-triggered reloads match. */
 function scopedUserId(): string | undefined {
   const activeUser = useAuthStore.getState().activeUser;
@@ -75,6 +60,8 @@ function scheduleStoreReload(pgTable: SyncablePgTable): void {
         // currentShift is a personal "is my shift open" gate, never a rollup —
         // always scoped to the signed-in user regardless of role. See App.tsx.
         useShiftStore.getState().loadShift(useAuthStore.getState().activeUser?.id);
+        // The console's reconciliation view reads every shift, so refresh that too.
+        useShiftStore.getState().loadShiftHistory();
         break;
       case 'expenses':
         useExpenseStore.getState().loadExpenses(undefined, scopedUserId());
@@ -83,7 +70,8 @@ function scheduleStoreReload(pgTable: SyncablePgTable): void {
         useAuthStore.getState().loadUsers();
         break;
       case 'audit_logs':
-        break; // nothing reads this back yet
+        useAuditStore.getState().loadAuditLogs();
+        break;
     }
   }, RELOAD_DEBOUNCE_MS);
 }
@@ -99,10 +87,10 @@ function handleRealtimeChange(pgTable: SyncablePgTable, payload: any): void {
     .catch((e) => console.warn(`[realtimeSync] failed to apply ${pgTable} change:`, e));
 }
 
-/** Pulls every row for this location from all five syncable tables and merges them in.
- *  Additive/merge-only — never deletes a local row just because a page didn't include it.
- *  Returns true if any table actually received a change, so callers (e.g. a first-time
- *  login on a new device) can tell whether anything was really pulled down. */
+/** Pulls every row belonging to this account from all five syncable tables and merges
+ *  them in. Additive/merge-only — never deletes a local row just because a page didn't
+ *  include it. Returns true if any table actually received a change, so callers (e.g. a
+ *  first-time login on a new device) can tell whether anything was really pulled down. */
 export async function runReconciliationPull(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
 
@@ -113,15 +101,17 @@ export async function runReconciliationPull(): Promise<boolean> {
   const { data: sessionData } = await supabase.auth.getSession();
   if (!sessionData?.session) return false;
 
-  const locationId = await resolveEffectiveLocationId();
+  const accountId = await getAccountId();
+  if (!accountId) return false;
+
   let changedOverall = false;
 
   for (const pgTable of SYNCABLE_TABLES) {
     try {
-      // expenses has no location_id column of its own — it's scoped via a
-      // shift_id -> shifts.location_id RLS subquery instead, so pull unfiltered.
-      const query = supabase.from(pgTable).select('*');
-      const { data, error } = pgTable === 'expenses' ? await query : await query.eq('location_id', locationId);
+      // Every table now carries account_id, expenses included — so all five filter the
+      // same way. RLS enforces the same boundary server-side; this just avoids pulling
+      // rows the policy would reject anyway.
+      const { data, error } = await supabase.from(pgTable).select('*').eq('account_id', accountId);
 
       if (error || !data) {
         console.warn(`[realtimeSync] reconciliation pull failed for ${pgTable}:`, error?.message);
@@ -142,6 +132,27 @@ export async function runReconciliationPull(): Promise<boolean> {
     }
   }
 
+  // Business settings follow the account too, so pull them on the same pass. Kept
+  // separate from the loop above because account_settings is keyed by account_id and
+  // holds one JSONB row, not id-keyed domain records.
+  try {
+    const { data, error } = await supabase
+      .from('account_settings')
+      .select('*')
+      .eq('account_id', accountId)
+      .maybeSingle();
+
+    if (!error && data) {
+      const applied = await applyRemoteSettings(toCamelCase(data));
+      if (applied) {
+        await useDeviceStore.getState().loadConfig();
+        changedOverall = true;
+      }
+    }
+  } catch (e) {
+    console.warn('[realtimeSync] settings pull failed:', e);
+  }
+
   return changedOverall;
 }
 
@@ -149,11 +160,13 @@ export async function runReconciliationPull(): Promise<boolean> {
  * Full two-way catch-up, to be run whenever this device (re)gains a cloud session:
  * on login, on reconnect, and on the periodic safety net.
  *
- * Order matters. Reviving the outbox first clears any backoff left over from the
- * disconnected stretch, so the backfill sweep sees an accurate picture of what is
- * genuinely still owed. Backfill then queues anything the cloud never received, and
- * only then do we pull down — so a device holding the sole copy of some history
- * uploads it before it starts merging remote state on top of its own.
+ * Order matters. Stamping comes first: rows created before account scoping existed carry
+ * no accountId, and the cloud would reject every one of them, so they must be claimed by
+ * the signed-in account before anything tries to upload them. Reviving the outbox next
+ * clears any backoff left over from the disconnected stretch, so the backfill sweep sees
+ * an accurate picture of what is genuinely still owed. Backfill then queues anything the
+ * cloud never received, and only then do we pull down — so a device holding the sole copy
+ * of some history uploads it before it starts merging remote state on top of its own.
  */
 export async function runCloudCatchUp(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
@@ -162,6 +175,9 @@ export async function runCloudCatchUp(): Promise<boolean> {
   if (!sessionData?.session) return false;
 
   try {
+    const accountId = await getAccountId();
+    if (accountId) await stampLocalRowsWithAccount(accountId);
+
     const revived = await dbService.revivePendingOutbox();
     if (revived) {
       console.info(`[realtimeSync] revived ${revived} outbox row(s) that were parked as failed`);
@@ -187,17 +203,23 @@ export function startRealtimeSync(): void {
   (globalThis as any)._realtimeSyncStarted = true;
 
   (async () => {
-    const locationId = await resolveEffectiveLocationId();
+    const accountId = await getAccountId();
+    if (!accountId) {
+      // No session yet — nothing to subscribe as. Login calls this again once there is.
+      (globalThis as any)._realtimeSyncStarted = false;
+      return;
+    }
 
+    // Every table filters on account_id, expenses included — it no longer has to lean on
+    // RLS alone the way it did when it was scoped through a shift_id subquery.
+    const scope = `account_id=eq.${accountId}`;
     channel = supabase
       .channel('db-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets', filter: `location_id=eq.${locationId}` }, (p) => handleRealtimeChange('tickets', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts', filter: `location_id=eq.${locationId}` }, (p) => handleRealtimeChange('shifts', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: `location_id=eq.${locationId}` }, (p) => handleRealtimeChange('users', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs', filter: `location_id=eq.${locationId}` }, (p) => handleRealtimeChange('audit_logs', p))
-      // expenses has no location_id column — RLS (shift_id -> shifts.location_id) is
-      // the only scoping here, same as the reconciliation pull above.
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, (p) => handleRealtimeChange('expenses', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets', filter: scope }, (p) => handleRealtimeChange('tickets', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts', filter: scope }, (p) => handleRealtimeChange('shifts', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: scope }, (p) => handleRealtimeChange('users', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs', filter: scope }, (p) => handleRealtimeChange('audit_logs', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses', filter: scope }, (p) => handleRealtimeChange('expenses', p))
       .subscribe();
 
     await runCloudCatchUp();
