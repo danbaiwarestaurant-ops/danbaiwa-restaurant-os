@@ -22,23 +22,35 @@ const PRINT_SERVER_URL = 'http://127.0.0.1:9100';
  * Cached so we don't /health-check on every single ticket.
  */
 let _printServerAvailable: boolean | null = null;
+let _lastCheckedAt: number = 0;
+const AVAILABILITY_TTL_MS = 30_000; // re-check every 30s so a slow boot doesn't kill the session
 
 async function isPrintServerAvailable(): Promise<boolean> {
-  if (_printServerAvailable !== null) return _printServerAvailable;
+  const now = Date.now();
+  // Re-check if: never checked, or last result was false and 30s have passed
+  const isStale = _printServerAvailable === false && (now - _lastCheckedAt) > AVAILABILITY_TTL_MS;
+  if (_printServerAvailable !== null && !isStale) return _printServerAvailable;
+
   try {
     const res = await fetch(`${PRINT_SERVER_URL}/health`, {
-      signal: AbortSignal.timeout(1000),
+      method: 'GET',
+      // Required for Chrome Private Network Access preflight when PWA is loaded
+      // from HTTPS (Vercel) and print server is on http://127.0.0.1
+      headers: { 'Access-Control-Request-Private-Network': 'true' },
+      signal: AbortSignal.timeout(4000), // 4s — generous enough for a cold Node boot
     });
     _printServerAvailable = res.ok;
   } catch {
     _printServerAvailable = false;
   }
+  _lastCheckedAt = Date.now();
   return _printServerAvailable;
 }
 
-/** Invalidate the cached availability so the next print re-checks. */
+/** Invalidate the cached availability so the next print re-checks immediately. */
 export function resetPrintServerCache(): void {
   _printServerAvailable = null;
+  _lastCheckedAt = 0;
 }
 
 export class PrintAdapter {
