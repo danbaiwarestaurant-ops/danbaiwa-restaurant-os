@@ -342,7 +342,7 @@ export class LocalStorageDbService implements IDbService {
       outbox[index].retryCount = next;
       outbox[index].status = 'pending';
       outbox[index].nextAttemptAt = new Date(
-        Date.now() + Math.min(5_000 * 2 ** Math.min(next, 12), 30 * 60_000)
+        Date.now() + Math.min(2_000 * 2 ** Math.min(next, 12), 60_000)
       ).toISOString();
       outbox[index].lastError = lastError;
       setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));

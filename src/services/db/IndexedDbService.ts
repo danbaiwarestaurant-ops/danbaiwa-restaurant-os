@@ -35,8 +35,16 @@ function generateInstallationId(): string {
 
 /** Retry count past which a row is reported as "stuck" in the UI. It keeps retrying. */
 const STUCK_AFTER_RETRIES = 8;
-const BASE_BACKOFF_MS = 5_000;
-const MAX_BACKOFF_MS = 30 * 60_000;
+const BASE_BACKOFF_MS = 2_000;
+/**
+ * Only rows the cloud actually *rejected* are ever backed off — a dropped connection is
+ * classified as transient in useSyncStore and charged to nobody. So the ceiling only has
+ * to be long enough to stop a permanently-bad row from being retried in a tight loop,
+ * not the half hour it used to be: at that cap a row whose blocker cleared (a referenced
+ * shift finally arrives, a schema is fixed) sat out most of a service before anyone saw
+ * it move.
+ */
+const MAX_BACKOFF_MS = 60_000;
 
 function queueOutboxRow(tableName: string, action: 'INSERT' | 'UPDATE' | 'DELETE', payload: Record<string, any>): OutboxItem {
   return {
