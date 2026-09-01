@@ -49,6 +49,12 @@ export interface IDbService {
   /** Everything still owed to the cloud, including rows waiting out a retry backoff. */
   countUnsyncedOutbox(): Promise<{ total: number; stuck: number }>;
   markOutboxSynced(id: string): Promise<void>;
+  /**
+   * Mark a whole batch synced in one transaction. The worker pushes rows to the cloud in
+   * batches, so acknowledging them one-at-a-time would put the local write back on the
+   * critical path it was just taken off.
+   */
+  markOutboxSyncedMany(ids: string[]): Promise<void>;
   markOutboxAttemptFailed(id: string, retryCount: number, lastError?: string): Promise<void>;
   /** Clears backoffs and resurrects rows parked as 'failed' by an older build. */
   revivePendingOutbox(): Promise<number>;

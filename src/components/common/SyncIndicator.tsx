@@ -13,7 +13,7 @@ import { CloudReconnectModal } from './CloudReconnectModal';
  * your data yet" is now visually distinct from the one state that means it does.
  */
 export const SyncIndicator: React.FC = () => {
-  const { pendingCount, stuckCount, cloudConnected, cloudError, isOnline, isSyncing, triggerSyncWorker } =
+  const { pendingCount, stuckCount, cloudConnected, cloudError, isOnline, isSyncing, forceSyncNow } =
     useSyncStore();
   const [isReconnectOpen, setIsReconnectOpen] = useState(false);
 
@@ -56,7 +56,7 @@ export const SyncIndicator: React.FC = () => {
   return (
     <>
       <button
-        onClick={() => (needsReconnect ? setIsReconnectOpen(true) : triggerSyncWorker())}
+        onClick={() => (needsReconnect ? setIsReconnectOpen(true) : forceSyncNow())}
         className={`flex items-center gap-1.5 px-3 py-1.5 border text-xs font-black uppercase transition rounded-none ${tone}`}
         title={title}
       >

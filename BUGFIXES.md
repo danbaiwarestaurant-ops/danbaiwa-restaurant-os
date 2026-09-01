@@ -5,6 +5,185 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-01 — Sync crawled through the queue one row at a time, and the sync button kept demanding the admin PIN
+
+**What the user saw:** two complaints about the same badge.
+
+1. *"Sync (X pending)" with X reducing slowly.* Pressing the badge, or just waiting,
+   drained the queue at a visible trickle — a minute or more for a backlog that should
+   have gone up at once.
+2. *The sync button asking for the admin PIN.* On a till where a cashier was working,
+   the badge sat on "Not Signed In to Cloud" and clicking it opened the admin-PIN
+   reconnect dialog, so nothing could be sent until the owner came over.
+
+**Root cause:**
+
+1. The worker sent **one row per HTTP request, strictly sequentially** — a 300-row
+   backlog meant 300 round trips, plus 300 separate local writes to mark them off. On
+   top of that, any row that had ever failed was parked behind an exponential backoff of
+   up to 30 minutes, and the manual sync button did nothing about it: it ran the same
+   ordinary worker, which skips rows that are not yet due. So the button appeared inert
+   while the count went down on its own schedule.
+2. Logging out of the till called `supabase.auth.signOut()`, destroying the device's
+   cloud credential. Since that credential is derived from the admin PIN, nothing short
+   of the admin's PIN could restore it — and a cashier logging in never establishes one
+   at all. Every ordinary logout therefore left the next person on a till that could not
+   sync, with the PIN dialog as the only way out. The till's staff session and the
+   device's enrolment with the account were being treated as the same thing.
+
+**Fix:**
+- `src/store/useSyncStore.ts` — the worker now sends **batches**. `batchOutbox` splits
+  the queue into *contiguous* runs of the same table and action (contiguous, so a
+  record's later DELETE can never be sent ahead of its earlier UPDATE and resurrect the
+  row), and `dedupeBatch` collapses repeat writes to the same record — required, because
+  Postgres rejects an `ON CONFLICT` upsert that touches one row twice. A rejected batch
+  is re-sent row-by-row so a single bad record is isolated and charged alone instead of
+  dragging its whole run into an undeserved backoff. All the existing guarantees hold: a
+  lost session still aborts the pass without charging anyone, and no row is ever written
+  off.
+- `src/store/useSyncStore.ts` (`forceSyncNow`) — what the badge's click now runs. It
+  clears every backoff first, so "sync now" means now.
+- `src/services/db/IndexedDbService.ts` / `IDbService.ts` / `LocalStorageDbService.ts` —
+  `markOutboxSyncedMany`, so acknowledging a batch is one transaction rather than N.
+- `src/store/useAuthStore.ts` (`logoutUser`) — ends the staff session only; the device
+  stays enrolled and keeps draining its queue. Disconnecting from the cloud is now an
+  explicit act via `logoutUser({ unenrolDevice: true })`, reached only from the console's
+  **System Logout** (`src/components/manager/AdminProfileSettings.tsx`, with wording that
+  says what it costs). Keeping the session grants nothing the machine did not already
+  have — the whole local database is already on it, and the session reaches exactly that
+  same account.
+- `src/components/common/SyncIndicator.tsx`, `src/components/common/UserMenu.tsx` —
+  wired to `forceSyncNow`, and the logout copy no longer implies syncing stops.
+
+**Verified:** new `src/tests/syncBatching.test.ts` (8 tests) pins the batching rules —
+300 rows become 2 requests not 300, an UPDATE is never reordered ahead of the DELETE
+that follows it, a duplicate write is collapsed with the later value winning, one bad
+record is charged while its nine batch-mates still sync, removals are still sent as
+removals, and `forceSyncNow` pushes rows the ordinary worker skips. Full suite 164/164,
+`tsc --noEmit` and `npm run build` clean. Driven in a real browser against the live
+Supabase project: 12 tickets queued offline went up in **1** request (was 12), and after
+an ordinary till logout the device still held its cloud session, came back to "Cloud
+Synced" on the next login, and clicking sync did not open the PIN dialog.
+
+**Note:** two mocks needed updating because the wire shape changed —
+`tenantIsolation.test.ts` now records one entry per row in a batch, and
+`staffRoster.test.ts`'s delete chain learned `.in()`. Neither was a product regression;
+both tests assert the same things as before.
+
+---
+
+## 2026-09-01 — Nine bugs found while building the reporting periods, recovery keys and staff management
+
+Grouped into one entry because they were found and fixed in one stretch of work. Each
+is independent. The invariants that keep them from coming back are written up in
+sections 7–17 of `.agents/AGENTS.md`.
+
+**1. Every shift was reconciled against lifetime revenue.**
+*What the user saw:* cash variance on shift close was nonsense — the expected-cash
+figure grew forever and every shift looked massively short.
+*Root cause:* `closeShift` (and the live preview in `CloseShiftModal`) summed **every
+ticket in the store** rather than the tickets belonging to that cashier inside that
+shift's open→close window.
+*Fix:* new `shiftTickets()` / `shiftExpenses()` in `src/utils/analytics.ts`, used by
+`src/store/useShiftStore.ts` and `src/components/shift/CloseShiftModal.tsx`. Proved
+with a discriminating test: two shifts closed against their own takings expect 900 and
+500, not 1400 each. `closeShift` also reloaded with an unscoped `loadShift()`; it now
+passes `shift.cashierId`.
+
+**2. The manager console reported one cashier's numbers as the whole business.**
+*What the user saw:* opening the console while a cashier was signed in at the till
+showed only that cashier's tickets, so the month's revenue was whatever that one
+person happened to take.
+*Root cause:* the console reused the till's per-cashier data scope.
+*Fix:* `src/App.tsx` loads the whole account whenever the console is open. Because the
+signed-in user may still be a cashier, `useAuthStore` gained `hasAdminAuthority`
+(granted by the admin PIN that opens the console) and admin-only actions check that
+rather than `activeUser.role`.
+
+**3. Deleting anything silently un-deleted it on the next sync.**
+*What the user saw:* would have shown as deleted staff reappearing.
+*Root cause:* `useSyncStore`'s worker upserted every queued outbox row regardless of
+its `action`, so a `DELETE` was replayed to Supabase as an upsert.
+*Fix:* explicit DELETE branch (`.delete().eq('id',…).eq('account_id',…)`) in
+`src/store/useSyncStore.ts`; `deleteUser` + `countRecordsForUser` added to
+`src/services/db/IndexedDbService.ts`.
+
+**4. A used recovery key came back to life.**
+*Root cause:* consuming a key set `recoveryKeyHash: undefined`. `JSON.stringify` drops
+`undefined`, so the field never reached Supabase, the column kept the old hash, and
+the next pull restored the spent key — leaving a single-use key permanently valid.
+*Fix:* set it to explicit `null`, and re-typed `User.recoveryKeyHash` as
+`string | null` (`src/types/user.ts`, `src/store/useAuthStore.ts`).
+
+**5. After a PIN recovery, the keypad refused to accept the new PIN.**
+*What the user saw:* recovery succeeds, you land back on the keypad — and it is still
+showing "Invalid PIN" about your *old* PIN, with the new one pre-filled, doing
+nothing.
+*Root cause:* `PinModal`'s auto-submit is suppressed while `error` is set, and the
+error from the failed pre-recovery attempt was never cleared.
+*Fix:* `src/components/common/PinModal.tsx` clears `error` before pre-filling and on
+entering recovery mode.
+
+**6. Locking the till locked the cashier out of it.**
+*What the user saw:* a cashier working alone tapped Lock Till (or just let the
+5-minute idle timer fire) and could not get back in — the lock demanded the **admin**
+PIN. Conversely, pressing Escape dismissed the lock entirely, so it wasn't a lock.
+*Root cause:* the lock reused the manager-authorisation PIN prompt verbatim.
+*Fix:* `openPinModal` gained a scope — `'session'` accepts the signed-in user's own
+PIN (admin PINs still work so a manager can take over), and renders a real screen lock
+that names who is signed in, has no ESC button and ignores Escape. Manager mode stays
+`'admin'`-scoped; verified that a cashier PIN still cannot open the console.
+`src/store/useAuthStore.ts`, `src/components/common/PinModal.tsx`, `src/App.tsx`.
+
+**7. Cashiers could not log in at all.**
+*What the user saw:* typing a staff ID and PIN on the login screen did nothing — the
+button appeared to be ignored.
+*Root cause:* the identity field was `type="email"`, so browser validation silently
+rejected every non-email staff ID before submit.
+*Fix:* `src/components/auth/AuthPage.tsx` — `type="text"` with `inputMode="email"`,
+relabelled "Email Address / Staff ID".
+
+**8. Every ticket printed on a full A4 page.**
+*What the user saw:* a huge blank area above and below each receipt; the roll advanced
+far past the ticket.
+*Root cause:* `print-server.cjs` emitted a fixed `297mm` page with 2mm margins,
+regardless of how short the receipt was.
+*Fix:* the receipt is measured after render and the PDF is emitted at exactly that
+height, zero margins, printed `scale: 'noscale'`; width is configurable via
+`PRINT_WIDTH_MM` (default 58) and slack via `PRINT_FEED_MM` (default 0). The measured
+element gets `overflow: hidden` so child margins can't collapse out of the
+measurement. `src/index.css`'s print block was brought in step (was 80mm/4mm).
+~222mm of roll saved per ticket.
+
+**9. The admin recovery key was a dead feature, and the email reset broke cloud sync.**
+*What the user saw:* no way to recover an admin PIN; and after using the emailed
+password reset, the till would quietly stop syncing ("Not Signed In to Cloud").
+*Root cause:* `registerUser` never generated a recovery key, so nothing was ever
+issued. Separately, `updatePasswordAfterRecovery` changed the local PIN without
+changing the derived Supabase password, so the till could no longer re-authenticate —
+very likely the original cause of the earlier "Not Signed In to Cloud" report.
+*Fix:* keys are now generated at registration and shown once
+(`src/utils/recoveryKey.ts`, `src/components/auth/RecoveryKeyNotice.tsx`,
+`src/components/manager/RecoveryKeySettings.tsx`); every PIN-changing path now calls
+`updateSupabaseUserPassword(deriveSupabasePassword(newPin))`.
+*Known limitation, stated in the dialog:* a recovery key used **offline** restores the
+till but not cloud sync — there is no session through which to realign the password.
+The emailed reset restores both.
+
+**Verified:** full suite 156/156 across 19 files (new: `period.test.ts`,
+`recoveryKey.test.ts`, `staffRoster.test.ts`; rewritten sections of
+`analytics.test.ts`), `tsc --noEmit` clean, `npm run build` clean, plus Playwright
+runs against a real signup covering the console tabs, staff edit/delete, the lock
+screen, cashier login and the recovery flow.
+
+**Still to confirm on the real till:** sign in with the admin PIN on the owner's own
+device and watch for `[accountScope] stamped N local row(s)` then
+`[cloudBackfill] queued N …`, confirm the badge reaches "Cloud Synced", then confirm
+the data appears in a second browser. The owner's existing admin account predates
+recovery keys and still needs one issued under Settings → Admin Recovery Key.
+
+---
+
 ## 2026-08-16 — Backups couldn't be found from a replacement machine, and login gave one vague error for everything
 
 **What the user saw:** Two separate problems, both in the "sign in on a different/new

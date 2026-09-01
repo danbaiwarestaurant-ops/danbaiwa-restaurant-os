@@ -37,6 +37,12 @@ vi.mock('../services/supabase/supabaseClient', () => ({
             filters[col] = val;
             return chain;
           }),
+          // Removals are sent a batch at a time. A single-row batch still has to name
+          // exactly that id, which is what this test is really about.
+          in: vi.fn((col: string, vals: any[]) => {
+            filters[col] = vals.length === 1 ? vals[0] : vals;
+            return chain;
+          }),
           then: (resolve: any) => {
             calls.push({ table, op: 'delete', filters });
             return Promise.resolve({ error: null }).then(resolve);

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(node -e ' *)",
-      "Bash(node cashier_lock_verify.js)"
+      "Bash(node cashier_lock_verify.js)",
+      "Bash(node \"C:/Users/SURFACE/AppData/Local/Temp/claude/c--Users-SURFACE-danbaiwa-restaurant-os/fa75db2a-0b89-4aba-92e1-159c32ee80ea/scratchpad/sync_verify.js\")",
+      "Bash(node \"C:/Users/SURFACE/AppData/Local/Temp/claude/c--Users-SURFACE-danbaiwa-restaurant-os/fa75db2a-0b89-4aba-92e1-159c32ee80ea/scratchpad/device_identity_verify.js\")"
     ]
   }
 }

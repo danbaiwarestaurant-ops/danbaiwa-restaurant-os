@@ -14,9 +14,12 @@ interface UserMenuProps {
  *
  * The till used to keep a cashier-name button and a red "Log Out" button permanently in
  * the action bar, side by side with the buttons used constantly during service. On a
- * touch screen that is an accidental logout waiting to happen — and logging out destroys
- * the Supabase session, so the till stops syncing until someone reconnects it with the
- * admin PIN. Both now live two taps deep instead of one.
+ * touch screen that is an accidental logout waiting to happen. Both now live two taps
+ * deep instead of one.
+ *
+ * Log Out here ends the staff session only; the device stays enrolled with the cloud so
+ * the queue keeps draining. Disconnecting the device from the cloud is a separate,
+ * explicit act (System Logout, in the console's settings).
  */
 export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, variant = 'light' }) => {
   const { users, activeUser, switchCashierSession, logoutUser } = useAuthStore();
@@ -70,7 +73,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, variant = 'light
 
   const handleLogout = async () => {
     setIsOpen(false);
-    if (window.confirm('Are you sure you want to log out of the POS System terminal?')) {
+    if (window.confirm('Log out of the till? Syncing carries on in the background.')) {
       await logoutUser();
     }
   };

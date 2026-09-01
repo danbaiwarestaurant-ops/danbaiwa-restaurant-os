@@ -44,12 +44,39 @@ The app is a installable Progressive Web App — no native desktop shell require
 
 ## 3. Cloud Supabase Outbox Sync Setup
 1. Open your Supabase project SQL Editor.
-2. Paste and run `supabase_schema.sql` (located at `C:\Users\SURFACE\.gemini\antigravity-ide\scratch\ticket-pos\supabase_schema.sql`).
+2. Paste and run `supabase_schema.sql` (in the project root).
 3. Add your Supabase credentials in `.env`:
    ```env
    VITE_SUPABASE_URL=https://your-project.supabase.co
    VITE_SUPABASE_ANON_KEY=your-anon-key
    ```
+
+The script is safe to re-run: it creates nothing twice and deletes nothing. **Re-run it
+after updating the app** — it is also how schema changes reach a live project.
+
+### 3a. Till enrolment (run the SQL to switch this on)
+
+The `DEVICE IDENTITY` section at the end of `supabase_schema.sql` is what lets each till
+sign in to the cloud **as itself** instead of borrowing the owner's login. Until that
+section has been run, the app works exactly as it did before — it detects the missing
+table, stands down, and keeps using the owner's session — so deploying the app first and
+the SQL later is safe.
+
+Once it *has* been run, the next time an admin signs in on a till, that till quietly
+enrols itself and gains its own credential. From then on:
+
+- the till restores its own cloud session after a logout, a reload, or a spell offline,
+  with **no admin PIN and nobody present** — which is what makes unattended and remote
+  operation possible;
+- a stolen or lost till can be **revoked individually**, from
+  *Manager Console → Settings → Tills Connected to This Account*, without changing anyone's
+  PIN and without disturbing the other tills. Revocation takes effect server-side
+  immediately; the till keeps working and keeps its own records, it just stops syncing;
+- a till holds **no credential of the owner's**, so picking up a machine no longer exposes
+  the owner's account itself.
+
+Changing the admin PIN still requires an owner signed in on that till: a PIN change is a
+change to the owner's cloud password, and a till session deliberately cannot make it.
 
 ---
 

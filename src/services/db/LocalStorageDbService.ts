@@ -321,6 +321,17 @@ export class LocalStorageDbService implements IDbService {
     }
   }
 
+  async markOutboxSyncedMany(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
+    const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
+    const wanted = new Set(ids);
+    for (const o of outbox) {
+      if (wanted.has(o.id)) o.status = 'synced';
+    }
+    setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(outbox));
+  }
+
   async markOutboxAttemptFailed(id: string, retryCount: number, lastError?: string): Promise<void> {
     const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];

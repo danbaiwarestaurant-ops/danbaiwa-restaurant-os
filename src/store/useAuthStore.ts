@@ -6,6 +6,12 @@ import { authenticateAdminWithSupabase, updateSupabaseUserPassword, deriveSupaba
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
 import { runCloudCatchUp, startRealtimeSync, stopRealtimeSync } from '../services/db/realtimeSync';
+import {
+  ensureDeviceEnrolled,
+  restoreDeviceSession,
+  clearDeviceIdentity,
+  reportDeviceSeen,
+} from '../services/supabase/deviceIdentity';
 import { getAccountId } from '../services/db/accountScope';
 import { generateRecoveryKey, normaliseRecoveryKey } from '../utils/recoveryKey';
 import {
@@ -182,8 +188,19 @@ interface AuthState {
   loadUsers: () => Promise<void>;
   registerUser: (name: string, email: string, password: string, pin: string, role?: UserRole) => Promise<UserAccount>;
   loginUser: (email: string, passwordOrPin: string) => Promise<LoginResult>;
-  logoutUser: () => Promise<void>;
-  
+  /**
+   * End the staff session at the till.
+   *
+   * `unenrolDevice` also signs the device out of the cloud, which is a much bigger act
+   * than it sounds: the Supabase credential is derived from the admin PIN, so once it is
+   * gone nothing syncs until an admin comes and types that PIN in. That used to happen on
+   * every ordinary logout, which is why tills kept ending up stranded on "Not Signed In
+   * to Cloud" with a queue nobody at the counter could clear. Who is standing at the till
+   * and whether the device is enrolled to the account are different questions; only the
+   * console's explicit "System Logout" answers the second one.
+   */
+  logoutUser: (options?: { unenrolDevice?: boolean }) => Promise<void>;
+
   updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
   updatePasswordAfterRecovery: (email: string, newPassword: string, newPin: string) => Promise<boolean>;
   createStaffCashier: (name: string, username: string, pin: string) => Promise<UserAccount>;
@@ -247,6 +264,25 @@ interface AuthState {
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
   assertAdminRole: () => void;
+}
+
+/**
+ * Enrol this till with the account, in the background, whenever an owner session is live.
+ *
+ * Deliberately fire-and-forget: enrolment is a convenience for *later* (it is what lets
+ * the till restore its own cloud session with nobody present), never a precondition for
+ * the sign-in happening right now. A till that fails to enrol — offline, sign-ups
+ * disabled, whatever — simply carries on using the owner's session and tries again next
+ * time an owner signs in.
+ */
+function enrolThisTill(): void {
+  if (!isSupabaseConfigured) return;
+  const config = useDeviceStore.getState().config;
+  ensureDeviceEnrolled({
+    deviceId: config.deviceId,
+    locationId: config.locationId,
+    label: [config.locationId, config.deviceId].filter(Boolean).join('-') || undefined,
+  }).catch((e) => console.warn('[Auth] till enrolment skipped:', e));
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -319,11 +355,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     // A resumed session (app reload while already logged in) is the most common way
     // this app is actually running most of the day — realtime sync needs to restart
-    // here too, not just on a fresh interactive login. No-ops if this browser holds
-    // no Supabase session (e.g. a cashier-only till that no admin has ever signed into).
+    // here too, not just on a fresh interactive login.
+    //
+    // Boot is also where an enrolled till signs *itself* back into the cloud. Without it
+    // a till that had been logged out, cleared, or left offline long enough to lose its
+    // token came up cloud-less and stayed that way until an owner arrived with a PIN,
+    // which is precisely what running the business remotely cannot depend on.
     if (isAuthenticated) {
-      startRealtimeSync();
-      runCloudCatchUp().catch(() => {});
+      (async () => {
+        const restored = await restoreDeviceSession().catch(() => false);
+        // An owner session that predates device identity (or one whose enrolment was
+        // revoked and then re-established by a PIN sign-in) still needs enrolling once.
+        enrolThisTill();
+        if (restored) void reportDeviceSeen();
+        startRealtimeSync();
+        runCloudCatchUp().catch(() => {});
+      })();
     }
   },
 
@@ -359,6 +406,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // 2. Perform Supabase Cloud Signup
     const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
     const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin, locationId);
+
+    // The owner's session is live for the first and only time on a brand-new till, which
+    // is the moment to give the device an identity of its own.
+    enrolThisTill();
 
     // 3. Generate per-user cryptographic salts
     const passwordSalt = generateSalt();
@@ -516,6 +567,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
         authenticateAdminWithSupabase(cleanEmail, passwordOrPin, locationId)
           .then(async () => {
+            enrolThisTill();
             startRealtimeSync();
             const changed = await runCloudCatchUp();
             if (changed) {
@@ -596,6 +648,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
       await authenticateAdminWithSupabase(admin.email, pin, locationId);
 
+      // Re-enrol a till whose access was revoked, or that never got an identity, so this
+      // is the last time anyone has to type a PIN to get it syncing again.
+      enrolThisTill();
+
       useSyncStore.setState({ cloudConnected: true, cloudError: null });
       startRealtimeSync();
       await runCloudCatchUp();
@@ -614,14 +670,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  logoutUser: async () => {
-    stopRealtimeSync();
-
-    try {
-      if (navigator.onLine && supabase) {
-        await supabase.auth.signOut();
-      }
-    } catch (e) {}
+  logoutUser: async ({ unenrolDevice = false } = {}) => {
+    if (unenrolDevice) {
+      stopRealtimeSync();
+      // The device's own credential goes too, or boot would simply sign the till back in
+      // and "disconnect this device" would be a button that does nothing.
+      await clearDeviceIdentity().catch(() => {});
+      try {
+        if (navigator.onLine && supabase) {
+          await supabase.auth.signOut();
+        }
+      } catch (e) {}
+      useSyncStore.setState({
+        cloudConnected: false,
+        cloudError:
+          'This device was signed out of the cloud. Anything still queued stays safe here — sign in with the admin PIN to send it.',
+      });
+    }
+    // Otherwise the device stays enrolled: realtime sync keeps running and the outbox
+    // keeps draining, so whatever the last shift recorded reaches the cloud even though
+    // nobody is signed in at the counter. The local data was already on this device
+    // either way, and the session's reach is exactly the account it belongs to — so
+    // holding it grants nothing the machine did not already have.
 
     localStorage.removeItem('ticket_pos_session_user_id');
     set({

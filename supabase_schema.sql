@@ -424,3 +424,162 @@ BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE account_settings;
   END IF;
 END $$;
+
+-- =============================================================================
+-- DEVICE IDENTITY — a till authenticates as itself, not as its owner
+-- =============================================================================
+--
+-- Until now the only cloud identity was the owner's, and the only way to get one was
+-- the admin PIN. Cashiers hold no cloud identity at all, so a till that lost its
+-- session went silent until the owner physically came and typed their PIN — the exact
+-- situation an owner running the business remotely cannot afford.
+--
+-- A till now enrols as its own auth user, and reaches the account's data through a
+-- membership row rather than by borrowing the owner's login. Three things follow:
+--
+--   * the till can re-authenticate itself, so no human is needed to restore sync;
+--   * a stolen till can write that account's tickets but CANNOT touch the owner's
+--     account — it holds no credential of the owner's (previously, an unlocked till
+--     held a live owner session that could change the owner's own password);
+--   * access is revocable per device, remotely, without changing anyone's PIN.
+--
+-- Enrolment is deliberately something only an owner session can do: the membership row
+-- is INSERTed under the owner's own auth.uid(), so a till cannot enrol itself or move
+-- itself to another account.
+
+CREATE TABLE IF NOT EXISTS account_devices (
+  auth_user_id UUID PRIMARY KEY,               -- the till's own Supabase auth user
+  account_id   UUID NOT NULL,                  -- the owner whose data it may reach
+  device_id    TEXT,
+  location_id  TEXT,
+  label        TEXT,
+  status       TEXT NOT NULL DEFAULT 'active', -- 'active' | 'revoked'
+  enrolled_at  TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  last_seen_at TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_devices_account ON account_devices(account_id);
+
+DROP TRIGGER IF EXISTS trg_account_devices_updated_at ON account_devices;
+CREATE TRIGGER trg_account_devices_updated_at BEFORE INSERT OR UPDATE ON account_devices
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- The tenant key for the caller, whoever they are.
+--
+-- An owner signing in directly has no device row, so this falls through to auth.uid()
+-- and every policy behaves exactly as it did before — which is what makes this
+-- migration safe to apply to a live account with tills already in the field.
+--
+-- SECURITY DEFINER because the lookup must not itself be filtered by the policies that
+-- call it. search_path is pinned so the function body cannot be redirected by a
+-- caller-controlled schema.
+CREATE OR REPLACE FUNCTION current_account_id() RETURNS UUID
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(
+    (SELECT d.account_id
+       FROM account_devices d
+      WHERE d.auth_user_id = auth.uid()
+        AND d.status = 'active'),
+    auth.uid()
+  );
+$$;
+
+REVOKE ALL ON FUNCTION current_account_id() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION current_account_id() TO authenticated;
+
+-- A till reports itself alive without being able to edit anything else about its own
+-- enrolment. Written as a function precisely because the device has no UPDATE policy:
+-- letting it write its own row would let a compromised till un-revoke itself or point
+-- itself at another account.
+CREATE OR REPLACE FUNCTION touch_device_last_seen() RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE account_devices
+     SET last_seen_at = timezone('utc'::text, now())
+   WHERE auth_user_id = auth.uid();
+$$;
+
+REVOKE ALL ON FUNCTION touch_device_last_seen() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION touch_device_last_seen() TO authenticated;
+
+ALTER TABLE account_devices ENABLE ROW LEVEL SECURITY;
+
+-- The owner manages their own fleet: enrol, rename, revoke.
+DROP POLICY IF EXISTS "Owners manage their devices" ON account_devices;
+CREATE POLICY "Owners manage their devices" ON account_devices
+FOR ALL TO authenticated
+USING      (account_id = auth.uid())
+WITH CHECK (account_id = auth.uid());
+
+-- A till may read its own enrolment (to discover it has been revoked, and say so)
+-- and nothing else. Deliberately SELECT-only: see touch_device_last_seen above.
+DROP POLICY IF EXISTS "Devices read their own enrolment" ON account_devices;
+CREATE POLICY "Devices read their own enrolment" ON account_devices
+FOR SELECT TO authenticated
+USING (auth_user_id = auth.uid());
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Re-point every policy at current_account_id().
+--
+-- Identical behaviour for an owner session (the COALESCE falls through to auth.uid());
+-- a till session now resolves to the account it is enrolled with. Revoking a device
+-- makes the lookup miss, the COALESCE returns the till's own id, and it matches no row
+-- in any table — so revocation takes effect immediately, everywhere, with nothing to
+-- roll out to the device itself.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- The `id = auth.uid()` disjunct stays for owner bootstrap: adoptAccountFromCloud()
+-- reads the owner's own row on a device that has pulled nothing yet.
+DROP POLICY IF EXISTS "Scope users by account" ON users;
+CREATE POLICY "Scope users by account" ON users
+FOR ALL TO authenticated
+USING      (id = auth.uid() OR account_id = current_account_id())
+WITH CHECK (id = auth.uid() OR account_id = current_account_id());
+
+DROP POLICY IF EXISTS "Scope tickets by account" ON tickets;
+CREATE POLICY "Scope tickets by account" ON tickets
+FOR ALL TO authenticated
+USING (account_id = current_account_id()) WITH CHECK (account_id = current_account_id());
+
+DROP POLICY IF EXISTS "Scope shifts by account" ON shifts;
+CREATE POLICY "Scope shifts by account" ON shifts
+FOR ALL TO authenticated
+USING (account_id = current_account_id()) WITH CHECK (account_id = current_account_id());
+
+DROP POLICY IF EXISTS "Scope expenses by account" ON expenses;
+CREATE POLICY "Scope expenses by account" ON expenses
+FOR ALL TO authenticated
+USING (account_id = current_account_id()) WITH CHECK (account_id = current_account_id());
+
+-- Still deliberately no UPDATE/DELETE policy — immutability enforced by the database.
+DROP POLICY IF EXISTS "Scope audit_logs read by account" ON audit_logs;
+CREATE POLICY "Scope audit_logs read by account" ON audit_logs
+FOR SELECT TO authenticated
+USING (account_id = current_account_id());
+
+DROP POLICY IF EXISTS "Scope audit_logs insert by account" ON audit_logs;
+CREATE POLICY "Scope audit_logs insert by account" ON audit_logs
+FOR INSERT TO authenticated
+WITH CHECK (account_id = current_account_id());
+
+DROP POLICY IF EXISTS "Scope account_settings by account" ON account_settings;
+CREATE POLICY "Scope account_settings by account" ON account_settings
+FOR ALL TO authenticated
+USING (account_id = current_account_id()) WITH CHECK (account_id = current_account_id());
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'account_devices'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE account_devices;
+  END IF;
+END $$;

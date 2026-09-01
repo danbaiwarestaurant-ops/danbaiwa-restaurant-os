@@ -1,16 +1,101 @@
 import { create } from 'zustand';
-import { SyncState, OutboxItem } from '../types/sync';
+import { SyncState, OutboxItem, SyncAction } from '../types/sync';
 import { dbService } from '../services/db/IndexedDbService';
 import { supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { toSnakeCase } from '../utils/caseMapping';
 import { getAccountId } from '../services/db/accountScope';
+import { restoreDeviceSession, isDeviceRevoked } from '../services/supabase/deviceIdentity';
 
 interface SyncStoreState extends SyncState {
   pendingItems: OutboxItem[];
   checkOutbox: () => Promise<void>;
   triggerSyncWorker: () => Promise<void>;
+  /**
+   * What the manual sync button does: clear every backoff timer and push right now.
+   *
+   * The background worker deliberately backs a failed row off for up to half an hour, so
+   * after any hiccup the queue drains in dribs — which is exactly what "sync now" is
+   * being pressed to override. Someone standing at the till pressing the badge is new
+   * information ("the connection is good, try again"), so honour it rather than making
+   * them watch a timer they cannot see.
+   */
+  forceSyncNow: () => Promise<void>;
   startBackgroundLoop: () => void;
+}
+
+/**
+ * Rows per cloud request. The worker used to send one row per HTTP round trip, strictly
+ * sequentially: a 300-row backlog meant 300 round trips, so the pending counter visibly
+ * ticked down one at a time for minutes on a normal connection. Postgres takes an array
+ * just as happily as a single row, so the same backlog is now a couple of requests.
+ */
+const MAX_BATCH_ROWS = 200;
+
+interface OutboxBatch {
+  tableName: string;
+  action: SyncAction;
+  items: OutboxItem[];
+}
+
+/**
+ * Split the due queue into runs that can be sent as one request each.
+ *
+ * Runs are **contiguous**, not merely grouped by table: the queue is ordered by createdAt
+ * and that order carries meaning. Sorting all the UPDATEs together and all the DELETEs
+ * together would let a record's later deletion be sent before its earlier update, and the
+ * update would then recreate the row that was just removed.
+ *
+ * Exported for testing — the ordering guarantee is the whole correctness argument for
+ * batching, so it is pinned down directly rather than inferred from the worker's output.
+ */
+export function batchOutbox(items: OutboxItem[], maxRows: number = MAX_BATCH_ROWS): OutboxBatch[] {
+  const batches: OutboxBatch[] = [];
+
+  for (const item of items) {
+    const current = batches[batches.length - 1];
+    const extendsRun =
+      current &&
+      current.tableName === item.tableName &&
+      current.action === item.action &&
+      current.items.length < maxRows;
+
+    if (extendsRun) current.items.push(item);
+    else batches.push({ tableName: item.tableName, action: item.action, items: [item] });
+  }
+
+  return batches;
+}
+
+/**
+ * Collapse repeat writes to the same record within one batch.
+ *
+ * Two queued snapshots of the same row are two versions of the same full record, so the
+ * later one wins and the earlier is already accounted for. This is not just an
+ * optimisation: Postgres rejects an ON CONFLICT upsert whose payload touches the same row
+ * twice ("cannot affect row a second time"), which would fail the entire batch over
+ * something that is not an error at all.
+ */
+export function dedupeBatch(items: OutboxItem[]): { send: OutboxItem[]; superseded: OutboxItem[] } {
+  // Index of the last queued write per record id. A row with no id at all can't be
+  // deduped (or conflict-resolved by the cloud), so it is always sent as-is.
+  const lastIndexFor = new Map<string, number>();
+  items.forEach((item, i) => {
+    const rowId = item.payload?.id;
+    if (rowId !== undefined && rowId !== null) lastIndexFor.set(String(rowId), i);
+  });
+
+  const send: OutboxItem[] = [];
+  const superseded: OutboxItem[] = [];
+
+  items.forEach((item, i) => {
+    const rowId = item.payload?.id;
+    if (rowId === undefined || rowId === null) send.push(item);
+    else if (lastIndexFor.get(String(rowId)) === i) send.push(item);
+    else superseded.push(item);
+  });
+
+  return { send, superseded };
 }
 
 /**
@@ -50,12 +135,20 @@ function isRlsViolation(error: { code?: string; message?: string } | null): bool
   );
 }
 
-/** Whether this browser currently holds a real Supabase session. */
+/**
+ * Whether this browser holds a real Supabase session — restoring the till's own one if
+ * it does not.
+ *
+ * A till is enrolled with its account in its own right, so a lost session is something
+ * the device can fix by itself. Doing it here means the fix happens on the path that
+ * actually noticed the problem, rather than waiting for an owner to walk over with a PIN.
+ */
 async function hasCloudSession(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
     const { data } = await supabase.auth.getSession();
-    return Boolean(data?.session);
+    if (data?.session) return true;
+    return await restoreDeviceSession();
   } catch (_) {
     return false;
   }
@@ -101,13 +194,16 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     // Being online is not the same as being authenticated. Without a Supabase session
     // every upsert below is rejected by RLS, and those rejections are not the queued
     // rows' fault — so skip entirely, exactly as if offline, rather than pushing every
-    // row a step closer to being written off.
+    // row a step closer to being written off. hasCloudSession restores the till's own
+    // session first, so reaching this branch means the device is not enrolled at all
+    // (or cannot reach the cloud to prove it), which is the one case still needing a
+    // person.
     if (!(await hasCloudSession())) {
       set({
         cloudConnected: false,
         cloudError:
           get().cloudError ??
-          'This till is not signed in to the cloud, so nothing can reach your other devices. Your work is queued safely — reconnect with the admin PIN to send it.',
+          'This till has no cloud session and is not enrolled with your account, so nothing can reach your other devices. Your work is queued safely — an admin signing in here with their PIN will enrol it, once and for good.',
       });
       console.debug('[Sync Store] Worker skipped: no cloud session (data stays queued)');
       return;
@@ -123,89 +219,138 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       // device can't push under the previous one's id.
       const accountId = await getAccountId();
 
-      for (const item of items) {
-        try {
-          // Prepare payload with camelCase -> snake_case conversion
-          const supabasePayload = toSnakeCase(item.payload);
+      /** One row, prepared for the cloud's column names and tenant scoping. */
+      const toCloudRow = (item: OutboxItem) => {
+        const supabasePayload = toSnakeCase(item.payload);
 
-          // Every synced row is owned by an account — this is what the RLS policies
-          // compare against auth.uid(). Applied uniformly rather than per-table.
-          if (accountId) supabasePayload.account_id = accountId;
+        // Every synced row is owned by an account — this is what the RLS policies
+        // compare against auth.uid(). Applied uniformly rather than per-table.
+        if (accountId) supabasePayload.account_id = accountId;
 
-          // location_id is descriptive now, not security-relevant, but audit_logs and
-          // users have no locationId of their own to carry, so still supply it.
-          if (item.tableName === 'users' || item.tableName === 'audit_logs') {
-            supabasePayload.location_id = locationId;
-          }
-
-          // account_settings is keyed by account_id (one row per account), every other
-          // table by the client-generated row id.
-          const conflictKey = item.tableName === 'account_settings' ? 'account_id' : 'id';
-
-          // Removals have to be sent as removals. This branch used to be absent — every
-          // queued row was upserted regardless of its action — so a DELETE would have
-          // written the row straight back into the cloud instead of taking it out.
-          // Scoped by account_id as well as id so a malformed queue entry can never reach
-          // beyond this tenant.
-          const { error } =
-            item.action === 'DELETE'
-              ? await supabase
-                  .from(item.tableName)
-                  .delete()
-                  .eq('id', item.payload.id)
-                  .eq('account_id', accountId ?? '')
-              : await supabase
-                  .from(item.tableName)
-                  .upsert(supabasePayload, { onConflict: conflictKey });
-
-          if (error) {
-            // An RLS rejection only means "signed out" if the session really is gone.
-            const sessionLost =
-              isSessionFailure(error) || (isRlsViolation(error) && !(await hasCloudSession()));
-
-            if (sessionLost) {
-              // The till lost its cloud authorisation mid-batch. Abort without charging
-              // this row — or any row behind it — for something none of them caused.
-              console.warn(
-                '[Sync Store] Cloud authorisation lost mid-sync; queue left intact:',
-                error.message
-              );
-              set({
-                isSyncing: false,
-                cloudConnected: false,
-                cloudError: `The cloud rejected this till's credentials (${error.message}). Your work is queued safely — reconnect with the admin PIN to send it.`,
-              });
-              return;
-            }
-
-            if (isRlsViolation(error)) {
-              // Signed in, but this row belongs to a scope the token doesn't cover. The
-              // session is healthy, so say what is actually wrong instead of blaming it.
-              set({
-                cloudError: `Signed in, but the cloud is refusing this ${item.tableName} record because it is scoped to a different location than your account (${error.message}). It stays queued and will be retried.`,
-              });
-            }
-
-            throw Object.assign(new Error(error.message), { code: error.code });
-          }
-
-          // Mark local item as successfully synced
-          await dbService.markOutboxSynced(item.id);
-        } catch (itemError: any) {
-          // One genuinely rejected record (schema mismatch, missing FK, etc.) must never
-          // block every other queued ticket/shift/expense behind it in the batch. Back it
-          // off exponentially and carry on — it keeps its place in the queue and is
-          // surfaced as "stuck" rather than being dropped.
-          console.error(
-            `[Sync Store] Sync failed for ${item.tableName} record ${item.id} (attempt ${item.retryCount + 1}):`,
-            itemError.message || itemError
-          );
-          await dbService.markOutboxAttemptFailed(
-            item.id,
-            item.retryCount,
-            String(itemError?.message ?? itemError)
-          );
+        // location_id is descriptive now, not security-relevant, but audit_logs and
+        // users have no locationId of their own to carry, so still supply it.
+        if (item.tableName === 'users' || item.tableName === 'audit_logs') {
+          supabasePayload.location_id = locationId;
         }
+        return supabasePayload;
+      };
+
+      /**
+       * Send one run of same-table, same-action rows as a single request.
+       *
+       * Removals have to be sent as removals. This branch used to be absent — every
+       * queued row was upserted regardless of its action — so a DELETE would have
+       * written the row straight back into the cloud instead of taking it out. Scoped by
+       * account_id as well as id so a malformed queue entry can never reach beyond this
+       * tenant.
+       */
+      const push = async (batch: OutboxBatch, rows: OutboxItem[]) => {
+        if (batch.action === 'DELETE') {
+          return supabase
+            .from(batch.tableName)
+            .delete()
+            .in('id', rows.map((r) => r.payload.id))
+            .eq('account_id', accountId ?? '');
+        }
+        // account_settings is keyed by account_id (one row per account), every other
+        // table by the client-generated row id.
+        const conflictKey = batch.tableName === 'account_settings' ? 'account_id' : 'id';
+        return supabase
+          .from(batch.tableName)
+          .upsert(rows.map(toCloudRow), { onConflict: conflictKey });
+      };
+
+      /**
+       * Whether to abandon the whole pass. An RLS rejection only means "signed out" if
+       * the session really is gone; otherwise it is the row's scope that is wrong, and
+       * saying so is more useful than blaming the credentials.
+       */
+      const classify = async (error: { code?: string; message?: string }, tableName: string) => {
+        if (isSessionFailure(error) || (isRlsViolation(error) && !(await hasCloudSession()))) {
+          console.warn(
+            '[Sync Store] Cloud authorisation lost mid-sync; queue left intact:',
+            error.message
+          );
+          set({
+            isSyncing: false,
+            cloudConnected: false,
+            cloudError: `The cloud rejected this till's credentials (${error.message}). Your work is queued safely — reconnect with the admin PIN to send it.`,
+          });
+          return 'session-lost' as const;
+        }
+        if (isRlsViolation(error)) {
+          // A revoked till authenticates perfectly well and simply matches no rows any
+          // more, so this is by far the likeliest reason a healthy session is refused.
+          // Saying "scoped to a different location" there would send whoever reads it
+          // hunting through device settings for a problem that does not exist.
+          set({
+            cloudError: (await isDeviceRevoked())
+              ? "This till's access to the account was revoked, so the cloud is refusing its records. Your work stays queued safely here. An admin can re-enable this till, or sign in on it with their PIN to enrol it again."
+              : `Signed in, but the cloud is refusing this ${tableName} record because it is scoped to a different location than your account (${error.message}). It stays queued and will be retried.`,
+          });
+        }
+        return 'row-fault' as const;
+      };
+
+      const fail = async (item: OutboxItem, reason: unknown) => {
+        // One genuinely rejected record (schema mismatch, missing FK, etc.) must never
+        // block every other queued ticket/shift/expense behind it. Back it off
+        // exponentially and carry on — it keeps its place in the queue and is surfaced as
+        // "stuck" rather than being dropped.
+        console.error(
+          `[Sync Store] Sync failed for ${item.tableName} record ${item.id} (attempt ${item.retryCount + 1}):`,
+          reason
+        );
+        await dbService.markOutboxAttemptFailed(item.id, item.retryCount, String(reason));
+      };
+
+      for (const batch of batchOutbox(items)) {
+        const { send, superseded } = dedupeBatch(batch.items);
+        const { error } = await push(batch, send);
+
+        if (!error) {
+          // Superseded rows are acknowledged too: the record they described was sent, in
+          // its newer form, by this very request.
+          await dbService.markOutboxSyncedMany([...send, ...superseded].map((i) => i.id));
+          continue;
+        }
+
+        if ((await classify(error, batch.tableName)) === 'session-lost') return;
+
+        // The batch was rejected, but at most a few of its rows are actually at fault.
+        // Re-send them individually so one bad record is isolated and charged, and every
+        // other row in the run still reaches the cloud on this pass rather than
+        // inheriting a backoff it did not earn.
+        if (send.length === 1) {
+          await fail(send[0], error.message);
+          continue;
+        }
+
+        console.warn(
+          `[Sync Store] Batch of ${send.length} ${batch.tableName} row(s) rejected (${error.message}); retrying individually to isolate the cause`
+        );
+
+        const deliveredRecords = new Set<string>();
+        const acknowledge: string[] = [];
+
+        for (const item of send) {
+          const { error: rowError } = await push(batch, [item]);
+          if (!rowError) {
+            acknowledge.push(item.id);
+            deliveredRecords.add(String(item.payload?.id));
+            continue;
+          }
+          if ((await classify(rowError, batch.tableName)) === 'session-lost') return;
+          await fail(item, rowError.message);
+        }
+
+        // A superseded row is only accounted for once its successor actually lands. If
+        // that successor was the one the cloud rejected, the older snapshot has to stay
+        // queued behind it rather than being quietly discarded.
+        for (const item of superseded) {
+          if (deliveredRecords.has(String(item.payload?.id))) acknowledge.push(item.id);
+        }
+        await dbService.markOutboxSyncedMany(acknowledge);
       }
 
       // Re-fetch remaining outbox queue size
@@ -222,6 +367,20 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       console.error('[Outbox Sync Worker Exception]:', e.message || e);
       set({ isSyncing: false });
     }
+  },
+
+  forceSyncNow: async () => {
+    await dbService.init();
+    // Clear every backoff first. Without this the button is a lie on exactly the
+    // occasions it matters most: after a spell offline, most of the queue is sitting out
+    // a multi-minute timer, so pressing sync did nothing visible and the count kept
+    // trickling down on its own schedule.
+    const revived = await dbService.revivePendingOutbox();
+    if (revived) {
+      console.info(`[Sync Store] Manual sync revived ${revived} parked row(s)`);
+    }
+    await get().checkOutbox();
+    await get().triggerSyncWorker();
   },
 
   startBackgroundLoop: () => {

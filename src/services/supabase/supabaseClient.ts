@@ -2,8 +2,8 @@ import { createClient } from '@supabase/supabase-js';
 
 // Read Supabase environment variables safely with fallback
 const metaEnv = (import.meta as any).env || {};
-const SUPABASE_URL = metaEnv.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
-const SUPABASE_ANON_KEY = metaEnv.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key';
+export const SUPABASE_URL = metaEnv.VITE_SUPABASE_URL || 'https://placeholder.supabase.co';
+export const SUPABASE_ANON_KEY = metaEnv.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key';
 
 export const isSupabaseConfigured = Boolean(
   SUPABASE_URL &&
@@ -102,6 +102,19 @@ export async function authenticateAdminWithSupabase(email: string, pin: string, 
  */
 export async function updateSupabaseUserPassword(newPassword: string) {
   if (!isSupabaseConfigured) return;
+
+  // A till holds its own cloud identity now, and the till's session is what the app runs
+  // on whenever no owner is signed in. Changing the password on *that* session would
+  // silently rewrite the device's own credential — locking the till out of the cloud
+  // permanently — while leaving the owner's account untouched, so a PIN change would
+  // appear to work and break syncing instead. The owner has to be present for this.
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (sessionData?.session?.user?.user_metadata?.kind === 'pos-till') {
+    throw new Error(
+      'This till is signed in to the cloud as a device, not as you. Sign in with your admin email and PIN on this till before changing the cloud password.'
+    );
+  }
+
   const { data, error } = await supabase.auth.updateUser({
     password: newPassword,
   });

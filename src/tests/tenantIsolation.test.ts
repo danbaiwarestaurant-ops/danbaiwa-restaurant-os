@@ -64,8 +64,13 @@ vi.mock('../services/supabase/supabaseClient', () => ({
     },
     from: vi.fn((table: string) => ({
       select: () => makeSelect(table),
+      // The worker sends a batch of rows per request. Recorded one row per entry so
+      // these tests stay about what each row carries, which is what tenant isolation
+      // turns on, rather than about how many rows share a request.
       upsert: vi.fn(async (payload: any, opts: any) => {
-        upserts.push({ table, payload, onConflict: opts?.onConflict });
+        for (const row of Array.isArray(payload) ? payload : [payload]) {
+          upserts.push({ table, payload: row, onConflict: opts?.onConflict });
+        }
         return { error: null };
       }),
     })),

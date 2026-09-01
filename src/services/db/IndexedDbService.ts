@@ -387,6 +387,15 @@ export class IndexedDbService implements IDbService {
     await db.outbox.update(id, { status: 'synced' });
   }
 
+  async markOutboxSyncedMany(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await db.transaction('rw', db.outbox, async () => {
+      for (const id of ids) {
+        await db.outbox.update(id, { status: 'synced' });
+      }
+    });
+  }
+
   /**
    * Records a failed sync attempt for one outbox item and backs it off exponentially.
    *

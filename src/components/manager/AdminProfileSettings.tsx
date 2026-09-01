@@ -58,8 +58,17 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
   };
 
   const handleSystemLogout = async () => {
-    if (window.confirm('Are you sure you want to log out of the system terminal account? This will unbind the active account and return to the login screen.')) {
-      await logoutUser();
+    // The one place that genuinely un-enrols the device from the cloud — for handing a
+    // till on, or decommissioning it. Everyday "Log Out" at the counter deliberately
+    // does not, or the next cashier finds a till that has stopped syncing.
+    if (
+      window.confirm(
+        'Log out of the system terminal account and disconnect this device from the cloud?\n\n' +
+          'Anything still queued stays safely on this device, but nothing will sync until an admin signs in again with their PIN. ' +
+          'For simply handing the till to someone else, use Log Out from the account menu instead.'
+      )
+    ) {
+      await logoutUser({ unenrolDevice: true });
     }
   };
 

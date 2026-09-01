@@ -13,11 +13,19 @@
  * populating, and cannot drift when settings change — so neither failure is
  * representable here.
  *
- * Cashiers hold no cloud identity. They never authenticate to Supabase; the admin's
- * session performs all syncing, and cashier rows simply carry their admin's accountId.
+ * Cashiers hold no cloud identity. They never authenticate to Supabase; cashier rows
+ * simply carry their account's id.
+ *
+ * The session doing the syncing is NOT always the owner's, though. A till enrols as its
+ * own auth user so it can restore its own connection without anyone present (see
+ * deviceIdentity.ts), and a till's own auth id owns no rows at all — so the tenant key
+ * has to be resolved from the session rather than assumed to be `session.user.id`.
+ * Stamping rows with a till's id instead of its account would hide that data from
+ * everyone, the owner included.
  */
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
+import { resolveAccountId } from '../supabase/deviceIdentity';
 import { db } from './dexieSchema';
 
 /** Dexie tables whose rows belong to an account and must carry accountId. */
@@ -32,7 +40,8 @@ export async function getAccountId(): Promise<string | null> {
   if (!isSupabaseConfigured) return null;
   try {
     const { data } = await supabase.auth.getSession();
-    return data?.session?.user?.id ?? null;
+    if (!data?.session) return null;
+    return await resolveAccountId(data.session);
   } catch (_) {
     return null;
   }
