@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send, Info, KeyRound, Clock } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase, isSupabaseConfigured, authRedirectUrl } from '../../services/supabase/supabaseClient';
+import { TillDiagnostics } from './TillDiagnostics';
 
 export const AuthPage: React.FC = () => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'recovery_complete'>('login');
@@ -564,6 +565,8 @@ export const AuthPage: React.FC = () => {
             </button>
           </form>
         )}
+
+        {(mode === 'login' || mode === 'register') && <TillDiagnostics />}
 
         <div className="pt-3 border-t text-center text-[10px] text-slate-400 font-mono">
           Supabase Auth Cloud Reset • Multi-Tenant Data Isolation

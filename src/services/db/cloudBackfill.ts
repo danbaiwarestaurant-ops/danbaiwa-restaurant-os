@@ -72,6 +72,12 @@ export async function runBackfillPush(): Promise<number> {
       const remoteIds = new Set((data ?? []).map((r: any) => r.id));
       const missing = localRows
         .filter((r) => r?.id && !remoteIds.has(r.id))
+        // A profile this device rebuilt from a cloud sign-in is missing from the
+        // cloud for a reason, and is exactly the row this sweep must not send: it
+        // shares its id with the genuine profile the original till still owes, and
+        // uploading it first would make the cloud skip the real one for ever after,
+        // losing the owner's name, password hash and recovery key across every device.
+        .filter((r) => !(pg === 'users' && r.rebuiltLocally))
         .map((r) => toCloudPayload(pg, r));
 
       if (!missing.length) continue;

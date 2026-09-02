@@ -19,6 +19,17 @@ import { OutboxItem } from '../../types/sync';
  *  username columns (Dexie has no case-insensitive/OR-column index otherwise). */
 export interface UserRow extends UserAccount {
   loginKeys: string[];
+  /**
+   * True when this device rebuilt the profile from a verified cloud sign-in rather
+   * than being given it (adoptAccountFromCloud). A reconstruction knows the id, the
+   * email and the PIN that was just typed — and nothing else: not the real name, the
+   * password hash, or the recovery key hash. It must therefore never be uploaded, or
+   * it would claim the cloud row that the original till still owes and permanently
+   * replace the genuine record with a thinner one.
+   *
+   * Local-only, and cleared by the first real write through updateUser.
+   */
+  rebuiltLocally?: boolean;
 }
 
 export interface SequenceRow {
@@ -99,6 +110,6 @@ export function computeLoginKeys(user: { email?: string; username?: string }): s
 }
 
 export function stripUserRow(row: UserRow): UserAccount {
-  const { loginKeys, ...user } = row;
+  const { loginKeys, rebuiltLocally, ...user } = row;
   return user;
 }

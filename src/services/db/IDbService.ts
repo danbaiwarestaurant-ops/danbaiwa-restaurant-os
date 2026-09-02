@@ -31,6 +31,14 @@ export interface IDbService {
   /** Every local user answering to that email or staff ID, across all accounts. */
   findUsersByLoginKey(email: string): Promise<UserAccount[]>;
   saveUser(user: UserAccount): Promise<void>;
+  /**
+   * Writes a user to this device and queues nothing for the cloud.
+   *
+   * For profiles this device reconstructed rather than authored — see
+   * adoptAccountFromCloud. Uploading a reconstruction would overwrite the genuine row
+   * it shares a primary key with, so it must never enter the outbox.
+   */
+  saveUserLocalOnly(user: UserAccount, rebuiltLocally?: boolean): Promise<void>;
   updateUser(user: UserAccount): Promise<void>;
 
   // User-Scoped Tickets

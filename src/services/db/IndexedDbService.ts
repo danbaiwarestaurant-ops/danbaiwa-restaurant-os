@@ -184,6 +184,14 @@ export class IndexedDbService implements IDbService {
     return matches.find((u) => !u.accountId) ?? null;
   }
 
+  async saveUserLocalOnly(user: UserAccount, rebuiltLocally = false): Promise<void> {
+    // updatedAt is honoured when the caller supplies one. That is what lets a
+    // reconstructed profile date itself to the account's creation instead of to now,
+    // so the authoritative row always wins the last-write-wins merge when it arrives.
+    const stamped = { ...user, updatedAt: user.updatedAt || new Date().toISOString() };
+    await db.users.put({ ...stamped, loginKeys: computeLoginKeys(stamped), rebuiltLocally });
+  }
+
   async saveUser(user: UserAccount): Promise<void> {
     const stamped = { ...user, updatedAt: new Date().toISOString() };
     await db.transaction('rw', db.users, db.outbox, async () => {

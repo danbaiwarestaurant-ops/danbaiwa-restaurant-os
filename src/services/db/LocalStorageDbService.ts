@@ -101,6 +101,12 @@ export class LocalStorageDbService implements IDbService {
     return matches.find((u) => !u.accountId) ?? null;
   }
 
+  async saveUserLocalOnly(user: UserAccount, _rebuiltLocally = false): Promise<void> {
+    const users = (await this.getUsers()).filter((u) => u.id !== user.id);
+    users.unshift(user);
+    setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+  }
+
   async saveUser(user: UserAccount): Promise<void> {
     const users = await this.getUsers();
     users.unshift(user);

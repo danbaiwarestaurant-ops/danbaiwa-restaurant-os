@@ -94,7 +94,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     get().triggerFlash(amount);
 
     // STEP 4: Dispatch thermal print (after DB commit — crash-safe)
-    const printRes = await PrintAdapter.printTicket(newTicket, config.businessName);
+    const printRes = await PrintAdapter.printTicket(newTicket, config.businessName, config.paperWidthMm);
 
     // Trigger outbox check and immediate cloud sync push
     useSyncStore.getState().checkOutbox().then(() => {

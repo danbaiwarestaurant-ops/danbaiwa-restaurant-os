@@ -17,6 +17,7 @@ const defaultConfig: DeviceConfig = {
   businessName: 'Danbaiwa Restraunt',
   currencySymbol: '₦',
   presetAmounts: [200, 300, 400, 500, 1000],
+  paperWidthMm: 58,
   isConfigured: true,
 };
 

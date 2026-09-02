@@ -18,6 +18,7 @@ import {
   restoreDeviceSession,
   clearDeviceIdentity,
   reportDeviceSeen,
+  isTillSession,
 } from '../services/supabase/deviceIdentity';
 import { getAccountId } from '../services/db/accountScope';
 import { generateRecoveryKey, normaliseRecoveryKey } from '../utils/recoveryKey';
@@ -80,12 +81,17 @@ async function adoptAccountFromCloud(
   // could previously never be adopted onto a new machine at all.
   let data: any = null;
   let error: any = null;
+  // The cloud password is normally derive(PIN). When it is the raw secret instead, the
+  // two are out of step, and anything that later re-derives the password from the PIN
+  // will fail — so the caller has to be told rather than left to discover it.
+  let secretIsThePin = true;
 
   for (const password of [deriveSupabasePassword(secret), secret]) {
     const attempt = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
     if (!attempt.error && attempt.data?.user) {
       data = attempt.data;
       error = null;
+      secretIsThePin = password !== secret;
       break;
     }
     error = attempt.error;
@@ -150,8 +156,57 @@ async function adoptAccountFromCloud(
     }
   }
 
+  // The cloud has confirmed this is the account owner, but no POS profile has ever
+  // reached it — most often because the email was never confirmed, so the till that
+  // registered the account never held a session to upload one through. Stopping here
+  // was the end of the road: the owner was locked out of every machine except the one
+  // they registered on, with no route back that did not involve a developer.
+  //
+  // Signing in to the auth account is the same proof registration itself stood on, so
+  // rebuild the profile from it rather than refuse.
   if (!user) {
-    return buildLoginFailure('cloud_profile_missing', { email: cleanEmail });
+    // A till's own credential is not a person's. Nobody types a till's generated
+    // address, but if one ever reached here it must not mint itself an admin.
+    if (isTillSession(data.session) || isTillSession({ user: data.user })) {
+      return buildLoginFailure('cloud_profile_missing', { email: cleanEmail });
+    }
+
+    const pinSalt = generateSalt();
+    const pinHash = await hashSecretWithSalt(secret, pinSalt);
+    const metadata = (data.user.user_metadata || {}) as Record<string, any>;
+
+    user = {
+      id: data.user.id,
+      name: metadata.name || metadata.full_name || cleanEmail.split('@')[0] || 'Admin',
+      email: cleanEmail,
+      username: cleanEmail,
+      pinHash,
+      pinSalt,
+      role: 'admin',
+      createdAt: data.user.created_at || new Date().toISOString(),
+      status: 'active',
+      accountId: data.user.id,
+      // Dated to the account's creation, not to now, so that when the genuine profile
+      // does arrive from the original till it wins the last-write-wins merge and
+      // replaces this reconstruction — bringing back the real name, the password hash
+      // and the recovery key, none of which can be rebuilt from a sign-in.
+      updatedAt: data.user.created_at || new Date(0).toISOString(),
+    };
+
+    // Local only, deliberately: this row shares a primary key with the real profile
+    // still sitting on the original till, and uploading a reconstruction would
+    // overwrite it the moment that till came online.
+    await dbService.saveUserLocalOnly(user, true);
+    console.info('[Auth] No profile in the cloud for this account yet — rebuilt one on this device from the verified cloud sign-in.');
+
+    if (!secretIsThePin) {
+      useSyncStore.setState({
+        cloudError:
+          'Signed in with the account password rather than the till PIN, so this device\'s ' +
+          'PIN and its cloud password are out of step. Set a new PIN from the admin profile ' +
+          'screen to bring them back in line.',
+      });
+    }
   }
 
   return { ok: true, user, authUserId: data.user.id, restored };
@@ -380,7 +435,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // Rows with no accountId are kept: they predate account stamping and belong to
     // whoever is on this device. And if the scoping would empty the roster (no session
     // yet, or nothing stamped), fall back to everything rather than lock the till out.
-    const scopeAccountId = await getAccountId();
+    // Bounded, because this is the boot path: the whole app sits behind a spinner until
+    // loadUsers resolves, and resolving the account can touch the network (a session
+    // whose token needs refreshing). A slow or captive connection must cost the till a
+    // moment of unscoped roster, never a screen that never arrives.
+    const scopeAccountId = await Promise.race([
+      getAccountId(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+    ]);
     const scoped = scopeAccountId
       ? allUsers.filter((u) => !u.accountId || u.accountId === scopeAccountId)
       : allUsers;
@@ -696,6 +758,57 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         });
       }
       return { ok: true };
+    }
+
+    // This device's copy of the account said no. That is not the last word, because the
+    // copy can be out of date or simply wrong: a PIN changed on another till that has
+    // not reached here yet, or a profile written by the old "Create Account" bug, which
+    // let a second browser re-register a live email and overwrite its hashes. In that
+    // state the correct, current credentials are refused for ever — and the cloud, which
+    // knows better, is never asked, because a local row exists.
+    //
+    // Only for accounts that hold a cloud identity of their own (an email). A cashier's
+    // staff ID has nothing to authenticate against, so nothing is gained by trying.
+    if (cleanEmail.includes('@') && isSupabaseConfigured && navigator.onLine !== false) {
+      const verified = await adoptAccountFromCloud(cleanEmail, passwordOrPin);
+
+      if (verified.ok) {
+        // The cloud accepted what this device rejected, so the stored hash is the thing
+        // that is wrong. Correct it, or the next sign-in — offline, with no cloud to
+        // appeal to — is refused all over again. Local only: the cloud's row is the
+        // authority here and has nothing to learn from us.
+        const stillWrong = !(await verifySecret(
+          passwordOrPin,
+          verified.user.pinHash,
+          verified.user.pinSalt
+        ));
+
+        if (stillWrong) {
+          const salt = generateSalt();
+          const hash = await hashSecretWithSalt(passwordOrPin, salt);
+          // Repair the secret they actually typed. Writing a password into pinHash would
+          // put the till's PIN and its cloud password (derived from the PIN) out of step.
+          const healed: UserAccount = isPinShaped(passwordOrPin)
+            ? { ...verified.user, pinHash: hash, pinSalt: salt }
+            : { ...verified.user, passwordHash: hash, passwordSalt: salt };
+          await dbService.saveUserLocalOnly(healed);
+          verified.user = healed;
+          console.info('[Auth] Local credentials were stale; repaired from the verified cloud sign-in.');
+        }
+
+        localStorage.setItem('ticket_pos_session_user_id', verified.user.id);
+        set({
+          activeUser: verified.user,
+          isAuthenticated: true,
+          failedAttempts: 0,
+          lockoutUntil: null,
+        });
+        startRealtimeSync();
+        enrolThisTill();
+        await get().loadUsers();
+        await useSyncStore.getState().checkOutbox();
+        return { ok: true, restoredFromCloud: verified.restored };
+      }
     }
 
     // The account exists here and is active, so the only thing left that can be wrong is
