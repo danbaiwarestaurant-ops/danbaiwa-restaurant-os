@@ -9,6 +9,7 @@ import { useAuditStore } from './store/useAuditStore';
 
 import { Header } from './components/common/Header';
 import { Toast } from './components/common/Toast';
+import { UpdateBanner } from './components/common/UpdateBanner';
 import { PinModal } from './components/common/PinModal';
 import { QuickConfigModal } from './components/common/QuickConfigModal';
 import { AuthPage } from './components/auth/AuthPage';
@@ -199,8 +200,16 @@ export function App() {
   }
 
   // 2. Auth Guard: Redirect unauthenticated requests to AuthPage
+  //
+  // The update banner rides above the guard: a till that cannot be signed into is
+  // exactly the one most likely to be running the build that needs replacing.
   if (!isAuthenticated) {
-    return <AuthPage />;
+    return (
+      <>
+        <UpdateBanner />
+        <AuthPage />
+      </>
+    );
   }
 
   // Renders only in the moment after a recovery key is issued — see RecoveryKeyNotice.
@@ -220,6 +229,7 @@ export function App() {
   if (isManagerView) {
     return (
       <div className="font-sans text-slate-900 selection:bg-amber-100 selection:text-amber-900">
+        <UpdateBanner />
         <ManagerConsole
           onBackToTill={() => {
             revokeAdminAuthority();
@@ -236,6 +246,8 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 font-sans text-slate-900 selection:bg-amber-100 selection:text-amber-900">
+      <UpdateBanner />
+
       {/* Top Header */}
       <Header
         onOpenConfig={() => setIsConfigOpen(true)}

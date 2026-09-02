@@ -3,6 +3,7 @@ import { Stethoscope, ChevronDown, ChevronUp } from 'lucide-react';
 import { dbService } from '../../services/db/IndexedDbService';
 import { supabase, isSupabaseConfigured, SUPABASE_URL } from '../../services/supabase/supabaseClient';
 import { hasWebCrypto } from '../../services/auth/loginErrors';
+import { buildLabel } from '../../services/pwaUpdate';
 
 /**
  * What this till actually is, shown on the sign-in screen itself.
@@ -131,6 +132,7 @@ export const TillDiagnostics: React.FC = () => {
               )}
 
               <div>
+                <Row label="App version" value={buildLabel()} />
                 <Row label="Address" value={facts.address} />
                 <Row label="Secure origin" value={facts.secure ? 'yes' : 'no'} bad={!facts.secure} />
                 <Row label="PIN checks possible" value={facts.crypto ? 'yes' : 'no'} bad={!facts.crypto} />

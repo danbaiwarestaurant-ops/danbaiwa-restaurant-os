@@ -5,6 +5,7 @@ import { Panel, DataTable, StatusBadge, ConsoleButton } from '../ConsoleUI';
 import { AdminProfileSettings } from '../AdminProfileSettings';
 import { RecoveryKeySettings } from '../RecoveryKeySettings';
 import { DeviceAccessSettings } from '../DeviceAccessSettings';
+import { AppVersionSettings } from '../AppVersionSettings';
 import { Settings as SettingsIcon, Cloud } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -123,6 +124,8 @@ export const SettingsView: React.FC = () => {
           </tr>
         </DataTable>
       </Panel>
+
+      <AppVersionSettings />
 
       <DeviceAccessSettings />
 
