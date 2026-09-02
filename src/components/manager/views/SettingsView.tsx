@@ -5,7 +5,6 @@ import { Panel, DataTable, StatusBadge, ConsoleButton } from '../ConsoleUI';
 import { AdminProfileSettings } from '../AdminProfileSettings';
 import { RecoveryKeySettings } from '../RecoveryKeySettings';
 import { DeviceAccessSettings } from '../DeviceAccessSettings';
-import { PrinterSettings } from '../PrinterSettings';
 import { Settings as SettingsIcon, Cloud } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -130,8 +129,6 @@ export const SettingsView: React.FC = () => {
       <RecoveryKeySettings />
 
       {/* Existing component — admin profile and PIN change. */}
-      <PrinterSettings />
-
       <AdminProfileSettings onLogoutAdmin={() => { /* handled by the account menu */ }} />
     </div>
   );

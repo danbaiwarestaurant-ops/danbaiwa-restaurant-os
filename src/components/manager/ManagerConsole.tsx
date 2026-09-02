@@ -13,6 +13,7 @@ import { ExpensesView } from './views/ExpensesView';
 import { ReconciliationView } from './views/ReconciliationView';
 import { ReportsView } from './views/ReportsView';
 import { AuditLogView } from './views/AuditLogView';
+import { PrinterSetupView } from './views/PrinterSetupView';
 import { SettingsView } from './views/SettingsView';
 import { ComingSoonView } from './views/ComingSoonView';
 import { ArrowLeft, UtensilsCrossed, Boxes } from 'lucide-react';
@@ -77,6 +78,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
       case 'reconciliation': return <ReconciliationView />;
       case 'reports': return <ReportsView />;
       case 'audit': return <AuditLogView />;
+      case 'printer': return <PrinterSetupView />;
       case 'settings': return <SettingsView />;
       case 'menu':
         return (

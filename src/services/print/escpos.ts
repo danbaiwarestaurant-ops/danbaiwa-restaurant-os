@@ -90,6 +90,22 @@ export function encodeText(text: string): number[] {
   return out;
 }
 
+/** Font A is 24 dots tall; every line costs that times the height magnification. */
+const LINE_DOTS = 24;
+
+/**
+ * The largest magnification at which `text` still fits one line of this roll.
+ *
+ * Magnified text does not wrap gracefully — it wraps mid-word, at double or
+ * quadruple size, and turns a total into nonsense. Sizing to the content instead means
+ * a five-figure amount shrinks a step rather than spilling onto a second line, and a
+ * long business name stays on one.
+ */
+export function fitWidth(text: string, columns: number, max: number): number {
+  const len = Math.max(1, text.length);
+  return Math.max(1, Math.min(max, Math.floor(columns / len)));
+}
+
 /**
  * Accumulates a command stream.
  *
@@ -99,8 +115,22 @@ export function encodeText(text: string): number[] {
  */
 export class EscPosBuilder {
   private bytes: number[] = [];
+  /** Current height magnification, for the running height total. */
+  private heightMul = 1;
+  /** Dots of roll this receipt will consume — what 'ticket length' actually means. */
+  private dotsTall = 0;
 
   constructor(readonly paper: PaperSpec) {}
+
+  /** Roll consumed so far, in printer dots. */
+  get heightDots(): number {
+    return this.dotsTall;
+  }
+
+  /** Roll consumed so far, in millimetres, at the 203dpi these heads print. */
+  get heightMm(): number {
+    return this.dotsTall / 8;
+  }
 
   raw(...b: number[]): this {
     this.bytes.push(...b);
@@ -109,6 +139,7 @@ export class EscPosBuilder {
 
   /** Reset, then pin the code page so the printer's power-on default cannot surprise us. */
   init(): this {
+    this.heightMul = 1;
     return this.raw(ESC, 0x40).raw(ESC, 0x74, 0x00); // ESC @ , ESC t 0 (PC437)
   }
 
@@ -124,6 +155,7 @@ export class EscPosBuilder {
   size(width: number, height: number): this {
     const w = Math.min(8, Math.max(1, width)) - 1;
     const h = Math.min(8, Math.max(1, height)) - 1;
+    this.heightMul = h + 1;
     return this.raw(GS, 0x21, (w << 4) | h);
   }
 
@@ -132,11 +164,14 @@ export class EscPosBuilder {
   }
 
   line(value = ''): this {
+    this.dotsTall += LINE_DOTS * this.heightMul;
     return this.text(value).raw(0x0a);
   }
 
   feed(lines = 1): this {
-    return this.raw(ESC, 0x64, Math.min(255, Math.max(0, lines)));
+    const n = Math.min(255, Math.max(0, lines));
+    this.dotsTall += LINE_DOTS * n;
+    return this.raw(ESC, 0x64, n);
   }
 
   /** A full-width rule, drawn in the character the caller wants it drawn in. */
@@ -199,6 +234,7 @@ export class EscPosBuilder {
     this.raw(bytesPerRow & 0xff, (bytesPerRow >> 8) & 0xff);
     this.raw(heightPx & 0xff, (heightPx >> 8) & 0xff);
     this.bytes.push(...raster);
+    this.dotsTall += heightPx;
     return this;
   }
 
@@ -226,8 +262,6 @@ export interface ReceiptSpec {
   amountText: string;
   ticketId: string;
   timestampText: string;
-  /** Encoded into the QR — what a scanner reads back. */
-  qrData: string;
   paperWidthMm?: number;
   footerText?: string;
 }
@@ -235,37 +269,55 @@ export interface ReceiptSpec {
 /**
  * The ticket, laid out for a roll of the given width.
  *
- * Both widths run the same structure; only the column count and the QR's dot budget
- * differ, both taken from the paper spec, so an account that changes printer changes one
- * setting and nothing else.
+ * Deliberately short. Every line printed is roll consumed and time at the counter, so
+ * this carries only what someone actually needs off the paper: who issued it, how much,
+ * which ticket, and when.
+ *
+ * What used to be here and is not any more:
+ *
+ *   * a QR code — a raster block roughly 28mm tall, over half the ticket, replaced by
+ *     the tracking id printed as one plain line that a person can read out or type;
+ *   * an "OFFICIAL RECEIPT / TICKET" subtitle and a "Scan to Verify" footer, which said
+ *     nothing the ticket did not already say.
+ *
+ * Both widths run the same structure; only the column count differs, taken from the
+ * paper spec, so an account changing printer changes one setting and nothing else.
  */
-export async function buildTicketReceipt(spec: ReceiptSpec): Promise<Uint8Array> {
+export async function composeTicket(spec: ReceiptSpec): Promise<EscPosBuilder> {
   const paper = paperSpec(spec.paperWidthMm);
   const b = new EscPosBuilder(paper);
 
   b.init().align(ALIGN_CENTER);
 
-  b.size(2, 2).bold(true).line(spec.businessName).bold(false).size(1, 1);
-  b.line('OFFICIAL RECEIPT / TICKET');
-  b.rule('-');
+  // Taller than the body, and fitted so it never wraps: a business name broken across
+  // two lines costs a line of roll and reads as a fault in the printer.
+  const nameWidth = fitWidth(spec.businessName, paper.columns, 2);
+  b.size(nameWidth, 3).bold(true).line(spec.businessName).bold(false);
 
-  // The amount is the one thing read across a counter, so it gets the largest type the
-  // head can produce without overrunning the roll.
-  b.size(2, 3).bold(true).line(spec.amountText).bold(false).size(1, 1);
-  b.rule('-');
+  b.size(1, 1).rule("-");
 
-  b.bold(true).line(`TICKET #${spec.ticketId}`).bold(false);
+  // The amount is the one thing read across a counter, so it takes the largest
+  // magnification the roll will carry — twice the size it was printed at before.
+  const amountWidth = fitWidth(spec.amountText, paper.columns, 4);
+  b.size(amountWidth, Math.min(6, amountWidth * 2)).bold(true).line(spec.amountText).bold(false);
+  b.size(1, 1);
+
+  // Only one rule, above the amount, separating the business header from the
+  // transaction. A second one below it bought nothing: an amount printed six times
+  // taller than the body already separates itself, and the line cost 3mm of every roll.
+  // The tracking id, on one line, in place of the QR block that used to sit here.
+  b.bold(true).line(spec.ticketId).bold(false);
   b.line(spec.timestampText);
-  b.feed(1);
 
-  await b.qr(spec.qrData);
-  b.feed(1);
+  if (spec.footerText) b.line(spec.footerText);
 
-  b.line(spec.footerText ?? 'Scan to Verify * Non-Transferable');
-
-  return b.cutAndFeed().build();
+  // Two lines rather than four: enough to clear the cutter, and no more roll than that.
+  return b.cutAndFeed(2);
 }
 
+export async function buildTicketReceipt(spec: ReceiptSpec): Promise<Uint8Array> {
+  return (await composeTicket(spec)).build();
+}
 /** Bytes → base64, for handing a receipt to the local agent over JSON. */
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';

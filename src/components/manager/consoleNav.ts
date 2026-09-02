@@ -1,6 +1,6 @@
 import {
   LayoutGrid, BookOpen, UtensilsCrossed, Boxes, Users,
-  Wallet, ScrollText, BarChart3, ShieldCheck, Settings, LucideIcon,
+  Wallet, ScrollText, BarChart3, ShieldCheck, Settings, Printer, LucideIcon,
 } from 'lucide-react';
 
 /**
@@ -19,6 +19,7 @@ export type ConsoleViewId =
   | 'reconciliation'
   | 'reports'
   | 'audit'
+  | 'printer'
   | 'settings';
 
 export interface ConsoleNavItem {
@@ -54,6 +55,11 @@ export const CONSOLE_NAV: ConsoleNavItem[] = [
   { id: 'reports', label: 'Reports & Analytics', group: 'Finance', icon: BarChart3, periodScoped: true },
 
   { id: 'audit', label: 'Audit Log', group: 'System', icon: ShieldCheck, periodScoped: true },
+
+  // Its own tab rather than a panel inside Settings: this is the one screen a
+  // non-technical person is sent to when tickets stop printing, and it has to be
+  // findable by name under pressure rather than scrolled to.
+  { id: 'printer', label: 'Printer Setup', group: 'System', icon: Printer },
   { id: 'settings', label: 'Settings', group: 'System', icon: Settings },
 ];
 

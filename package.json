@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "predev": "node scripts/copy-print-agent.mjs",
     "build": "tsc && vite build",
+    "prebuild": "node scripts/copy-print-agent.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -15,7 +17,6 @@
     "@supabase/supabase-js": "^2.112.2",
     "clsx": "^2.1.1",
     "dexie": "^4.0.10",
-    "express": "^5.2.1",
     "lucide-react": "^0.469.0",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",

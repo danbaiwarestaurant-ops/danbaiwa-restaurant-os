@@ -6,11 +6,11 @@ till is never left unable to issue a ticket.
 | | Route 1 — Direct from the page | Route 2 — Local print agent | Route 3 — `--kiosk-printing` |
 |---|---|---|---|
 | **Silent** | ✅ | ✅ | ✅ |
-| **Installed on the till** | Nothing | Node.js + this project | Nothing |
+| **Installed on the till** | Nothing | Node.js + 2 files | Nothing |
 | **Works from the Vercel link** | ✅ | ✅ (see caveat) | ✅ |
 | **Works offline** | ✅ | ✅ | ✅ |
 | **Browsers** | Chrome / Edge, desktop | Chrome / Edge | Chrome only |
-| **Setup per till** | One click to pair | ~5 min, admin rights | Launch from a `.bat` |
+| **Setup per till** | One click to pair | ~3 min, no admin | Launch from a `.bat` |
 
 All three print **the same receipt**. It is built once, as ESC/POS bytes, in
 `src/services/print/escpos.ts`, at whichever roll width the account is set to.
@@ -100,26 +100,40 @@ Cashier taps ticket → escpos.ts → POST 127.0.0.1:9100 → winspool RAW → p
 > permission prompt, and Safari and Firefox never allowed it at all. This is why Route 1
 > is preferred where the hardware permits it.
 
-The agent no longer uses Playwright or `pdf-to-printer`. It previously rendered receipt
-HTML through a headless Chromium into a PDF — about 230MB of dependency and 1–2 seconds
-per ticket, producing a layout the driver then rescaled onto whatever paper size it
-believed it had. Install is now a few MB and printing is immediate.
+The agent no longer uses Express, Playwright or `pdf-to-printer`. It previously rendered
+receipt HTML through a headless Chromium into a PDF — about 230MB of dependency and 1–2
+seconds per ticket, producing a layout the driver then rescaled onto whatever paper size
+it believed it had. It is now a single file with zero dependencies, and printing is
+immediate.
 
-## Setup
+## Setup — two files and Node
 
-1. Install Node.js (LTS) from https://nodejs.org.
-2. Copy this project to the till (git clone, or a USB copy without `node_modules`).
-3. Open `till-setup.bat` in Notepad and set:
-   ```bat
-   set VERCEL_URL=https://danbaiwa-restaurant-os.vercel.app
-   set PRINTER_NAME=POS-58 11.3.0.1
-   ```
-   `PRINTER_NAME` must match **exactly** what appears in Printers & scanners. To list
-   them: `Get-Printer | Select-Object Name`
-4. Right-click `till-setup.bat` → **Run as administrator**.
+The agent has **no npm dependencies**. There is no project to clone, no `npm install`,
+and nothing to download once Node is on the PC.
 
-It installs dependencies and registers a Windows scheduled task that starts the agent at
-every boot, as SYSTEM, with no window and no login required.
+1. On the till, install **Node.js (LTS)** from https://nodejs.org and accept the defaults.
+2. Copy these two files, together, into any folder on the till (a USB stick is fine):
+   - `print-server.cjs`
+   - `install-print-agent.bat`
+3. Double-click **`install-print-agent.bat`**.
+
+It lists the printers installed on that PC, asks you to type the one to use, asks for
+the app URL, installs itself into the user's AppData, registers itself to start at
+logon with no visible window, starts it, and confirms it is answering.
+
+**No Administrator rights needed.** It installs per-user and runs at that user's logon,
+deliberately: a task running as SYSTEM cannot see a printer that was installed for one
+user only, and would silently print nothing.
+
+### Updating it later
+
+Copy the newer `print-server.cjs` over
+`%LOCALAPPDATA%\DanbaiwaPOS\PrintAgent\print-server.cjs` and log out and back in. The
+till's printer name and URL live in `run-agent.cmd` beside it and are left alone.
+
+### Changing the printer
+
+Run `install-print-agent.bat` again and type a different name.
 
 ## Check it
 
@@ -142,7 +156,8 @@ The agent binds to `127.0.0.1` only, so it is not reachable from the network.
 ## Removing it
 
 ```powershell
-schtasks /delete /tn "DanbaiwaRestaurantOS_PrintServer" /f
+schtasks /delete /tn "DanbaiwaPOS_PrintAgent" /f
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\DanbaiwaPOS"
 ```
 
 ---

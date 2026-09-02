@@ -16,7 +16,9 @@ import {
   PAPER,
   buildTicketReceipt,
   bytesToBase64,
+  composeTicket,
   encodeText,
+  fitWidth,
   paperSpec,
 } from '../services/print/escpos';
 
@@ -125,13 +127,33 @@ describe('QR raster', () => {
   });
 });
 
+describe('magnification fitting', () => {
+  it('gives short text the largest size and steps long text down', () => {
+    // Magnified text wraps mid-word at quadruple size, which turns a total into
+    // nonsense — so the size follows the content rather than the content overflowing.
+    expect(fitWidth('N500', 32, 4)).toBe(4);
+    expect(fitWidth('N1,500,000', 32, 4)).toBe(3);
+    expect(fitWidth('N1,500,000,000,000', 32, 4)).toBe(1);
+  });
+
+  it('never returns zero, however long the text', () => {
+    expect(fitWidth('x'.repeat(500), 32, 4)).toBe(1);
+    expect(fitWidth('', 32, 4)).toBe(4);
+  });
+
+  it('lets the wider roll hold the bigger size for the same text', () => {
+    expect(fitWidth('Danbaiwa Restaurant', 48, 2)).toBeGreaterThanOrEqual(
+      fitWidth('Danbaiwa Restaurant', 32, 2)
+    );
+  });
+});
+
 describe('the ticket receipt', () => {
   const spec = {
     businessName: 'Danbaiwa Restaurant',
     amountText: '₦1,500',
     ticketId: 'LOC01-DEV01-K3F9QZ-000042',
     timestampText: '02 Sep 2026, 14:05',
-    qrData: 'TICKET|LOC01-DEV01-K3F9QZ-000042|1500',
   };
 
   it('opens with a reset so the previous job cannot leak into this one', async () => {
@@ -147,13 +169,61 @@ describe('the ticket receipt', () => {
     expect(lastFeed).toBe(0);
   });
 
+  it('prints the tracking id as one plain line, and no QR at all', async () => {
+    const bytes = await buildTicketReceipt(spec);
+    expect(indexOfSeq(bytes, encodeText(spec.ticketId))).toBeGreaterThan(0);
+    // GS v 0 is the raster image command. Its absence is the QR's absence.
+    expect(indexOfSeq(bytes, [0x1d, 0x76, 0x30, 0x00])).toBe(-1);
+  });
+
+  it('prints the amount at twice the magnification it used to', async () => {
+    // Was GS ! with width 2, height 3 — nibbles (1,2). Now width 4, height 6 — (3,5).
+    const bytes = await buildTicketReceipt(spec);
+    expect(indexOfSeq(bytes, [0x1d, 0x21, (3 << 4) | 5])).toBeGreaterThan(0);
+  });
+
+  it('shrinks a very large amount rather than letting it wrap', async () => {
+    const bytes = await buildTicketReceipt({ ...spec, amountText: '₦12,345,678.90' });
+    // 14 characters cannot go above width 2 on a 32-column roll.
+    expect(indexOfSeq(bytes, [0x1d, 0x21, (3 << 4) | 5])).toBe(-1);
+    expect(indexOfSeq(bytes, [0x1d, 0x21, (1 << 4) | 3])).toBeGreaterThan(0);
+  });
+
+  it('prints the business name taller than the body text', async () => {
+    const bytes = await buildTicketReceipt(spec);
+    // Height nibble 2 means a 3x-tall line; whatever width it fitted to.
+    const at = indexOfSeq(bytes, [0x1d, 0x21]);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(bytes[at + 2] & 0x0f).toBe(2);
+  });
+
+  it('is about half the length of the old QR ticket', async () => {
+    const now = (await composeTicket(spec)).heightMm;
+
+    // The layout as it stood: name, subtitle, rule, amount, rule, ticket line,
+    // timestamp, a QR block, a footer, and four lines of feed.
+    const before = new EscPosBuilder(PAPER[58]);
+    before.init();
+    before.size(2, 2).line(spec.businessName);
+    before.size(1, 1).line('OFFICIAL RECEIPT / TICKET').rule('-');
+    before.size(2, 3).line(spec.amountText);
+    before.size(1, 1).rule('-').line('TICKET #' + spec.ticketId).line(spec.timestampText).feed(1);
+    await before.qr('TICKET|' + spec.ticketId);
+    before.feed(1).line('Scan to Verify * Non-Transferable').cutAndFeed(4);
+
+    // 76.4mm before, 42mm now. The remaining floor is the amount itself: printed six
+    // times taller than body text, it alone is 18mm, and the feed before the cut cannot
+    // shrink much further without the cutter biting into the last line.
+    expect(now).toBeLessThanOrEqual(before.heightMm * 0.56);
+    expect(now).toBeLessThan(45);
+  });
+
   it('produces the same receipt at both widths, differing only in size', async () => {
     const narrow = await buildTicketReceipt({ ...spec, paperWidthMm: 58 });
     const wide = await buildTicketReceipt({ ...spec, paperWidthMm: 80 });
-    expect(wide.length).toBeGreaterThan(narrow.length);
     for (const bytes of [narrow, wide]) {
-      expect(indexOfSeq(bytes, encodeText('TICKET #' + spec.ticketId))).toBeGreaterThan(0);
-      expect(indexOfSeq(bytes, [0x1d, 0x76, 0x30, 0x00])).toBeGreaterThan(0);
+      expect(indexOfSeq(bytes, encodeText(spec.ticketId))).toBeGreaterThan(0);
+      expect(indexOfSeq(bytes, encodeText('N1,500'))).toBeGreaterThan(0);
     }
   });
 

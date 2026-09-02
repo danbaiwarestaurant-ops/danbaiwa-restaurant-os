@@ -1,4 +1,3 @@
-import QRCode from 'qrcode';
 import { Ticket } from '../../types/ticket';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { buildTicketReceipt, bytesToBase64, paperSpec } from './escpos';
@@ -78,14 +77,12 @@ export class PrintAdapter {
 
     try {
       const formattedTime = formatTimestamp(ticket.createdAt);
-      const qrData = ticket.qrPayload || `TICKET|${ticket.id}|${ticket.amount}|${ticket.createdAt}`;
 
       const receipt = await buildTicketReceipt({
         businessName,
         amountText: formattedAmount,
         ticketId: ticket.id,
         timestampText: formattedTime,
-        qrData,
         paperWidthMm,
       });
 
@@ -166,46 +163,28 @@ export class PrintAdapter {
     const paper = paperSpec(paperWidthMm);
     const formattedAmount = formatCurrency(ticket.amount, ticket.currency || '₦');
     const formattedTime = formatTimestamp(ticket.createdAt);
-    const qrData = ticket.qrPayload || `TICKET|${ticket.id}|${ticket.amount}|${ticket.createdAt}`;
-
-    const qrSvgString = await QRCode.toString(qrData, {
-      type: 'svg',
-      margin: 0,
-      width: paper.widthMm === 80 ? 170 : 120,
-      color: { dark: '#000000', light: '#ffffff' },
-    });
 
     const receiptHtml = `
-      <div style="width: ${paper.widthMm}mm; margin: 0 auto;">
-        <div style="text-align: center; font-weight: bold; font-size: 16px; margin-bottom: 6px;">
+      <div style="width: ${paper.widthMm}mm; margin: 0 auto; font-family: 'Courier New', monospace;">
+        <div style="text-align: center; font-weight: 900; font-size: 22px; line-height: 1.1; margin-bottom: 4px;">
           ${businessName}
         </div>
-        <div style="text-align: center; font-size: 12px; color: #333; margin-bottom: 4px;">
-          OFFICIAL RECEIPT / TICKET
+        <div style="border-top: 1px dashed #000; margin: 4px 0;"></div>
+        <div style="text-align: center; font-size: 52px; font-weight: 900; line-height: 1; margin: 6px 0;">
+          ${formattedAmount}
         </div>
-        <div style="border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 8px 0; margin: 8px 0; text-align: center;">
-          <div style="font-size: 34px; font-weight: 900; line-height: 1;">
-            ${formattedAmount}
-          </div>
+        <div style="border-bottom: 1px dashed #000; margin: 4px 0;"></div>
+        <div style="text-align: center; font-size: 12px; font-weight: bold; word-break: break-all;">
+          ${ticket.id}
         </div>
-        <div style="text-align: center; font-size: 11px; margin-bottom: 6px; font-weight: bold;">
-          TICKET #${ticket.id}
-        </div>
-        <div style="text-align: center; font-size: 10px; color: #444; margin-bottom: 10px;">
+        <div style="text-align: center; font-size: 11px; color: #333;">
           ${formattedTime}
-        </div>
-        <div style="display: flex; justify-content: center; margin-bottom: 8px;">
-          ${qrSvgString}
-        </div>
-        <div style="text-align: center; font-size: 9px; color: #666; margin-top: 4px;">
-          Scan to Verify • Non-Transferable
         </div>
       </div>
     `;
 
     const printContainer = document.getElementById('thermalPrintArea');
     if (printContainer) printContainer.innerHTML = receiptHtml;
-
     if (typeof window !== 'undefined' && window.print) {
       setTimeout(() => window.print(), 50);
     }
