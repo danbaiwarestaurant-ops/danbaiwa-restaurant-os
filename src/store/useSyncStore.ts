@@ -511,17 +511,22 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       return 'retry-soon';
     };
 
-    const fail = async (item: OutboxItem, error: { message?: string }) => {
+    const fail = async (item: OutboxItem, error: { message?: string }, quiet = false) => {
       // One genuinely rejected record (schema mismatch, missing FK, etc.) must never
       // block every other queued ticket/shift/expense behind it. Back it off
       // exponentially and carry on — it keeps its place in the queue and is surfaced as
       // "stuck" rather than being dropped. Only real rejections reach here: a dropped
       // connection is caught by isTransientFailure above and charged to nobody.
       const reason = error?.message ?? String(error);
-      console.error(
-        `[Sync Store] Sync failed for ${item.tableName} record ${item.id} (attempt ${item.retryCount + 1}):`,
-        reason
-      );
+      // `quiet` is for a whole run refused for one reason: naming each of 400 rows
+      // individually says nothing the one summary line above did not, and buries every
+      // other message in the console under hundreds of identical lines.
+      if (!quiet) {
+        console.error(
+          `[Sync Store] Sync failed for ${item.tableName} record ${item.id} (attempt ${item.retryCount + 1}):`,
+          reason
+        );
+      }
       await dbService.markOutboxAttemptFailed(item.id, item.retryCount, reason);
     };
 
@@ -546,7 +551,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
         console.warn(
           `[Sync Store] Whole ${batch.tableName} batch of ${send.length} refused (${error.code ?? 'no code'}: ${error.message}); not splitting — every row fails the same way`
         );
-        for (const item of send) await fail(item, error);
+        for (const item of send) await fail(item, error, true);
         continue;
       }
 
