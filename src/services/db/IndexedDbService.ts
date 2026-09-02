@@ -156,11 +156,32 @@ export class IndexedDbService implements IDbService {
     return rows.map(stripUserRow);
   }
 
-  async getUserByEmail(email: string): Promise<UserAccount | null> {
+  async findUsersByLoginKey(email: string): Promise<UserAccount[]> {
     const clean = (email || '').trim().toLowerCase();
-    if (!clean) return null;
-    const row = await db.users.where('loginKeys').equals(clean).first();
-    return row ? stripUserRow(row) : null;
+    if (!clean) return [];
+    const rows = await db.users.where('loginKeys').equals(clean).toArray();
+    return rows.map(stripUserRow);
+  }
+
+  /**
+   * Emails are unique across every account, so for an admin login this is unchanged.
+   * Staff IDs are not: they only have to be unique inside one restaurant, so once a
+   * second business's roster has synced into the same browser profile, "amina" names
+   * two different people. `.first()` picked whichever Dexie happened to return, which
+   * is how one shop's cashier could be handed another shop's till session.
+   */
+  async getUserByEmail(email: string, accountId?: string | null): Promise<UserAccount | null> {
+    const matches = await this.findUsersByLoginKey(email);
+    if (!matches.length) return null;
+    if (matches.length === 1) return matches[0];
+
+    if (accountId) {
+      const own = matches.find((u) => u.accountId === accountId);
+      if (own) return own;
+    }
+    // Rows predating account stamping belong to whoever is on this device; a row
+    // owned by a *different* account never does, so it is never the fallback.
+    return matches.find((u) => !u.accountId) ?? null;
   }
 
   async saveUser(user: UserAccount): Promise<void> {

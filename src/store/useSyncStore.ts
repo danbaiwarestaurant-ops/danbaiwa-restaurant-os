@@ -73,6 +73,33 @@ let lastPrune = 0;
 const PRUNE_EVERY_MS = 10 * 60_000;
 
 /**
+ * The conflict target the cloud accepts for tickets.
+ *
+ * tickets.id used to be the primary key on its own, which made a ticket number unique
+ * across every restaurant in the project rather than within one — see the TICKET KEY
+ * section of supabase_schema.sql. The key is now (account_id, id), and an upsert has to
+ * name the matching unique constraint or Postgres rejects the statement outright (42P10).
+ *
+ * Which one is right therefore depends on whether that migration has been applied, and a
+ * till cannot know: these are offline-capable PWAs, so a machine can be running a build
+ * from before or after the migration for as long as its service worker holds. Rather than
+ * demanding the database and every till be upgraded in the same instant, the first
+ * mismatch flips this and the pass retries — once per session, then it sticks.
+ */
+let ticketConflictKey: 'account_id,id' | 'id' = 'account_id,id';
+
+/** Postgres 42P10: the named conflict target has no matching unique constraint. */
+function isConflictTargetMismatch(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  return (
+    String(error.code ?? '') === '42P10' ||
+    String(error.message ?? '')
+      .toLowerCase()
+      .includes('no unique or exclusion constraint matching the on conflict')
+  );
+}
+
+/**
  * Split the due queue into runs that can be sent as one request each.
  *
  * Runs are **contiguous**, not merely grouped by table: the queue is ordered by createdAt
@@ -451,9 +478,15 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
           .in('id', rows.map((r) => r.payload.id))
           .eq('account_id', accountId ?? '');
       }
-      // account_settings is keyed by account_id (one row per account), every other
-      // table by the client-generated row id.
-      const conflictKey = batch.tableName === 'account_settings' ? 'account_id' : 'id';
+      // account_settings is keyed by account_id (one row per account); tickets by the
+      // account plus the till-minted id, so a ticket number only has to be unique within
+      // one restaurant; every other table by its client-generated uuid.
+      const conflictKey =
+        batch.tableName === 'account_settings'
+          ? 'account_id'
+          : batch.tableName === 'tickets'
+            ? ticketConflictKey
+            : 'id';
 
       // The audit log is immutable by design: the schema grants INSERT and SELECT and
       // deliberately no UPDATE, so RLS denies the UPDATE half of an ordinary upsert. Any
@@ -467,6 +500,23 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       return supabase
         .from(batch.tableName)
         .upsert(rows.map(toCloudRow), { onConflict: conflictKey, ignoreDuplicates });
+    };
+
+    /**
+     * push(), plus the one-time correction for a project whose ticket key has not been
+     * migrated yet (or a build that predates the migration). Nothing is charged to the
+     * rows for it: the statement was malformed for this database, which is not their
+     * fault, and the immediate retry is the same request with the right target.
+     */
+    const pushRows = async (batch: OutboxBatch, rows: OutboxItem[]) => {
+      const result = await push(batch, rows);
+      if (batch.tableName !== 'tickets' || !isConflictTargetMismatch(result.error)) return result;
+
+      ticketConflictKey = ticketConflictKey === 'id' ? 'account_id,id' : 'id';
+      console.info(
+        `[Sync Store] Cloud does not accept that ticket conflict target; using "${ticketConflictKey}" from here on`
+      );
+      return push(batch, rows);
     };
 
     /**
@@ -532,7 +582,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
 
     for (const batch of batchOutbox(items)) {
       const { send, superseded } = dedupeBatch(batch.items);
-      const { error } = await push(batch, send);
+      const { error } = await pushRows(batch, send);
 
       if (!error) {
         // Superseded rows are acknowledged too: the record they described was sent, in
@@ -572,7 +622,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       const acknowledge: string[] = [];
 
       for (const item of send) {
-        const { error: rowError } = await push(batch, [item]);
+        const { error: rowError } = await pushRows(batch, [item]);
         if (!rowError) {
           acknowledge.push(item.id);
           deliveredRecords.add(String(item.payload?.id));

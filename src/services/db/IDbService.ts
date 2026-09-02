@@ -20,7 +20,16 @@ export interface IDbService {
 
   // Users & Auth
   getUsers(): Promise<UserAccount[]>;
-  getUserByEmail(email: string): Promise<UserAccount | null>;
+  /**
+   * A single account's user by email or staff ID.
+   *
+   * `accountId` breaks the tie when one browser profile holds more than one
+   * business's data: emails are unique everywhere, but staff IDs are only unique
+   * inside one restaurant, so "amina" can legitimately name two different people.
+   */
+  getUserByEmail(email: string, accountId?: string | null): Promise<UserAccount | null>;
+  /** Every local user answering to that email or staff ID, across all accounts. */
+  findUsersByLoginKey(email: string): Promise<UserAccount[]>;
   saveUser(user: UserAccount): Promise<void>;
   updateUser(user: UserAccount): Promise<void>;
 

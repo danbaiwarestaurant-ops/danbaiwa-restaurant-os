@@ -2,7 +2,14 @@ import { create } from 'zustand';
 import { UserAccount, UserRole, UserStatus } from '../types/user';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/IndexedDbService';
-import { authenticateAdminWithSupabase, updateSupabaseUserPassword, deriveSupabasePassword, supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
+import {
+  authenticateAdminWithSupabase,
+  updateSupabaseUserPassword,
+  deriveSupabasePassword,
+  signUpNewAdminAccount,
+  supabase,
+  isSupabaseConfigured,
+} from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
 import { runCloudCatchUp, startRealtimeSync, stopRealtimeSync } from '../services/db/realtimeSync';
@@ -51,21 +58,54 @@ async function adoptAccountFromCloud(
   if (!isSupabaseConfigured) {
     return buildLoginFailure('unknown_account_local_only', { email: cleanEmail });
   }
+  // A staff ID ("amina", "till-2") is not an email, so there is nothing to sign in to the
+  // cloud with — cashiers hold no cloud identity of their own. Say that plainly, rather
+  // than letting Supabase answer "Unable to validate email address" and reporting it as a
+  // rejected credential, which is what made a fresh browser profile look like it was
+  // disputing a perfectly good login.
+  if (!cleanEmail.includes('@')) {
+    return buildLoginFailure('unknown_account_needs_admin', { email: cleanEmail });
+  }
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return buildLoginFailure('unknown_account_offline', { email: cleanEmail });
   }
 
   // Deliberately NOT authenticateAdminWithSupabase(): that helper signs the user UP when
   // sign-in fails, which here would mint a brand-new cloud account out of a typo'd email.
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: cleanEmail,
-    password: deriveSupabasePassword(secret),
-  });
+  //
+  // Two passwords are tried because a machine that has never held this account has no way
+  // to tell which secret the operator typed. The cloud password is normally derived from
+  // the till PIN, but an account whose password was reset from the Supabase dashboard (or
+  // set directly by an older build) carries the typed secret verbatim — and that account
+  // could previously never be adopted onto a new machine at all.
+  let data: any = null;
+  let error: any = null;
 
-  if (error || !data?.user) {
+  for (const password of [deriveSupabasePassword(secret), secret]) {
+    const attempt = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
+    if (!attempt.error && attempt.data?.user) {
+      data = attempt.data;
+      error = null;
+      break;
+    }
+    error = attempt.error;
+    // Only a rejected password is worth a second guess. "Email not confirmed", rate limits
+    // and network failures answer identically whichever password we send, so retrying just
+    // burns another attempt against the provider.
+    const why = (attempt.error?.message || '').toLowerCase();
+    if (!why.includes('invalid login credentials') && !why.includes('invalid credentials')) break;
+  }
+
+  if (!data?.user) {
     const raw = (error?.message || '').toLowerCase();
     if (raw.includes('invalid login credentials') || raw.includes('invalid credentials')) {
-      return buildLoginFailure('cloud_credentials_rejected', { email: cleanEmail });
+      // Which secret they typed is the whole difference between "try again" and "you cannot
+      // get in from here": the account password is only ever checked against this machine's
+      // local copy, so on a machine without one, only the PIN can possibly work.
+      return buildLoginFailure(
+        isPinShaped(secret) ? 'cloud_credentials_rejected' : 'cloud_needs_admin_pin',
+        { email: cleanEmail, detail: error?.message }
+      );
     }
     if (raw.includes('email not confirmed') || raw.includes('email_not_confirmed')) {
       return buildLoginFailure('cloud_email_unconfirmed', { email: cleanEmail });
@@ -329,7 +369,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loadUsers: async () => {
     await dbService.init();
-    const users = await dbService.getUsers();
+    const allUsers = await dbService.getUsers();
+
+    // A browser profile can end up holding more than one business's roster — a till
+    // that was repurposed, a back-office machine an owner and a franchisee both used.
+    // Showing all of them together is not merely untidy: staff IDs are only unique
+    // within one restaurant, so two "amina" rows would compete for the same login.
+    // Scope the roster to the account whose session this browser actually holds.
+    //
+    // Rows with no accountId are kept: they predate account stamping and belong to
+    // whoever is on this device. And if the scoping would empty the roster (no session
+    // yet, or nothing stamped), fall back to everything rather than lock the till out.
+    const scopeAccountId = await getAccountId();
+    const scoped = scopeAccountId
+      ? allUsers.filter((u) => !u.accountId || u.accountId === scopeAccountId)
+      : allUsers;
+    const users = scoped.length ? scoped : allUsers;
     
     const savedUserId = localStorage.getItem('ticket_pos_session_user_id');
     let activeUser: UserAccount | null = null;
@@ -350,7 +405,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       activeUser,
       isAuthenticated,
       isLoaded: true,
-      hasAnyUsers: users.length > 0,
+      // Deliberately every local account, not the scoped roster. This gates public
+      // self-registration, and a browser profile that already holds somebody's
+      // business is not a first launch however little of it belongs to this account.
+      hasAnyUsers: allUsers.length > 0,
     });
 
     // A resumed session (app reload while already logged in) is the most common way
@@ -390,22 +448,46 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       throw new Error(`An account with email "${cleanEmail}" already exists. Please log in instead.`);
     }
 
-    // 2. Prevent cloud-side duplicate signup by querying the synced users table
-    if (isSupabaseConfigured) {
-      const { data: cloudUser } = await supabase
-        .from('users')
-        .select('id')
-        .eq('email', cleanEmail)
-        .maybeSingle();
+    // 2. Create the cloud account — which is also the only duplicate check that works.
+    //
+    // What used to be here was a `select('id').eq('email', ...)` probe against the users
+    // table. It can never find anything: the query runs on the anon key with no session,
+    // and every RLS policy on that table is granted TO authenticated, so it comes back
+    // empty for an email that is very much registered. authenticateAdminWithSupabase then
+    // signed the caller IN to the existing account and reported it as a fresh signup. On a
+    // browser profile that had never held the account, "Create Account" therefore sailed
+    // through and re-registered a live business — writing new PIN, password and recovery
+    // key hashes over the real ones and syncing them up. Only Supabase Auth can answer
+    // "does this email already exist", so ask it, and treat yes as a refusal.
+    const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
+    const signUp = await signUpNewAdminAccount(cleanEmail, pin, locationId);
 
-      if (cloudUser) {
-        throw new Error(`An account with email "${cleanEmail}" is already registered. Please log in instead.`);
-      }
+    if (!signUp.ok) {
+      // The reason travels with the error so the form can send them to the login tab
+      // rather than leave them re-typing a registration that can never succeed.
+      const failure: any = new Error(signUp.message);
+      failure.code = signUp.reason;
+      throw failure;
     }
 
-    // 2. Perform Supabase Cloud Signup
-    const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
-    const supabaseAuthResult = await authenticateAdminWithSupabase(cleanEmail, pin, locationId);
+    const supabaseAuthResult = { userId: signUp.userId };
+
+    // A sign-up with no session means the project requires email confirmation. That is
+    // not a detail: until the link in that inbox is clicked, this browser holds no
+    // cloud session, so the account's own users row (PIN and password hashes included)
+    // can never be pushed, and every other device is told "Email not confirmed" when it
+    // tries to sign in. The till works perfectly here and nowhere else — which is
+    // exactly how an account comes to be unusable on the machine it was not created on.
+    if (isSupabaseConfigured && !signUp.session) {
+      useSyncStore.setState({
+        cloudConnected: false,
+        cloudError:
+          `Confirm the email sent to ${cleanEmail} before using this account anywhere else. ` +
+          'Until then this till cannot reach the cloud, nothing syncs, and signing in on ' +
+          'another device or browser will be refused. (An admin can also confirm it from ' +
+          'the Supabase dashboard under Authentication > Users.)',
+      });
+    }
 
     // The owner's session is live for the first and only time on a brand-new till, which
     // is the moment to give the device an identity of its own.
@@ -480,7 +562,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // every hash comparison throws — which used to surface as "login failed".
     if (!hasWebCrypto()) return buildLoginFailure('crypto_unavailable');
 
-    const user = await dbService.getUserByEmail(cleanEmail);
+    // Which business this till is working for. Emails are unique everywhere, so this
+    // changes nothing for an admin sign-in; it is what keeps one shop's "amina" out of
+    // another shop's till when both rosters have synced into the same browser profile.
+    const scopeAccountId = await getAccountId();
+    const candidates = await dbService.findUsersByLoginKey(cleanEmail);
+    const user =
+      candidates.length > 1
+        ? await dbService.getUserByEmail(cleanEmail, scopeAccountId)
+        : candidates[0] ?? null;
+
+    // Two businesses here, and nothing says which one is meant. Guessing would hand a
+    // cashier a session on somebody else's takings, so refuse and say how to settle it.
+    if (!user && candidates.length > 1) {
+      return buildLoginFailure('ambiguous_login_key', { email: cleanEmail });
+    }
 
     // Account unknown to this machine — try to bring it down from the cloud instead of
     // pretending the credentials were wrong.
@@ -489,7 +585,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!adopted.ok) {
         // Only a rejected credential counts toward the lockout; being offline or
         // hitting an unconfigured cloud is not a guessing attempt.
-        if (adopted.code === 'cloud_credentials_rejected') {
+        if (
+          adopted.code === 'cloud_credentials_rejected' ||
+          adopted.code === 'cloud_needs_admin_pin'
+        ) {
           const attemptsRemaining = registerFailedAttempt(get, set);
           return { ...adopted, attemptsRemaining };
         }
@@ -846,6 +945,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // Cashiers hold no cloud identity of their own — they belong to the admin's account,
     // which is what makes them appear on every device that admin signs in on.
     const accountId = await getAccountId();
+
+    // updateStaffMember has always refused a duplicate staff ID; creating one never
+    // checked at all, so the roster could be given two people answering to the same
+    // login and one of them would simply become unreachable. Scoped to this account:
+    // another restaurant's "amina" is a different person and no business of ours.
+    const cleanUsername = username.trim().toLowerCase();
+    const clash = get().users.find(
+      (u) =>
+        (u.username || '').toLowerCase() === cleanUsername &&
+        (!accountId || !u.accountId || u.accountId === accountId)
+    );
+    if (clash) {
+      throw new Error(`The staff ID "${cleanUsername}" is already used by ${clash.name}.`);
+    }
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
     const passwordSalt = generateSalt();
@@ -854,8 +967,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const cashierUser: UserAccount = {
       id: crypto.randomUUID(),
       name: name.trim(),
-      email: username.trim().toLowerCase(),
-      username: username.trim().toLowerCase(),
+      email: cleanUsername,
+      username: cleanUsername,
       passwordHash,
       passwordSalt,
       pinHash,
@@ -887,7 +1000,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // The username is a login key, so a collision would make one of the two accounts
     // unreachable — caught here rather than left to fail obscurely at the next sign-in.
     const clash = get().users.find(
-      (u) => u.id !== userId && (u.username || '').toLowerCase() === cleanUsername
+      (u) =>
+        u.id !== userId &&
+        (u.username || '').toLowerCase() === cleanUsername &&
+        (!user.accountId || !u.accountId || u.accountId === user.accountId)
     );
     if (clash) {
       return { ok: false, message: `The staff ID "${cleanUsername}" is already used by ${clash.name}.` };

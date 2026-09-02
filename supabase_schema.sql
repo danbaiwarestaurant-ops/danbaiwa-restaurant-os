@@ -631,6 +631,87 @@ WITH CHECK (
 );
 
 -- =============================================================================
+-- TICKET KEY — unique per restaurant, not per project
+-- =============================================================================
+--
+-- tickets.id is a composite string minted on the till: LOC01-DEV01-K3F9QZ-000042
+-- (location, device, installation, sequence). As a bare PRIMARY KEY it has to be unique
+-- across the WHOLE project — every restaurant in it — which is a promise the till cannot
+-- keep and should not have to. Location and device both default to LOC01/DEV01 on a
+-- fresh install, and tickets minted before the installation segment existed carry only
+-- three parts, so two unrelated restaurants can easily mint the same id.
+--
+-- The consequence is not a nice clean error. Whoever uploads that id first owns it; the
+-- second restaurant's upsert then has to UPDATE a row its policy cannot see, and Postgres
+-- refuses it with
+--
+--   new row violates row-level security policy (USING expression) for table "tickets"
+--
+-- forever. That record can never reach the cloud, and the reconciliation sweep re-queues
+-- it on every pass because it cannot read it back either. One tenant silently and
+-- permanently blocks an id for everyone else.
+--
+-- Scoping the key to the account removes the shared namespace entirely: an id now only
+-- has to be unique within one restaurant, which is exactly the guarantee the till can
+-- actually make. Two restaurants may hold the same ticket id and neither is aware of it.
+--
+-- Side benefit: the primary key is also the default REPLICA IDENTITY, so account_id now
+-- travels in realtime DELETE payloads. The subscriptions in realtimeSync.ts filter on
+-- account_id=eq.<account>, and a DELETE that carried only the id could never match that
+-- filter — deletions were silently not propagating to other devices.
+--
+-- The other synced tables need none of this: their ids are UUIDs, which do not collide.
+--
+-- Safe to re-run: it checks the current key first and does nothing if already applied.
+-- If any ticket has no account_id it declines to run rather than guessing an owner —
+-- with more than one restaurant in the project, claiming an orphan row blindly would
+-- hand one tenant another's takings. Fix those rows (see the REPAIR section) and re-run.
+
+DO $$
+DECLARE
+  orphans BIGINT;
+  pk_name TEXT;
+  pk_cols TEXT;
+BEGIN
+  SELECT count(*) INTO orphans FROM tickets WHERE account_id IS NULL;
+
+  IF orphans > 0 THEN
+    RAISE NOTICE
+      'Ticket key migration SKIPPED: % ticket(s) have no account_id. Give them an owner (see the REPAIR section at the end of this file), then re-run.',
+      orphans;
+    RETURN;
+  END IF;
+
+  SELECT c.conname,
+         (SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+            FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum)
+    INTO pk_name, pk_cols
+    FROM pg_constraint c
+   WHERE c.conrelid = 'public.tickets'::regclass
+     AND c.contype = 'p';
+
+  IF pk_cols = 'account_id,id' THEN
+    RETURN; -- already migrated
+  END IF;
+
+  ALTER TABLE tickets ALTER COLUMN account_id SET NOT NULL;
+
+  IF pk_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE tickets DROP CONSTRAINT %I', pk_name);
+  END IF;
+
+  ALTER TABLE tickets ADD CONSTRAINT tickets_pkey PRIMARY KEY (account_id, id);
+
+  RAISE NOTICE 'tickets primary key is now (account_id, id)';
+END $$;
+
+-- The key no longer leads with id, so a lookup by ticket number alone (scanning a QR
+-- code against the whole account, say) has nothing to use. Cheap to keep, and it is not
+-- unique — that is the entire point.
+CREATE INDEX IF NOT EXISTS idx_tickets_id_sb ON tickets(id);
+
+-- =============================================================================
 -- REPAIR — records the cloud holds but a till is no longer allowed to touch
 -- =============================================================================
 --

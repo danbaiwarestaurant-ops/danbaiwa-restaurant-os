@@ -81,13 +81,24 @@ export class LocalStorageDbService implements IDbService {
     return raw ? JSON.parse(raw) : [];
   }
 
-  async getUserByEmail(email: string): Promise<UserAccount | null> {
+  async findUsersByLoginKey(email: string): Promise<UserAccount[]> {
     const users = await this.getUsers();
     const cleanEmail = (email || '').trim().toLowerCase();
-    return users.find(u => 
-      (u && u.email && typeof u.email === 'string' && u.email.toLowerCase() === cleanEmail) || 
+    if (!cleanEmail) return [];
+    return users.filter(u =>
+      (u && u.email && typeof u.email === 'string' && u.email.toLowerCase() === cleanEmail) ||
       (u && u.username && typeof u.username === 'string' && u.username.toLowerCase() === cleanEmail)
-    ) || null;
+    );
+  }
+
+  async getUserByEmail(email: string, accountId?: string | null): Promise<UserAccount | null> {
+    const matches = await this.findUsersByLoginKey(email);
+    if (matches.length <= 1) return matches[0] ?? null;
+    if (accountId) {
+      const own = matches.find((u) => u.accountId === accountId);
+      if (own) return own;
+    }
+    return matches.find((u) => !u.accountId) ?? null;
   }
 
   async saveUser(user: UserAccount): Promise<void> {

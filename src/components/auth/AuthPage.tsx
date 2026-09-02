@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, LogIn, UserPlus, Mail, Lock, AlertCircle, CheckCircle2, ArrowLeft, Send, Info, KeyRound, Clock } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
-import { supabase, isSupabaseConfigured } from '../../services/supabase/supabaseClient';
+import { supabase, isSupabaseConfigured, authRedirectUrl } from '../../services/supabase/supabaseClient';
 
 export const AuthPage: React.FC = () => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'recovery_complete'>('login');
@@ -47,6 +47,26 @@ export const AuthPage: React.FC = () => {
       return () => {
         authListener.subscription.unsubscribe();
       };
+    }
+  }, []);
+
+  // A reset link that has expired, been opened twice, or was sent to a URL the Supabase
+  // project does not allow comes back carrying the reason in the URL and nothing else.
+  // The app used to drop it silently and render a plain login form, which reads to the
+  // operator as "the link did nothing".
+  useEffect(() => {
+    const fromHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const fromQuery = new URLSearchParams(window.location.search);
+    const reason =
+      fromHash.get('error_description') ||
+      fromQuery.get('error_description') ||
+      fromHash.get('error') ||
+      fromQuery.get('error');
+
+    if (reason) {
+      showError(reason.replace(/\+/g, ' '), 'Send yourself a new reset link below — each one works once, and expires about an hour after it is sent.');
+      setMode('forgot');
+      window.history.replaceState(null, '', window.location.pathname);
     }
   }, []);
 
@@ -113,6 +133,17 @@ export const AuthPage: React.FC = () => {
       setLoading(true);
       await registerUser(regName, regEmail, regPassword, regPin);
     } catch (err: any) {
+      // This browser profile has never held the account, so the registration form was
+      // offered in good faith — but the email already belongs to a live business. Hand
+      // them the login tab with the email filled in: signing in there pulls the real
+      // account and its records down onto this machine, which is what they wanted.
+      if (err?.code === 'account_exists') {
+        setLoginEmail(regEmail.trim().toLowerCase());
+        setLoginSecret('');
+        setMode('login');
+        showError(err.message, 'Enter the admin PIN for that account below. Do not create a second one — it would overwrite the real account.');
+        return;
+      }
       showError(err?.message || 'Registration failed.');
     } finally {
       setLoading(false);
@@ -141,15 +172,21 @@ export const AuthPage: React.FC = () => {
         throw new Error('Internet connection is required to send Supabase Password Reset email.');
       }
 
+      // window.location.origin alone was not enough: Supabase only honours redirectTo
+      // when the exact URL is on the project's Redirect URLs allow-list, and silently
+      // substitutes the project's Site URL otherwise — which is why every reset link
+      // opened the Vercel deployment rather than the till the operator was standing at.
+      // The URL is echoed back in the confirmation below so it can be allow-listed.
+      const redirectTo = authRedirectUrl();
       const { error: resetErr } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-        redirectTo: window.location.origin,
+        redirectTo,
       });
 
       if (resetErr) {
         throw new Error(resetErr.message);
       }
 
-      setResetSuccessMsg(`Password reset instructions sent to ${cleanEmail}. Please check your inbox.`);
+      setResetSuccessMsg(`Reset link sent to ${cleanEmail}. It will open ${redirectTo} — if it opens somewhere else instead, add that address under Supabase > Authentication > URL Configuration > Redirect URLs.`);
     } catch (err: any) {
       showError(err?.message || 'Failed to send reset email.');
     } finally {
@@ -444,6 +481,13 @@ export const AuthPage: React.FC = () => {
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
                 required
               />
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-300 text-slate-700 text-[11px] font-semibold normal-case rounded-none">
+              The link will be sent to open{' '}
+              <code className="font-mono font-bold text-slate-900 break-all">{authRedirectUrl()}</code>.
+              If it opens a different site, that address is not on your Supabase project's
+              Redirect URLs list — add it under Authentication &gt; URL Configuration.
             </div>
 
             <button

@@ -22,14 +22,17 @@ export type LoginFailureCode =
   // Account is not on this machine
   | 'unknown_account_local_only'
   | 'unknown_account_offline'
+  | 'unknown_account_needs_admin'
   | 'cloud_credentials_rejected'
+  | 'cloud_needs_admin_pin'
   | 'cloud_email_unconfirmed'
   | 'cloud_profile_missing'
   | 'cloud_lookup_failed'
   // Account is on this machine
   | 'wrong_pin'
   | 'wrong_password'
-  | 'account_disabled';
+  | 'account_disabled'
+  | 'ambiguous_login_key';
 
 export interface LoginFailure {
   ok: false;
@@ -96,8 +99,16 @@ export function buildLoginFailure(code: LoginFailureCode, ctx: LoginFailureConte
       hint: 'Connect to the internet and try again — the account and its data can then be restored from the cloud backup.',
     },
     cloud_credentials_rejected: {
-      message: `${who} is not set up on this till, and the cloud rejected that email and PIN.`,
+      message: `${who} is not set up on this till, and the cloud rejected that email and PIN${detail}.`,
       hint: 'On a machine the account has never used, sign in with the admin PIN — not the account password. Check the email spelling too.',
+    },
+    unknown_account_needs_admin: {
+      message: `No account for ${who} exists on this till.`,
+      hint: 'Staff IDs have no cloud login of their own, so they only work on a till an admin has already set up. Ask the owner to sign in here once with their email address and admin PIN — your ID will work straight after.',
+    },
+    cloud_needs_admin_pin: {
+      message: `${who} is not set up on this till yet, and the cloud did not accept that password${detail}.`,
+      hint: 'On a machine (or browser profile) that has never held this account, only the 4-8 digit ADMIN PIN can bring it down — the account password is checked against a local copy that does not exist here yet.',
     },
     cloud_email_unconfirmed: {
       message: `The cloud account for ${who} exists but its email has not been confirmed yet.`,
@@ -128,6 +139,10 @@ export function buildLoginFailure(code: LoginFailureCode, ctx: LoginFailureConte
     account_disabled: {
       message: `The account for ${who} is deactivated.`,
       hint: 'An admin has to reactivate it from the Manager dashboard before it can sign in.',
+    },
+    ambiguous_login_key: {
+      message: `More than one business on this device uses the staff ID ${who}.`,
+      hint: 'Staff IDs only have to be unique inside one restaurant, so this browser cannot tell which one you mean. Have an admin sign in with their email address and PIN first — that settles which business this till is working for, and your ID will then work.',
     },
   };
 
