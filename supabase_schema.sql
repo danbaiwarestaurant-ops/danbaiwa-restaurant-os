@@ -159,10 +159,11 @@ WITH CHECK (
 -- Storage Bucket Setup for SQL.js Binary Backups
 -- =============================================================================
 
--- Snapshots live at snapshots/<LOCATION>/<DEVICE>/latest.db (plus dated dailies).
--- The device id is only ever the LAST segment: a replacement till knows the account
--- it signed in as, but can never guess the device id of the machine it is replacing,
--- so restores list the location folder and take the newest snapshot in it.
+-- Snapshots live at snapshots/<account-uuid>/<LOCATION>/<DEVICE>/latest.json (plus dated
+-- dailies). The account is the FIRST segment, so the bucket can be policed by folder;
+-- the device id is only ever the LAST, because a replacement till knows the account it
+-- signed in as but can never guess the device id of the machine it is replacing, so
+-- restores list the location folder and take the newest snapshot in it.
 
 -- Create the bucket up front. The app also tries this at startup, but createBucket()
 -- normally needs a service role, so a client-side attempt quietly fails and the very
@@ -171,29 +172,10 @@ INSERT INTO storage.buckets (id, name, public)
 VALUES ('db-backups', 'db-backups', false)
 ON CONFLICT (id) DO NOTHING;
 
--- Allow authenticated users to perform snapshot DB backup writes
-DROP POLICY IF EXISTS "authenticated users can upload backups" ON storage.objects;
-CREATE POLICY "authenticated users can upload backups"
-ON storage.objects FOR INSERT
-TO authenticated
-WITH CHECK (bucket_id = 'db-backups');
+-- Snapshot bucket policies live at the END of this file, not here: they are written in
+-- terms of current_account_id(), and Postgres resolves a policy's expression when the
+-- policy is created — so they must come after the function does. See "SNAPSHOT BUCKET".
 
--- Required for restores. Without SELECT, listing and downloading snapshots is denied
--- by RLS, so a replacement machine can never find a backup no matter how it is keyed.
-DROP POLICY IF EXISTS "authenticated users can read backups" ON storage.objects;
-CREATE POLICY "authenticated users can read backups"
-ON storage.objects FOR SELECT
-TO authenticated
-USING (bucket_id = 'db-backups');
-
--- Required for `upsert: true`. latest.db is overwritten on every snapshot; with only
--- an INSERT policy every write after the first one is rejected.
-DROP POLICY IF EXISTS "authenticated users can overwrite backups" ON storage.objects;
-CREATE POLICY "authenticated users can overwrite backups"
-ON storage.objects FOR UPDATE
-TO authenticated
-USING (bucket_id = 'db-backups')
-WITH CHECK (bucket_id = 'db-backups');
 
 -- =============================================================================
 -- Multi-Device Continuous Sync: updated_at columns, audit_logs table, Realtime
@@ -583,3 +565,143 @@ BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE account_devices;
   END IF;
 END $$;
+
+-- =============================================================================
+-- SNAPSHOT BUCKET — one account's database snapshots are one account's business
+-- =============================================================================
+
+-- Snapshots are scoped to the account that wrote them, by folder:
+--
+--   snapshots/<account-uuid>/<LOCATION>/<DEVICE>/latest.json
+--
+-- These policies used to grant every authenticated user the whole bucket. Combined with
+-- a path that named only the location, and every install defaulting to LOC01, that meant
+-- one account's till could list and download another account's entire database — and it
+-- did: a freshly installed till restored the wrong tenant's records, then spent its life
+-- being refused as it tried to re-upload them under its own account. The folder check
+-- below is what makes the client-side scoping in src/utils/backupPaths.ts enforceable
+-- rather than merely intended.
+--
+-- current_account_id() (not auth.uid()) so an enrolled till reaches its OWNER's folder
+-- and not one of its own. Index [2] is the segment after 'snapshots'; it is compared as
+-- text, which is why the client writes that segment lowercase and unmangled.
+--
+-- NOTE: snapshots written before this migration live at snapshots/<LOCATION>/... and are
+-- no longer readable by anyone. That is deliberate — none of them can be proven to belong
+-- to the account restoring them. Every live till writes a fresh, correctly-scoped
+-- snapshot within seconds of its next write.
+
+DROP POLICY IF EXISTS "authenticated users can upload backups" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated users can read backups" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated users can overwrite backups" ON storage.objects;
+
+DROP POLICY IF EXISTS "accounts write their own backups" ON storage.objects;
+CREATE POLICY "accounts write their own backups"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'db-backups'
+  AND (storage.foldername(name))[2] = current_account_id()::text
+);
+
+-- Required for restores. Without SELECT, listing and downloading snapshots is denied
+-- by RLS, so a replacement machine can never find a backup no matter how it is keyed.
+DROP POLICY IF EXISTS "accounts read their own backups" ON storage.objects;
+CREATE POLICY "accounts read their own backups"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'db-backups'
+  AND (storage.foldername(name))[2] = current_account_id()::text
+);
+
+-- Required for `upsert: true`. latest.json is overwritten on every snapshot; with only
+-- an INSERT policy every write after the first one is rejected.
+DROP POLICY IF EXISTS "accounts overwrite their own backups" ON storage.objects;
+CREATE POLICY "accounts overwrite their own backups"
+ON storage.objects FOR UPDATE
+TO authenticated
+USING (
+  bucket_id = 'db-backups'
+  AND (storage.foldername(name))[2] = current_account_id()::text
+)
+WITH CHECK (
+  bucket_id = 'db-backups'
+  AND (storage.foldername(name))[2] = current_account_id()::text
+);
+
+-- =============================================================================
+-- REPAIR — records the cloud holds but a till is no longer allowed to touch
+-- =============================================================================
+--
+-- The symptom, in the browser console of a till whose queue will not drain:
+--
+--   new row violates row-level security policy (USING expression) for table "tickets"
+--
+-- Read that message carefully — the "(USING expression)" half is the diagnosis. A plain
+-- "violates row-level security policy" means the row being written was rejected. The
+-- USING variant is raised only on the ON CONFLICT branch of an upsert: a row with that
+-- primary key ALREADY EXISTS, and the policy will not let this session see or update it.
+-- Retrying can never succeed, and the till cannot repair it from the client either,
+-- because it cannot see the offending rows at all. Hence a repair that runs here, in the
+-- SQL editor, where RLS does not apply.
+--
+-- How a device gets into that state: account_id on the stored row no longer equals
+-- current_account_id() for the till writing it. Either the row was stamped with an id
+-- that belongs to no account (a till's own auth id — the client no longer does this, see
+-- resolveAccountId in src/services/supabase/deviceIdentity.ts), or the till's enrolment
+-- was revoked or deleted, so current_account_id() falls back to the till's own auth id
+-- and stops matching the account's data. The reconciliation sweep then reads back
+-- nothing, concludes the cloud is missing the device's entire history, re-queues all of
+-- it, and every row is refused this way: hundreds pending, nothing moving.
+--
+-- ── 1. Diagnose. Who owns the rows, and is that an account or a till? ────────
+--
+--   SELECT account_id, count(*) FROM tickets GROUP BY 1 ORDER BY 2 DESC;
+--
+--   -- Any account_id in that list which appears here is a TILL's id, not an account's:
+--   SELECT auth_user_id, account_id, status, label, last_seen_at FROM account_devices;
+--
+--   -- And what the cloud resolves for the session you are worried about — run this
+--   -- from the app's own console (it is what every policy compares against):
+--   --   await supabase.rpc('current_account_id')
+--
+-- ── 2. Re-point rows stamped with a till's id back to that till's account ────
+--
+-- Safe and idempotent: it only touches rows whose account_id is a known device id, and
+-- a device id is never an account id. Running it twice changes nothing the second time.
+
+UPDATE users      t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
+UPDATE tickets    t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
+UPDATE shifts     t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
+UPDATE expenses   t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
+UPDATE audit_logs t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
+
+-- ── 3. Re-enable a till whose enrolment was revoked ──────────────────────────
+--
+-- Deliberately NOT run automatically: a revoked till may have been revoked on purpose
+-- (lost, stolen, sold). Un-revoke only the ones you mean to, by id from step 1:
+--
+--   UPDATE account_devices SET status = 'active' WHERE auth_user_id = '<till-uuid>';
+--
+-- A till whose enrolment row was DELETED rather than revoked needs no SQL at all: an
+-- admin signing in on it with their PIN enrols it again.
+--
+-- ── 4. Rows owned by nobody (account_id IS NULL) ─────────────────────────────
+--
+-- Left commented because only you can know whose they are. With a single account in the
+-- project the answer is unambiguous; with more than one, claiming them blindly would
+-- hand one tenant another's records. Check the count first, then claim deliberately:
+--
+--   SELECT count(*) FROM tickets WHERE account_id IS NULL;
+--   UPDATE tickets SET account_id = '<your-account-uuid>' WHERE account_id IS NULL;
+--
+-- ── 5. Legacy snapshots in the backup bucket ─────────────────────────────────
+--
+-- Snapshots written before the bucket was partitioned by account sit at
+-- snapshots/<LOCATION>/... and belong to nobody in particular. The policies above make
+-- them unreadable, which is the point — a fresh till restoring one is how another
+-- account's records arrive on a device that can never sync them. They are now dead
+-- weight and can be deleted from the Storage browser in the dashboard. Live tills write
+-- a fresh, correctly-scoped snapshot within seconds of their next write; nothing is lost
+-- that the account's own tables do not already hold.

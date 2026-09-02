@@ -21,6 +21,7 @@ import {
   snapshotTimestamp,
 } from '../../utils/backupPaths';
 import { db, TABLE_NAMES, TableName } from './dexieSchema';
+import { getAccountId } from './accountScope';
 
 const SUPABASE_BUCKET = 'db-backups';
 const BACKUP_DEBOUNCE_MS = 10_000;
@@ -28,6 +29,12 @@ const BACKUP_DEBOUNCE_MS = 10_000;
 interface BackupSnapshot {
   version: 1;
   exportedAt: string;
+  /**
+   * The account this snapshot belongs to. Absent in snapshots written before the bucket
+   * was scoped by account — and those are exactly the ones that cannot be trusted, since
+   * the folder they sit in says nothing about who owns them.
+   */
+  accountId?: string;
   tables: Partial<Record<TableName, any[]>>;
 }
 
@@ -42,18 +49,16 @@ export function setBackupLocationContext(locationId: string, deviceId: string): 
   _deviceId = deviceId || 'DEV01';
 }
 
-function backupPrefix(): string {
-  return snapshotDir(_locationId, _deviceId);
-}
 
-async function exportAllTables(): Promise<BackupSnapshot> {
+
+async function exportAllTables(accountId: string): Promise<BackupSnapshot> {
   const tables: Partial<Record<TableName, any[]>> = {};
   await Promise.all(
     TABLE_NAMES.map(async (name) => {
       tables[name] = await (db as any)[name].toArray();
     })
   );
-  return { version: 1, exportedAt: new Date().toISOString(), tables };
+  return { version: 1, exportedAt: new Date().toISOString(), accountId, tables };
 }
 
 /** Debounces a full JSON export + upload, mirroring the old _persist()-triggered
@@ -64,18 +69,27 @@ export function scheduleCloudBackup(): void {
 
   _backupTimer = setTimeout(async () => {
     try {
-      const snapshot = await exportAllTables();
+      // No account, no backup. A snapshot that cannot name its owner has nowhere safe to
+      // be written and nothing that could later prove it is safe to restore.
+      const accountId = await getAccountId();
+      const prefix = snapshotDir(accountId, _locationId, _deviceId);
+      if (!accountId || !prefix) {
+        console.debug('[cloudBackup] skipped: no account to write this snapshot under');
+        return;
+      }
+
+      const snapshot = await exportAllTables(accountId);
       const json = JSON.stringify(snapshot);
       const blob = new Blob([json], { type: 'application/json' });
       const date = new Date().toISOString().split('T')[0];
 
       const latestResult = await supabase.storage
         .from(SUPABASE_BUCKET)
-        .upload(`${backupPrefix()}/${LATEST_FILE}`, blob, { upsert: true });
+        .upload(`${prefix}/${LATEST_FILE}`, blob, { upsert: true });
 
       const dailyResult = await supabase.storage
         .from(SUPABASE_BUCKET)
-        .upload(`${backupPrefix()}/${date}.json`, blob, { upsert: true });
+        .upload(`${prefix}/${date}.json`, blob, { upsert: true });
 
       // supabase-js resolves (rather than throws) on a rejected upload, so this must
       // be checked explicitly — otherwise a silently-blocked backup (missing bucket,
@@ -169,31 +183,29 @@ async function newestSnapshotUnder(locationPrefix: string): Promise<SnapshotCand
 }
 
 /**
- * Finds the snapshot a restoring machine should pull, widening the search until
- * something turns up: the signed-in account's location, then this machine's
- * configured location, then every location in the bucket.
+ * Finds the snapshot a restoring machine should pull: the signed-in account's location
+ * first, then this machine's configured location — both inside the account's own folder,
+ * and no further.
+ *
+ * The search used to widen one step beyond that, scanning every location in the bucket
+ * for anything at all. Combined with a bucket that was not partitioned by account, and
+ * two accounts both on the default LOC01, that step is how a freshly installed till
+ * restored a different account's entire database, re-queued all of it as its own, and
+ * spent the rest of its life being refused row by row. Finding nothing is a far better
+ * outcome than finding somebody else's data: the till simply starts empty and syncs.
  */
-async function findNewestCloudSnapshot(): Promise<{ candidate: SnapshotCandidate | null; reason?: string }> {
+async function findNewestCloudSnapshot(
+  accountId: string
+): Promise<{ candidate: SnapshotCandidate | null; reason?: string }> {
   const cloudLocation = await resolveCloudLocationId();
-  const preferred = candidateLocationDirs(cloudLocation, _locationId);
+  const preferred = candidateLocationDirs(accountId, cloudLocation, _locationId);
 
   try {
     for (const dir of preferred) {
       const hit = await newestSnapshotUnder(dir);
       if (hit) return { candidate: hit };
     }
-
-    const locations = await listStorageDir(SNAPSHOT_ROOT);
-    const scanned: SnapshotCandidate[] = [];
-    for (const entry of locations) {
-      const prefix = `${SNAPSHOT_ROOT}/${entry.name}`;
-      if (!entry.name || preferred.includes(prefix)) continue;
-      const hit = await newestSnapshotUnder(prefix);
-      if (hit) scanned.push(hit);
-    }
-
-    const widest = pickNewestSnapshot(scanned);
-    return widest ? { candidate: widest } : { candidate: null, reason: 'no cloud backup found' };
+    return { candidate: null, reason: 'no cloud backup found for this account' };
   } catch (e: any) {
     return { candidate: null, reason: `cloud backup lookup failed: ${e?.message || e}` };
   }
@@ -220,7 +232,10 @@ export async function restoreFromCloud(): Promise<{ restored: boolean; reason?: 
     return { restored: false, reason: 'local data present — refusing to overwrite' };
   }
 
-  const { candidate, reason } = await findNewestCloudSnapshot();
+  const accountId = await getAccountId();
+  if (!accountId) return { restored: false, reason: 'no account signed in to restore for' };
+
+  const { candidate, reason } = await findNewestCloudSnapshot(accountId);
   if (!candidate) return { restored: false, reason: reason || 'no cloud backup found' };
 
   const { data: blob, error: dlError } = await supabase.storage.from(SUPABASE_BUCKET).download(candidate.path);
@@ -228,6 +243,22 @@ export async function restoreFromCloud(): Promise<{ restored: boolean; reason?: 
 
   const text = await blob.text();
   const parsed: BackupSnapshot = JSON.parse(text);
+
+  // The folder said this belongs to us; the snapshot has to say so too. A snapshot with
+  // no owner recorded predates account-scoped backups, and there is nothing about it that
+  // can be checked — restoring it is how another account's records ended up on a till
+  // that could never sync them. Refused, and said out loud rather than swallowed.
+  if (parsed.accountId !== accountId) {
+    console.warn(
+      `[cloudBackup] refusing snapshot ${candidate.path}: it belongs to ${parsed.accountId ?? 'an unrecorded account'}, not to the account signed in here`
+    );
+    return {
+      restored: false,
+      reason: parsed.accountId
+        ? 'the newest snapshot belongs to a different account'
+        : 'the newest snapshot predates account-scoped backups and cannot be proven to belong to this account',
+    };
+  }
 
   await db.transaction('rw', TABLE_NAMES.map((name) => (db as any)[name]), async () => {
     for (const name of TABLE_NAMES) {

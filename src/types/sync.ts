@@ -37,6 +37,13 @@ export interface SyncState {
   pendingCount: number;
   /** Rows that have failed repeatedly and need a human to look — still retried, never dropped. */
   stuckCount: number;
+  /**
+   * The rejection the most queued rows share, when the queue is stalled for one systemic
+   * reason (an RLS refusal, a column the cloud schema doesn't have). Every failure was
+   * already recorded on its own row and readable nowhere, so a queue that could never
+   * drain looked exactly like a queue that was merely busy.
+   */
+  queueFault: { reason: string; count: number } | null;
   lastSyncedAt?: string;
   isSyncing: boolean;
 }

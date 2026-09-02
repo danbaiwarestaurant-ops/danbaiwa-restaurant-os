@@ -103,8 +103,17 @@ export async function resolveAccountId(session: any): Promise<string | null> {
   const identity = await loadDeviceIdentity();
   if (identity && identity.authUserId === sessionUserId) return identity.accountId;
 
-  const claimed = session?.user?.user_metadata?.account_id;
-  if (isTillSession(session) && typeof claimed === 'string' && claimed) return claimed;
+  if (isTillSession(session)) {
+    const claimed = session?.user?.user_metadata?.account_id;
+    if (typeof claimed === 'string' && claimed) return claimed;
+
+    // A till's own auth id owns no rows. Falling back to it here stamped records with an
+    // id belonging to nobody: the cloud accepted them while the server agreed on that id,
+    // and afterwards no one — not even the owner — could see or overwrite them, so every
+    // later push of the same record was refused for conflicting with a row the till is
+    // not allowed to touch. Better to send nothing and say so (the worker gates on null).
+    return null;
+  }
 
   return sessionUserId;
 }
@@ -159,7 +168,16 @@ export async function ensureDeviceEnrolled(opts: {
   const password = generateDevicePassword();
 
   const enrolClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+      // Its own storage key. Without one, two GoTrue clients share the browser's single
+      // `sb-<project>-auth-token` slot — which is what "Multiple GoTrueClient instances
+      // detected in the same browser context" in the console is warning about, and what
+      // would let the till sign-up here reach the owner's stored session.
+      storageKey: 'danbaiwa-till-enrolment',
+    },
   });
 
   let authUserId: string | null = null;
@@ -275,10 +293,26 @@ export async function reportDeviceSeen(): Promise<void> {
  * nothing whatsoever synced.
  */
 export async function isDeviceRevoked(): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+  const state = await checkDeviceEnrolment();
+  return state === 'revoked' || state === 'gone';
+}
+
+/**
+ * What the account currently says about this till's membership.
+ *
+ * `gone` is the state isDeviceRevoked used to fold into "can't tell": the enrolment row
+ * has been deleted outright rather than marked revoked. It matters because it has the
+ * same consequence and a different cause — the server's current_account_id() falls back
+ * to the till's own auth id, so the till stops matching any of the account's rows while
+ * authenticating perfectly well.
+ */
+export type DeviceEnrolmentState = 'not-enrolled' | 'active' | 'revoked' | 'gone' | 'unknown';
+
+export async function checkDeviceEnrolment(): Promise<DeviceEnrolmentState> {
+  if (!isSupabaseConfigured) return 'unknown';
 
   const identity = await loadDeviceIdentity();
-  if (!identity) return false;
+  if (!identity) return 'not-enrolled';
 
   try {
     const { data, error } = await supabase
@@ -287,9 +321,10 @@ export async function isDeviceRevoked(): Promise<boolean> {
       .eq('auth_user_id', identity.authUserId)
       .maybeSingle();
 
-    if (error || !data) return false; // can't tell — don't cry wolf
-    return data.status !== 'active';
+    if (error) return 'unknown';
+    if (!data) return 'gone';
+    return data.status === 'active' ? 'active' : 'revoked';
   } catch (_) {
-    return false;
+    return 'unknown';
   }
 }

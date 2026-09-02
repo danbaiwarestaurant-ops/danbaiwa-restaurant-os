@@ -87,7 +87,7 @@ describe('sync worker cloud-session gate', () => {
   });
 
   it('aborts the batch without charging retries when the session is genuinely gone', async () => {
-    sessionValue = { access_token: 'valid-at-first' };
+    sessionValue = { access_token: 'valid-at-first', user: { id: 'ACCOUNT-1' } };
     await svc.saveTicket(ticket);
     await svc.saveTicket({ ...ticket, id: 'LOC01-DEV01-GATE002', localSeq: 2 });
     await useSyncStore.getState().checkOutbox();
@@ -109,7 +109,7 @@ describe('sync worker cloud-session gate', () => {
     // Postgres returns 42501 both for "not authenticated" and for "this row is scoped to
     // a tenant your token does not cover". Reading the second as the first made a
     // successful reconnect flip straight back to "Not Signed In to Cloud".
-    sessionValue = { access_token: 'perfectly-valid' };
+    sessionValue = { access_token: 'perfectly-valid', user: { id: 'ACCOUNT-1' } };
     await svc.saveTicket(ticket);
     await useSyncStore.getState().checkOutbox();
 
@@ -122,12 +122,17 @@ describe('sync worker cloud-session gate', () => {
     const rows = await db.outbox.toArray();
     expect(rows[0].retryCount).toBe(1);
     expect(rows[0].status).toBe('pending');
-    // The reported reason must name the real problem, not blame the credentials.
-    expect(useSyncStore.getState().cloudError).toMatch(/different location/i);
+    // The reported reason must name the real problem, not blame the credentials — and
+    // not guess at a location, which has not been security-relevant since account
+    // scoping landed. With the cloud unable to say which account it resolves (no rpc in
+    // this mock), the honest answer is the refusal itself. See tenantMismatch.test.ts
+    // for the cases where it can say.
+    expect(useSyncStore.getState().cloudError).toMatch(/refused this tickets record/i);
+    expect(useSyncStore.getState().cloudError).not.toMatch(/location/i);
   });
 
   it('does charge a retry when the row itself is genuinely rejected', async () => {
-    sessionValue = { access_token: 'valid' };
+    sessionValue = { access_token: 'valid', user: { id: 'ACCOUNT-1' } };
     await svc.saveTicket(ticket);
     await useSyncStore.getState().checkOutbox();
 
@@ -141,8 +146,26 @@ describe('sync worker cloud-session gate', () => {
     expect(rows[0].nextAttemptAt).toBeDefined();
   });
 
+  it('pushes nothing, and charges nothing, when no account id can be resolved', async () => {
+    // A session whose account cannot be resolved is the same class of problem as no
+    // session: every row would go up unowned, every RLS policy would refuse it, and the
+    // old code charged each refusal to the record. A whole queue could burn itself down
+    // to "stuck" over a resolution failure that had nothing to do with any row in it.
+    sessionValue = { access_token: 'valid', user: {} }; // no user id to scope by
+    await svc.saveTicket(ticket);
+    await useSyncStore.getState().checkOutbox();
+
+    await useSyncStore.getState().triggerSyncWorker();
+
+    expect(upsertCallCount).toBe(0);
+    const rows = await db.outbox.toArray();
+    expect(rows[0].retryCount).toBe(0);
+    expect(rows[0].status).toBe('pending');
+    expect(useSyncStore.getState().cloudError).toMatch(/which account/i);
+  });
+
   it('marks rows synced and reports a clean state on success', async () => {
-    sessionValue = { access_token: 'valid' };
+    sessionValue = { access_token: 'valid', user: { id: 'ACCOUNT-1' } };
     await svc.saveTicket(ticket);
     await useSyncStore.getState().checkOutbox();
 

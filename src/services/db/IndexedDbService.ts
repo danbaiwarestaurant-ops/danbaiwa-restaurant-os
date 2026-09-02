@@ -383,11 +383,27 @@ export class IndexedDbService implements IDbService {
    * This — not getPendingOutbox — is what the UI must report, so a row quietly sitting
    * out a 30-minute backoff can never be mistaken for "synced".
    */
-  async countUnsyncedOutbox(): Promise<{ total: number; stuck: number }> {
+  async countUnsyncedOutbox(): Promise<{
+    total: number;
+    stuck: number;
+    topError?: { reason: string; count: number };
+  }> {
     const rows = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
+
+    // Why the queue is not moving is recorded on every row that failed, and used to be
+    // readable nowhere: the badge said "N pending" whether the cloud was busy or was
+    // refusing every record for the same reason. Report the reason the most rows share.
+    const tally = new Map<string, number>();
+    for (const row of rows) {
+      if (!row.lastError) continue;
+      tally.set(row.lastError, (tally.get(row.lastError) ?? 0) + 1);
+    }
+    const top = [...tally.entries()].sort((a, b) => b[1] - a[1])[0];
+
     return {
       total: rows.length,
       stuck: rows.filter((r) => r.retryCount >= STUCK_AFTER_RETRIES).length,
+      topError: top ? { reason: top[0], count: top[1] } : undefined,
     };
   }
 
@@ -427,6 +443,25 @@ export class IndexedDbService implements IDbService {
       nextAttemptAt: new Date(Date.now() + delayMs).toISOString(),
       lastError,
     });
+  }
+
+  /**
+   * Drops acknowledged outbox rows older than the retention window.
+   *
+   * Nothing ever deleted them, so the outbox grew for the life of the install: one row
+   * per ticket, shift, expense, user edit and audit entry, forever. Every code path that
+   * has to ask "is this record still owed?" pays for that history, and the whole table
+   * goes into each cloud snapshot. A short window is kept rather than deleting on
+   * acknowledgement so a recent push is still inspectable when something looks wrong.
+   * Only rows already confirmed in the cloud are touched — nothing unsynced can be lost.
+   */
+  async pruneSyncedOutbox(olderThanMs: number = 24 * 60 * 60_000): Promise<number> {
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    return db.outbox
+      .where('status')
+      .equals('synced')
+      .filter((row) => row.createdAt < cutoff)
+      .delete();
   }
 
   /**

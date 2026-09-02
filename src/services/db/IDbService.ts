@@ -46,8 +46,16 @@ export interface IDbService {
 
   // Outbox Sync
   getPendingOutbox(): Promise<OutboxItem[]>;
-  /** Everything still owed to the cloud, including rows waiting out a retry backoff. */
-  countUnsyncedOutbox(): Promise<{ total: number; stuck: number }>;
+  /**
+   * Everything still owed to the cloud, including rows waiting out a retry backoff.
+   * `topError` is the rejection reason the most queued rows share, so a queue that is
+   * stalled for one systemic reason can say so instead of just counting.
+   */
+  countUnsyncedOutbox(): Promise<{
+    total: number;
+    stuck: number;
+    topError?: { reason: string; count: number };
+  }>;
   markOutboxSynced(id: string): Promise<void>;
   /**
    * Mark a whole batch synced in one transaction. The worker pushes rows to the cloud in
@@ -58,6 +66,8 @@ export interface IDbService {
   markOutboxAttemptFailed(id: string, retryCount: number, lastError?: string): Promise<void>;
   /** Clears backoffs and resurrects rows parked as 'failed' by an older build. */
   revivePendingOutbox(): Promise<number>;
+  /** Drops acknowledged outbox rows older than the window, so the table stays bounded. */
+  pruneSyncedOutbox(olderThanMs?: number): Promise<number>;
   /** Queues rows the cloud is missing; skips ids already in flight. */
   enqueueBackfill(tableName: string, payloads: Record<string, any>[]): Promise<number>;
 }

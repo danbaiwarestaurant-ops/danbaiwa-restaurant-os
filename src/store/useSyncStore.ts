@@ -4,8 +4,8 @@ import { dbService } from '../services/db/IndexedDbService';
 import { supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { toSnakeCase } from '../utils/caseMapping';
-import { getAccountId } from '../services/db/accountScope';
-import { restoreDeviceSession, isDeviceRevoked } from '../services/supabase/deviceIdentity';
+import { getAccountId, getServerAccountId } from '../services/db/accountScope';
+import { restoreDeviceSession, checkDeviceEnrolment } from '../services/supabase/deviceIdentity';
 
 interface SyncStoreState extends SyncState {
   pendingItems: OutboxItem[];
@@ -68,6 +68,10 @@ type PassOutcome = 'drained' | 'skipped' | 'retry-soon' | 'session-lost';
  */
 let resyncRequested = false;
 
+/** Last outbox housekeeping sweep, and how often one is worth doing. */
+let lastPrune = 0;
+const PRUNE_EVERY_MS = 10 * 60_000;
+
 /**
  * Split the due queue into runs that can be sent as one request each.
  *
@@ -107,25 +111,42 @@ export function batchOutbox(items: OutboxItem[], maxRows: number = MAX_BATCH_ROW
  * something that is not an error at all.
  */
 export function dedupeBatch(items: OutboxItem[]): { send: OutboxItem[]; superseded: OutboxItem[] } {
-  // Index of the last queued write per record id. A row with no id at all can't be
-  // deduped (or conflict-resolved by the cloud), so it is always sent as-is.
+  // Index of the last queued write per record. A row that identifies no record at all
+  // can't be deduped (or conflict-resolved by the cloud), so it is always sent as-is.
   const lastIndexFor = new Map<string, number>();
   items.forEach((item, i) => {
-    const rowId = item.payload?.id;
-    if (rowId !== undefined && rowId !== null) lastIndexFor.set(String(rowId), i);
+    const key = dedupeKey(item);
+    if (key !== null) lastIndexFor.set(key, i);
   });
 
   const send: OutboxItem[] = [];
   const superseded: OutboxItem[] = [];
 
   items.forEach((item, i) => {
-    const rowId = item.payload?.id;
-    if (rowId === undefined || rowId === null) send.push(item);
-    else if (lastIndexFor.get(String(rowId)) === i) send.push(item);
+    const key = dedupeKey(item);
+    if (key === null) send.push(item);
+    else if (lastIndexFor.get(key) === i) send.push(item);
     else superseded.push(item);
   });
 
   return { send, superseded };
+}
+
+/**
+ * What identifies the record a queued write is about.
+ *
+ * Usually the row id. account_settings is the exception that used to break this:
+ * it is one row per account, keyed by account_id, and its queued payload carries no id
+ * of its own — so every settings save looked like a distinct record, several went into
+ * one upsert, and Postgres rejected the whole request ("ON CONFLICT DO UPDATE cannot
+ * affect row a second time"). Every save after the first then failed, permanently,
+ * while the batch beside it was dragged into per-row retries it did not need.
+ */
+function dedupeKey(item: OutboxItem): string | null {
+  const rowId = item.payload?.id;
+  if (rowId !== undefined && rowId !== null) return String(rowId);
+  if (item.tableName === 'account_settings') return 'account_settings';
+  return null;
 }
 
 /**
@@ -196,6 +217,55 @@ function isTransientFailure(error: { code?: string; message?: string } | null): 
 }
 
 /**
+ * The refusal that reads as an RLS problem but is really a *conflict* one.
+ *
+ * Postgres words these two failures differently, and the difference is the whole
+ * diagnosis:
+ *
+ *   "new row violates row-level security policy for table X"
+ *       → the row being written is not allowed. Fix the row (or the session).
+ *   "new row violates row-level security policy (USING expression) for table X"
+ *       → a row with this primary key ALREADY EXISTS in the cloud, and the policy will
+ *         not let this session see or update it. The upsert's ON CONFLICT branch has to
+ *         update that existing row, and cannot.
+ *
+ * The second is unfixable by retrying — the record is in the cloud, owned by an account
+ * this till does not currently resolve to — and it is exactly what a till reports when
+ * its enrolment has been revoked or deleted: it can no longer see the very rows it
+ * uploaded, so the backfill sweep decides the cloud is missing everything, re-queues the
+ * lot, and every one of them is refused this way. Hundreds pending, nothing moving.
+ */
+function isConflictWithInvisibleRow(error: { message?: string } | null): boolean {
+  return String(error?.message ?? '').includes('USING expression');
+}
+
+/**
+ * Postgres error codes that can only have been caused by the individual row carrying
+ * them — a bad foreign key, a duplicate, a value the column will not take.
+ *
+ * Everything else (RLS refusals, a column missing from the cloud schema, an undefined
+ * table) is a property of the *request*, and every row in the batch will fail it in
+ * exactly the same way. Re-sending them one at a time to "isolate the cause" then costs
+ * one HTTP round trip per queued row, every pass, forever, and isolates nothing: this is
+ * why a few hundred rejected records turned into thousands of requests a minute while
+ * the pending count sat still. Batch-level faults are now charged once, to the whole
+ * run, and the pass moves on.
+ */
+const ROW_SPECIFIC_CODES = [
+  '23503', // foreign key violation — e.g. an expense whose shift hasn't landed yet
+  '23505', // unique violation
+  '23502', // not-null violation
+  '23514', // check constraint
+  '22P02', // invalid text representation (a malformed uuid, say)
+  '22003', // numeric out of range
+  '21000', // ON CONFLICT touched the same row twice
+];
+
+function isRowSpecificFailure(error: { code?: string } | null): boolean {
+  return ROW_SPECIFIC_CODES.includes(String(error?.code ?? ''));
+}
+
+/**
  * When this device last tried to sign *itself* back in.
  *
  * Each queued write asks hasCloudSession twice (checkOutbox, then the worker), and on a
@@ -231,6 +301,58 @@ async function hasCloudSession(): Promise<boolean> {
   } catch (_) {
     return false;
   }
+}
+
+/** Enough of an id to recognise, without printing a full uuid at a till. */
+const shortId = (id: string | null): string => (id ? `${id.slice(0, 8)}…` : 'none');
+
+/**
+ * Says why the cloud refused a record, in terms of the thing that is actually wrong.
+ *
+ * This used to guess: "scoped to a different location than your account", which sent
+ * whoever read it hunting through device settings for a problem that does not exist —
+ * location has not been security-relevant since account scoping landed. The three real
+ * causes are distinguishable, so distinguish them: ask the database which account it
+ * resolves for this session (the exact expression its policies compare against), and
+ * compare that with the account the rows are being stamped with.
+ */
+async function explainRefusal(
+  error: { message?: string },
+  tableName: string,
+  stampedAccountId: string
+): Promise<string> {
+  const server = await getServerAccountId();
+  const enrolment = await checkDeviceEnrolment();
+
+  if (server.ok && server.accountId !== stampedAccountId) {
+    const because =
+      enrolment === 'revoked'
+        ? "this till's access to the account was revoked"
+        : enrolment === 'gone'
+          ? "this till's enrolment has been removed from the account"
+          : 'the cloud no longer resolves this till to that account';
+
+    return (
+      `This till stamps its records for account ${shortId(stampedAccountId)}, but the cloud ` +
+      `treats it as ${shortId(server.accountId)} — ${because}. Nothing can be sent or seen ` +
+      `until they agree, and everything stays queued safely here. An admin signing in on ` +
+      `this till with their PIN will enrol it again and fix it.`
+    );
+  }
+
+  if (isConflictWithInvisibleRow(error)) {
+    return (
+      `The cloud already holds these ${tableName} records under a different account, and ` +
+      `will not let this till overwrite them. Retrying cannot fix it — the records have to ` +
+      `be re-pointed at your account in Supabase (see the REPAIR section of ` +
+      `supabase_schema.sql). Your copy is safe on this device meanwhile.`
+    );
+  }
+
+  return (
+    `Signed in, but the cloud refused this ${tableName} record (${error.message}). It stays ` +
+    `queued and will be retried.`
+  );
 }
 
 /** Zustand accessors, so the push pass can live outside the store definition. */
@@ -281,6 +403,21 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
     // device can't push under the previous one's id.
     const accountId = await getAccountId();
 
+    // Without a tenant id every row goes up unowned, and every RLS policy in the schema
+    // compares account_id against the caller — so the cloud refuses all of it, and the
+    // old code charged each refusal to the row. A whole queue could burn itself down to
+    // "stuck" over a resolution failure that has nothing to do with any record in it.
+    // Treated exactly like a missing session: nothing sent, nothing charged, said plainly.
+    if (!accountId) {
+      set({
+        isSyncing: false,
+        cloudError:
+          'Signed in, but this till could not work out which account its records belong to, so nothing can be sent. Your work is queued safely — reconnecting with the admin PIN will resolve it.',
+      });
+      console.warn('[Sync Store] Worker skipped: no account id resolved (data stays queued)');
+      return 'skipped';
+    }
+
     /** One row, prepared for the cloud's column names and tenant scoping. */
     const toCloudRow = (item: OutboxItem) => {
       const supabasePayload = toSnakeCase(item.payload);
@@ -317,9 +454,19 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       // account_settings is keyed by account_id (one row per account), every other
       // table by the client-generated row id.
       const conflictKey = batch.tableName === 'account_settings' ? 'account_id' : 'id';
+
+      // The audit log is immutable by design: the schema grants INSERT and SELECT and
+      // deliberately no UPDATE, so RLS denies the UPDATE half of an ordinary upsert. Any
+      // audit row the cloud already holds — one re-sent after a dropped connection, or
+      // re-queued by the backfill sweep — was therefore refused with a 42501 that no
+      // number of retries could ever satisfy, and it sat in the queue for good.
+      // ignore-duplicates turns the write into ON CONFLICT DO NOTHING, which is the
+      // correct semantics for an append-only log and needs no UPDATE right.
+      const ignoreDuplicates = batch.tableName === 'audit_logs';
+
       return supabase
         .from(batch.tableName)
-        .upsert(rows.map(toCloudRow), { onConflict: conflictKey });
+        .upsert(rows.map(toCloudRow), { onConflict: conflictKey, ignoreDuplicates });
     };
 
     /**
@@ -341,15 +488,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
         return 'session-lost' as const;
       }
       if (isRlsViolation(error)) {
-        // A revoked till authenticates perfectly well and simply matches no rows any
-        // more, so this is by far the likeliest reason a healthy session is refused.
-        // Saying "scoped to a different location" there would send whoever reads it
-        // hunting through device settings for a problem that does not exist.
-        set({
-          cloudError: (await isDeviceRevoked())
-            ? "This till's access to the account was revoked, so the cloud is refusing its records. Your work stays queued safely here. An admin can re-enable this till, or sign in on it with their PIN to enrol it again."
-            : `Signed in, but the cloud is refusing this ${tableName} record because it is scoped to a different location than your account (${error.message}). It stays queued and will be retried.`,
-        });
+        set({ cloudError: await explainRefusal(error, tableName, accountId) });
       }
       return 'row-fault' as const;
     };
@@ -367,8 +506,8 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
         '[Sync Store] Connection lost mid-sync; queue left intact and retried shortly:',
         error.message
       );
-      const { total, stuck } = await dbService.countUnsyncedOutbox();
-      set({ isSyncing: false, pendingCount: total, stuckCount: stuck });
+      const { total, stuck, topError } = await dbService.countUnsyncedOutbox();
+      set({ isSyncing: false, pendingCount: total, stuckCount: stuck, queueFault: topError ?? null });
       return 'retry-soon';
     };
 
@@ -399,6 +538,17 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
 
       if (isTransientFailure(error)) return abortTransient(error);
       if ((await classify(error, batch.tableName)) === 'session-lost') return 'session-lost';
+
+      // Nothing about this rejection points at a particular row, so every row in the run
+      // would fail it identically. Charge the run once and move on: splitting it up
+      // would mean one request per queued record, every pass, to learn nothing.
+      if (!isRowSpecificFailure(error)) {
+        console.warn(
+          `[Sync Store] Whole ${batch.tableName} batch of ${send.length} refused (${error.code ?? 'no code'}: ${error.message}); not splitting — every row fails the same way`
+        );
+        for (const item of send) await fail(item, error);
+        continue;
+      }
 
       // The batch was rejected, but at most a few of its rows are actually at fault.
       // Re-send them individually so one bad record is isolated and charged, and every
@@ -444,12 +594,26 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       await dbService.markOutboxSyncedMany(acknowledge);
     }
 
+    // Housekeeping, occasionally: acknowledged rows are never read again, but they were
+    // kept forever and every "is this still owed?" lookup had to walk past them.
+    if (Date.now() - lastPrune > PRUNE_EVERY_MS) {
+      lastPrune = Date.now();
+      const dropped = await dbService.pruneSyncedOutbox();
+      if (dropped) console.info(`[Sync Store] Pruned ${dropped} acknowledged outbox row(s)`);
+    }
+
     // Re-fetch remaining outbox queue size
     const remaining = await dbService.getPendingOutbox();
-    const { total, stuck } = await dbService.countUnsyncedOutbox();
+    const { total, stuck, topError } = await dbService.countUnsyncedOutbox();
+    if (topError && total) {
+      console.warn(
+        `[Sync Store] ${total} row(s) still queued; ${topError.count} of them share one reason: ${topError.reason}`
+      );
+    }
     set({
       pendingCount: total,
       stuckCount: stuck,
+      queueFault: topError ?? null,
       pendingItems: remaining,
       isSyncing: false,
       lastSyncedAt: new Date().toISOString(),
@@ -470,6 +634,7 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
   cloudError: null,
   pendingCount: 0,
   stuckCount: 0,
+  queueFault: null,
   isSyncing: false,
   pendingItems: [],
   lastSyncedAt: undefined,
@@ -479,10 +644,11 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     const pending = await dbService.getPendingOutbox();
     // Report everything still owed to the cloud, not just what is due for a retry right
     // now, so a row waiting out a backoff can never be displayed as "synced".
-    const { total, stuck } = await dbService.countUnsyncedOutbox();
+    const { total, stuck, topError } = await dbService.countUnsyncedOutbox();
     set({
       pendingCount: total,
       stuckCount: stuck,
+      queueFault: topError ?? null,
       pendingItems: pending,
       isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
       cloudConnected: await hasCloudSession(),

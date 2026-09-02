@@ -77,7 +77,7 @@ async function adoptAccountFromCloud(
   }
 
   // Authenticated — pull this account's data down onto the machine.
-  const restored = await runCloudCatchUp();
+  const restored = await runCloudCatchUp({ revive: true });
   let user = await dbService.getUserByEmail(cleanEmail);
 
   // Nothing came down (brand-new account, or the pull came up empty): fall back to the
@@ -369,7 +369,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         enrolThisTill();
         if (restored) void reportDeviceSeen();
         startRealtimeSync();
-        runCloudCatchUp().catch(() => {});
+        runCloudCatchUp({ revive: true }).catch(() => {});
       })();
     }
   },
@@ -555,7 +555,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // prior admin login) — the gate inside checks the actual session, not which
       // local role just signed in, so this safely no-ops on a cashier-only till.
       startRealtimeSync();
-      runCloudCatchUp().catch(() => {});
+      runCloudCatchUp({ revive: true }).catch(() => {});
 
       // Logging out destroys the cloud (Supabase) session, and day-to-day PIN login
       // never re-establishes one — silently leaving cloud sync (and cross-device
@@ -569,7 +569,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           .then(async () => {
             enrolThisTill();
             startRealtimeSync();
-            const changed = await runCloudCatchUp();
+            const changed = await runCloudCatchUp({ revive: true });
             if (changed) {
               await get().loadUsers();
               await useSyncStore.getState().checkOutbox();
@@ -654,7 +654,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       useSyncStore.setState({ cloudConnected: true, cloudError: null });
       startRealtimeSync();
-      await runCloudCatchUp();
+      await runCloudCatchUp({ revive: true });
       await get().loadUsers();
       await useSyncStore.getState().checkOutbox();
       await useSyncStore.getState().triggerSyncWorker();

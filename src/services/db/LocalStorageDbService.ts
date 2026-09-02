@@ -263,11 +263,40 @@ export class LocalStorageDbService implements IDbService {
     );
   }
 
-  async countUnsyncedOutbox(): Promise<{ total: number; stuck: number }> {
+  async countUnsyncedOutbox(): Promise<{
+    total: number;
+    stuck: number;
+    topError?: { reason: string; count: number };
+  }> {
     const raw = getItem(STORAGE_KEYS.OUTBOX);
     const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
     const unsynced = outbox.filter(o => o.status === 'pending' || o.status === 'failed');
-    return { total: unsynced.length, stuck: unsynced.filter(o => o.retryCount >= 8).length };
+
+    // Mirrors IndexedDbService: the reason the most stalled rows share.
+    const tally = new Map<string, number>();
+    for (const o of unsynced) {
+      if (!o.lastError) continue;
+      tally.set(o.lastError, (tally.get(o.lastError) ?? 0) + 1);
+    }
+    const top = [...tally.entries()].sort((a, b) => b[1] - a[1])[0];
+
+    return {
+      total: unsynced.length,
+      stuck: unsynced.filter(o => o.retryCount >= 8).length,
+      topError: top ? { reason: top[0], count: top[1] } : undefined,
+    };
+  }
+
+  /** Mirrors IndexedDbService: acknowledged rows are dropped once they are old enough,
+   *  so the outbox cannot grow for the life of the install. */
+  async pruneSyncedOutbox(olderThanMs: number = 24 * 60 * 60_000): Promise<number> {
+    const raw = getItem(STORAGE_KEYS.OUTBOX);
+    const outbox: OutboxItem[] = raw ? JSON.parse(raw) : [];
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    const kept = outbox.filter(o => !(o.status === 'synced' && o.createdAt < cutoff));
+    const removed = outbox.length - kept.length;
+    if (removed) setItem(STORAGE_KEYS.OUTBOX, JSON.stringify(kept));
+    return removed;
   }
 
   async revivePendingOutbox(): Promise<number> {

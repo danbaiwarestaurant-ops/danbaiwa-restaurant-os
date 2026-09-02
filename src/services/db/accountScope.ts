@@ -48,6 +48,30 @@ export async function getAccountId(): Promise<string | null> {
 }
 
 /**
+ * The tenant id the **cloud** resolves for this session, straight from the database's own
+ * current_account_id() — the exact expression every RLS policy compares against.
+ *
+ * The client's answer and the server's can disagree, and when they do nothing syncs while
+ * everything looks healthy: the till holds a valid session, stamps its rows with the
+ * account it was enrolled to, and the server — seeing an enrolment that has been revoked
+ * or deleted — falls back to the till's own auth id and matches none of it. That is
+ * invisible from the client side, which is why it has to be asked rather than inferred.
+ *
+ * `ok: false` means the question could not be put (offline, or the migration that adds
+ * the function has not been run), which is not the same as "they disagree".
+ */
+export async function getServerAccountId(): Promise<{ ok: boolean; accountId: string | null }> {
+  if (!isSupabaseConfigured) return { ok: false, accountId: null };
+  try {
+    const { data, error } = await supabase.rpc('current_account_id');
+    if (error) return { ok: false, accountId: null };
+    return { ok: true, accountId: (data as string | null) ?? null };
+  } catch (_) {
+    return { ok: false, accountId: null };
+  }
+}
+
+/**
  * Stamps every local row that has no accountId with the given one.
  *
  * This is what rescues history created before account scoping existed: those rows are

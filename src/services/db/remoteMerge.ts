@@ -46,10 +46,10 @@ export async function applyRemoteSettings(remote: {
 }): Promise<boolean> {
   if (!remote?.settings || typeof remote.settings !== 'object') return false;
 
-  const dirty = await db.outbox
-    .filter((o) => o.tableName === 'account_settings' && o.status !== 'synced')
-    .first();
-  if (dirty) return false;
+  // Indexed on status, so this reads only what is still owed rather than walking every
+  // outbox row the device has ever written.
+  const unsynced = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
+  if (unsynced.some((o) => o.tableName === 'account_settings')) return false;
 
   const existing = await db.config.get(DEVICE_CONFIG_KEY);
   const localUpdatedAt = (existing?.value as any)?.__updatedAt as string | undefined;
@@ -67,12 +67,30 @@ export async function applyRemoteSettings(remote: {
   return true;
 }
 
+/**
+ * Ids of this table's rows that are still owed to the cloud, as one indexed read.
+ *
+ * The per-row check below used `db.outbox.filter(...)`, which walks the entire outbox —
+ * synced history included, and nothing ever prunes that — once for every incoming row.
+ * The reconciliation pull applies every row of every table each minute, so the cost was
+ * (all local records × all outbox rows ever) of IndexedDB work per sweep, on the same
+ * thread the push worker and the UI run on. On a till with real history that is enough
+ * to make the whole queue look frozen. Callers that apply many rows load the set once.
+ */
+export async function loadDirtyIds(pgTable: SyncablePgTable): Promise<Set<string>> {
+  const rows = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (row.tableName !== pgTable) continue;
+    const id = (row.payload as any)?.id;
+    if (id) ids.add(String(id));
+  }
+  return ids;
+}
+
 /** True when a pending/failed outbox entry exists for this row — it hasn't synced up yet. */
 export async function isRowDirty(pgTable: SyncablePgTable, id: string): Promise<boolean> {
-  const match = await db.outbox
-    .filter((o) => o.tableName === pgTable && o.status !== 'synced' && (o.payload as any)?.id === id)
-    .first();
-  return Boolean(match);
+  return (await loadDirtyIds(pgTable)).has(id);
 }
 
 /** Last-write-wins: apply the incoming row only if it's strictly newer than what's local. */
@@ -91,19 +109,23 @@ export function shouldApplyRemote(existing: { updatedAt?: string } | undefined, 
 export async function applyRemoteRow(
   pgTable: SyncablePgTable,
   camelRow: Record<string, any>,
-  op: 'INSERT' | 'UPDATE' | 'DELETE'
+  op: 'INSERT' | 'UPDATE' | 'DELETE',
+  /** Pre-loaded dirty ids, for callers applying a whole table's worth of rows. */
+  dirtyIds?: Set<string>
 ): Promise<boolean> {
   const dexieTable = db[DEXIE_TABLE[pgTable]] as any;
   const id = camelRow.id as string;
   if (!id) return false;
 
+  const isDirty = dirtyIds ? dirtyIds.has(id) : await isRowDirty(pgTable, id);
+
   if (op === 'DELETE') {
-    if (await isRowDirty(pgTable, id)) return false;
+    if (isDirty) return false;
     await dexieTable.delete(id);
     return true;
   }
 
-  if (await isRowDirty(pgTable, id)) return false;
+  if (isDirty) return false;
 
   const existing = await dexieTable.get(id);
   if (!shouldApplyRemote(existing, camelRow)) return false;

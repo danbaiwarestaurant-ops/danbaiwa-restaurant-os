@@ -18,7 +18,7 @@
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
 import { toCamelCase } from '../../utils/caseMapping';
-import { applyRemoteRow, applyRemoteSettings, SyncablePgTable } from './remoteMerge';
+import { applyRemoteRow, applyRemoteSettings, loadDirtyIds, SyncablePgTable } from './remoteMerge';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { runBackfillPush } from './cloudBackfill';
 import { getAccountId, stampLocalRowsWithAccount } from './accountScope';
@@ -118,9 +118,13 @@ export async function runReconciliationPull(): Promise<boolean> {
         continue;
       }
 
+      // One indexed read for the whole table, rather than a full outbox walk per row —
+      // this sweep touches every record the account has, every minute.
+      const dirtyIds = await loadDirtyIds(pgTable);
+
       let changedAny = false;
       for (const row of data) {
-        const changed = await applyRemoteRow(pgTable, toCamelCase(row), 'UPDATE');
+        const changed = await applyRemoteRow(pgTable, toCamelCase(row), 'UPDATE', dirtyIds);
         if (changed) changedAny = true;
       }
       if (changedAny) {
@@ -168,8 +172,16 @@ export async function runReconciliationPull(): Promise<boolean> {
  * cloud never received, and only then do we pull down — so a device holding the sole copy
  * of some history uploads it before it starts merging remote state on top of its own.
  */
-export async function runCloudCatchUp(): Promise<boolean> {
+export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
+
+  // Reviving means "clear every backoff and try the lot again", which is right when
+  // something has actually changed — a sign-in, the network returning, a person pressing
+  // sync. On the periodic tick it was wrong: it reset every rejected row's retry count
+  // once a minute, so nothing ever aged into a longer backoff or showed up as stuck, and
+  // a queue the cloud was refusing was re-sent in full every 60 seconds forever. That is
+  // the churn behind "hundreds of operations, barely moving".
+  const { revive = false } = opts;
 
   const { data: sessionData } = await supabase.auth.getSession();
   if (!sessionData?.session) return false;
@@ -178,13 +190,13 @@ export async function runCloudCatchUp(): Promise<boolean> {
     const accountId = await getAccountId();
     if (accountId) await stampLocalRowsWithAccount(accountId);
 
-    const revived = await dbService.revivePendingOutbox();
+    const revived = revive ? await dbService.revivePendingOutbox() : 0;
     if (revived) {
       console.info(`[realtimeSync] revived ${revived} outbox row(s) that were parked as failed`);
     }
     const queued = await runBackfillPush();
-    if (revived || queued) {
-      // Push immediately rather than waiting for the next 15s poll.
+    if (revive || queued) {
+      // Push immediately rather than waiting for the next poll.
       await useSyncStore.getState().checkOutbox();
       await useSyncStore.getState().triggerSyncWorker();
     }
@@ -222,13 +234,13 @@ export function startRealtimeSync(): void {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses', filter: scope }, (p) => handleRealtimeChange('expenses', p))
       .subscribe();
 
-    await runCloudCatchUp();
+    await runCloudCatchUp({ revive: true });
   })();
 
   if (!onlineListenerAttached) {
     onlineListenerAttached = true;
     window.addEventListener('online', () => {
-      runCloudCatchUp().catch(() => {});
+      runCloudCatchUp({ revive: true }).catch(() => {});
     });
   }
 
@@ -236,6 +248,7 @@ export function startRealtimeSync(): void {
     reconciliationInterval = setInterval(() => {
       runCloudCatchUp().catch(() => {});
     }, RECONCILIATION_INTERVAL_MS);
+    // Deliberately no revive here — see runCloudCatchUp.
   }
 }
 

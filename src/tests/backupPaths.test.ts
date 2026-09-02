@@ -1,14 +1,20 @@
 /**
  * backupPaths.test.ts
  *
- * Locks in the rule that makes cloud disaster recovery work at all: a snapshot must be
- * findable by a machine that knows the ACCOUNT but not the device that wrote it.
+ * Locks in the two rules that make cloud disaster recovery work at all, and safely:
+ * a snapshot must be findable by a machine that knows the ACCOUNT but not the device
+ * that wrote it, and it must be unreachable from any other account. The second rule is
+ * newer, and its absence was not theoretical — two accounts on the default location
+ * shared one snapshots/LOC01 folder, so a fresh till restored the wrong tenant's whole
+ * database and then spent its life being refused when it tried to re-upload it.
  */
 
 import { describe, it, expect } from 'vitest';
 import {
   LATEST_FILE,
   SNAPSHOT_ROOT,
+  accountDir,
+  accountSegment,
   candidateLocationDirs,
   isSnapshotFile,
   locationDir,
@@ -19,20 +25,48 @@ import {
   snapshotTimestamp,
 } from '../utils/backupPaths';
 
+const ACCOUNT = 'ce7ed427-7f95-4852-b80e-a3739ef025a4';
+const OTHER_ACCOUNT = '6894e791-18b1-4f53-83c7-0f644312eed5';
+
 describe('Cloud snapshot addressing', () => {
-  it('keys snapshots by location first and device last', () => {
-    expect(snapshotPath('LOC01', 'DEV01', LATEST_FILE)).toBe('snapshots/LOC01/DEV01/latest.json');
+  it('keys snapshots by account first, location next and device last', () => {
+    expect(snapshotPath(ACCOUNT, 'LOC01', 'DEV01', LATEST_FILE)).toBe(
+      `snapshots/${ACCOUNT}/LOC01/DEV01/latest.json`
+    );
     // The device id must never appear before the location, otherwise a restoring
     // machine would have to guess it before it could even list the folder.
-    expect(snapshotDir('LOC01', 'DEV01').startsWith(locationDir('LOC01'))).toBe(true);
+    expect(snapshotDir(ACCOUNT, 'LOC01', 'DEV01')!.startsWith(locationDir(ACCOUNT, 'LOC01')!)).toBe(true);
+  });
+
+  it('puts two accounts on the same location in different folders', () => {
+    // The whole point: identical location and device, different tenants, no overlap.
+    const mine = snapshotDir(ACCOUNT, 'LOC01', 'DEV01')!;
+    const theirs = snapshotDir(OTHER_ACCOUNT, 'LOC01', 'DEV01')!;
+    expect(mine).not.toBe(theirs);
+    expect(mine.startsWith(accountDir(ACCOUNT)!)).toBe(true);
+    expect(theirs.startsWith(accountDir(ACCOUNT)!)).toBe(false);
+  });
+
+  it('refuses to address a snapshot when the account is unknown', () => {
+    // Null is a refusal, not a default — guessing would file it under somebody.
+    expect(accountSegment('  ')).toBeNull();
+    expect(accountDir(null)).toBeNull();
+    expect(snapshotDir(null, 'LOC01', 'DEV01')).toBeNull();
+    expect(snapshotPath(undefined, 'LOC01', 'DEV01', LATEST_FILE)).toBeNull();
+  });
+
+  it('keeps the account segment comparable to current_account_id()', () => {
+    // A storage policy compares this segment against current_account_id()::text, which
+    // Postgres renders lowercase — so unlike location and device it must not be mangled.
+    expect(accountSegment(' CE7ED427-7f95-4852-b80e-a3739ef025a4 ')).toBe(ACCOUNT);
   });
 
   it('scopes every device at a location under one listable folder', () => {
-    const tillA = snapshotDir('LOC01', 'DEV01');
-    const tillB = snapshotDir('LOC01', 'DEV02');
+    const tillA = snapshotDir(ACCOUNT, 'LOC01', 'DEV01')!;
+    const tillB = snapshotDir(ACCOUNT, 'LOC01', 'DEV02')!;
     expect(tillA).not.toBe(tillB);
-    expect(tillA.startsWith('snapshots/LOC01/')).toBe(true);
-    expect(tillB.startsWith('snapshots/LOC01/')).toBe(true);
+    expect(tillA.startsWith(`snapshots/${ACCOUNT}/LOC01/`)).toBe(true);
+    expect(tillB.startsWith(`snapshots/${ACCOUNT}/LOC01/`)).toBe(true);
   });
 
   it('normalises segments so the same place is never written to two folders', () => {
@@ -44,18 +78,20 @@ describe('Cloud snapshot addressing', () => {
   });
 
   it('searches the account location before the local one, without duplicates', () => {
-    expect(candidateLocationDirs('BRANCH2', 'LOC01')).toEqual([
-      'snapshots/BRANCH2',
-      'snapshots/LOC01',
+    expect(candidateLocationDirs(ACCOUNT, 'BRANCH2', 'LOC01')).toEqual([
+      `snapshots/${ACCOUNT}/BRANCH2`,
+      `snapshots/${ACCOUNT}/LOC01`,
     ]);
-    expect(candidateLocationDirs('LOC01', 'loc01')).toEqual(['snapshots/LOC01']);
+    expect(candidateLocationDirs(ACCOUNT, 'LOC01', 'loc01')).toEqual([`snapshots/${ACCOUNT}/LOC01`]);
   });
 
   it('drops unknown locations rather than defaulting them to LOC01', () => {
     // Defaulting a missing cloud location to LOC01 would send a restore hunting in a
     // folder that has nothing to do with the account.
-    expect(candidateLocationDirs(null, undefined, '  ')).toEqual([]);
-    expect(candidateLocationDirs(null, 'BRANCH2')).toEqual(['snapshots/BRANCH2']);
+    expect(candidateLocationDirs(ACCOUNT, null, undefined, '  ')).toEqual([]);
+    expect(candidateLocationDirs(ACCOUNT, null, 'BRANCH2')).toEqual([`snapshots/${ACCOUNT}/BRANCH2`]);
+    // And with no account there is nowhere to search at all, rather than everywhere.
+    expect(candidateLocationDirs(null, 'LOC01')).toEqual([]);
   });
 
   it('recognises hot and dated snapshot files', () => {
@@ -90,6 +126,6 @@ describe('Cloud snapshot addressing', () => {
   });
 
   it('keeps every snapshot under one scannable root', () => {
-    expect(locationDir('LOC01').startsWith(`${SNAPSHOT_ROOT}/`)).toBe(true);
+    expect(locationDir(ACCOUNT, 'LOC01')!.startsWith(`${SNAPSHOT_ROOT}/`)).toBe(true);
   });
 });

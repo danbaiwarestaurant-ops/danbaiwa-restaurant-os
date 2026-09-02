@@ -13,7 +13,7 @@ import { CloudReconnectModal } from './CloudReconnectModal';
  * your data yet" is now visually distinct from the one state that means it does.
  */
 export const SyncIndicator: React.FC = () => {
-  const { pendingCount, stuckCount, cloudConnected, cloudError, isOnline, isSyncing, forceSyncNow } =
+  const { pendingCount, stuckCount, queueFault, cloudConnected, cloudError, isOnline, isSyncing, forceSyncNow } =
     useSyncStore();
   const [isReconnectOpen, setIsReconnectOpen] = useState(false);
 
@@ -39,13 +39,24 @@ export const SyncIndicator: React.FC = () => {
   } else if (stuckCount > 0) {
     tone = 'bg-amber-100 border-amber-500 text-amber-950';
     label = `${stuckCount} Stuck • ${pendingCount} Queued`;
-    title = `${stuckCount} record(s) have been rejected by the cloud repeatedly. They are still retried and have not been lost, but they need attention — check the console for the last error.`;
+    // The reason was recorded on the rows all along and shown nowhere, which left the
+    // only actionable state in the whole badge saying "check the console".
+    title = `${stuckCount} record(s) have been rejected by the cloud repeatedly. They are still retried and have not been lost, but they need attention.${
+      queueFault ? `\n\nMost common reason (${queueFault.count} record(s)):\n${queueFault.reason}` : ''
+    }`;
     Icon = AlertTriangle;
   } else if (pendingCount > 0) {
-    tone = 'bg-amber-50 border-amber-400 text-amber-900';
-    label = `Sync (${pendingCount} pending)`;
-    title = 'Records are queued and on their way to the cloud.';
-    Icon = RefreshCw;
+    // A queue that is being refused looks identical to a busy one if all you count is
+    // rows, so say which of the two this is.
+    const rejected = Boolean(queueFault);
+    tone = rejected
+      ? 'bg-amber-100 border-amber-500 text-amber-950'
+      : 'bg-amber-50 border-amber-400 text-amber-900';
+    label = rejected ? `Sync Blocked (${pendingCount})` : `Sync (${pendingCount} pending)`;
+    title = rejected
+      ? `The cloud is refusing queued records, so the count is not moving. Nothing is lost — they stay queued and keep retrying.\n\nMost common reason (${queueFault!.count} record(s)):\n${queueFault!.reason}\n\nClick to retry them all now.`
+      : 'Records are queued and on their way to the cloud.';
+    Icon = rejected ? AlertTriangle : RefreshCw;
   } else {
     tone = 'bg-emerald-50 border-emerald-400 text-emerald-950';
     label = 'Cloud Synced';
