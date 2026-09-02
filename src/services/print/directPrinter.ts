@@ -13,15 +13,23 @@
  *
  * Two transports, because thermal printers present themselves in two different ways:
  *
- *   Web Serial — the printer (or its USB-to-serial bridge) shows up as a COM port. The
- *     vendor's Windows print driver is irrelevant here; the port is a separate device
- *     and both can coexist. This is the easy case and should always be tried first.
+ *   Web Serial — the printer shows up as a COM port the browser may open. This works
+ *     when the port is genuinely free: a USB-to-serial bridge (CH340, CP210x, FTDI)
+ *     with no Windows printer bound to it, or a real serial printer. It does NOT work
+ *     merely because a COM port exists. A printer installed under Printers & scanners
+ *     holds its port exclusively, and the browser is locked out of it for as long as
+ *     that driver exists — which is the usual outcome for a USB printer installed the
+ *     normal way, and why pairSerial proves the port opens before recording anything.
  *
- *   WebUSB — a USB printer with no COM port. On Windows the class driver (usbprint.sys)
- *     owns the interface and will not release it, so claimInterface fails until the
- *     device is rebound to WinUSB. That swap also removes the printer from "Printers &
- *     scanners", so the agent path stops working on that machine. Deliberately never
- *     attempted automatically — see pairUsb.
+ *   WebUSB — a USB printer with no usable COM port. On Windows the class driver
+ *     (usbprint.sys) owns the interface and will not release it, so claimInterface
+ *     fails until the device is rebound to WinUSB. That swap also removes the printer
+ *     from "Printers & scanners", so the agent path stops working on that machine.
+ *     Deliberately never attempted automatically — see pairUsb.
+ *
+ * A USB printer with its vendor driver installed is normally neither of these, and
+ * belongs on the print agent instead: that goes through the driver rather than around
+ * it, and is the reason the agent still exists.
  *
  * Permission survives reloads and offline use: the browser remembers granted devices per
  * origin, so pairing is once per till, not once per shift.
@@ -109,12 +117,39 @@ async function findGrantedSerialPort(link: PrinterLink | null): Promise<any | nu
   );
 }
 
+/**
+ * What a failed port open actually means, in words the person at the till can act on.
+ *
+ * The browser says "Failed to open serial port" for every cause, and by far the most
+ * common one here is not a broken port: it is the Windows print driver already holding
+ * it. A printer installed under Printers & scanners owns its port exclusively, so the
+ * browser is locked out for as long as that driver exists — no amount of retrying, and
+ * no setting in this app, will change that. The print agent is the answer in that case,
+ * because it goes through the driver rather than around it.
+ */
+function explainOpenFailure(e: any): Error {
+  const raw = String(e?.message || e || '');
+  if (/failed to open|access denied|in use|NetworkError/i.test(raw)) {
+    return new Error(
+      'The browser could not open that port. Another program already has it — on a USB ' +
+        'printer this is almost always the Windows printer driver, which holds its port ' +
+        'exclusively. This printer cannot be reached directly; use the printer helper ' +
+        'program instead (Step 2 on this page).'
+    );
+  }
+  return new Error(raw || 'Could not open the printer port.');
+}
+
 async function writeSerial(port: any, bytes: Uint8Array, baudRate: number): Promise<void> {
   // Opening a port already open throws; reopening one left open by a previous ticket is
   // both slower and a common source of "the second receipt never prints".
   let opened = false;
   if (!port.writable) {
-    await port.open({ baudRate });
+    try {
+      await port.open({ baudRate });
+    } catch (e) {
+      throw explainOpenFailure(e);
+    }
     opened = true;
   }
 
@@ -213,6 +248,21 @@ export async function pairSerial(baudRate = 9600): Promise<PairResult> {
 
   try {
     const port = await nav().serial.requestPort();
+
+    // Prove the port can actually be opened BEFORE recording the pairing.
+    //
+    // Choosing a port from the browser's list grants permission; it says nothing about
+    // whether anything can be written to it. Saving on the strength of the grant alone
+    // meant a till could report itself paired and then fail on every real ticket — and
+    // worse, a stored-but-dead pairing takes precedence over the print agent, so a
+    // machine that WAS printing correctly stops.
+    try {
+      await port.open({ baudRate });
+      await port.close();
+    } catch (e) {
+      return { ok: false, message: explainOpenFailure(e).message };
+    }
+
     const info = port.getInfo?.() ?? {};
     const link: PrinterLink = {
       transport: 'serial',
@@ -225,7 +275,7 @@ export async function pairSerial(baudRate = 9600): Promise<PairResult> {
       pairedAt: new Date().toISOString(),
     };
     await savePrinterLink(link);
-    return { ok: true, link, message: 'Printer paired. Receipts will now print silently on this till.' };
+    return { ok: true, link, message: 'Printer connected. Print a test receipt to confirm.' };
   } catch (e: any) {
     // A cancelled chooser throws exactly like a real failure; it is not one.
     if (e?.name === 'NotFoundError') {

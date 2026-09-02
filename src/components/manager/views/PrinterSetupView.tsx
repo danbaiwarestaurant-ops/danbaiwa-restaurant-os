@@ -226,11 +226,19 @@ export const PrinterSetupView: React.FC = () => {
                 <span className="font-mono">{probe.link.label || probe.link.transport}</span>
               </div>
             ) : (
-              <p className="text-xs font-semibold text-slate-600">
-                Make sure the printer is plugged in and switched on, then press the button
-                below. Your browser will show a small list — pick the printer and press
-                Connect.
-              </p>
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-600">
+                  Make sure the printer is plugged in and switched on, then press the button
+                  below. Your browser will show a small list — pick the printer and press
+                  Connect.
+                </p>
+                <p className="text-[11px] font-semibold text-amber-900 bg-amber-50 border border-amber-300 p-2">
+                  <strong>Printer plugged in by USB and already set up in Windows?</strong>{' '}
+                  It will usually not work here — Windows keeps that printer to itself. Try
+                  this once, and if it fails, go straight to Step 2. That is the normal
+                  route for USB printers, and it works just as silently.
+                </p>
+              </div>
             )}
 
             <div className="flex flex-wrap gap-2">
@@ -386,6 +394,8 @@ export const PrinterSetupView: React.FC = () => {
               'The paper size is wrong. Change it at the top of this page and print a test receipt.'],
             ['The printer list was empty',
               'That printer cannot be reached directly. Do Step 2 — the helper program handles it.'],
+            ['"Failed to open serial port"',
+              'Windows is holding that port — normally because the printer is installed under Printers & scanners, which does not share. Nothing here can change that. Do Step 2; the helper prints through Windows instead of around it.'],
             ['Nothing prints and there is no error',
               'Check the printer is not paused in Windows: Settings, then Printers & scanners, then your printer. Also check it has paper.'],
           ].map(([q, a]) => (
