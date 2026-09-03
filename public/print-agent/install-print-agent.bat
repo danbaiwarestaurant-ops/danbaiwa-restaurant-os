@@ -89,6 +89,14 @@ echo  [3/5] Installing to !DEST! ...
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":9100" ^| findstr "LISTENING"') do (
   taskkill /F /PID %%P >nul 2>&1
 )
+
+:: The agent keeps a small helper process alive holding the printer open. It exits by
+:: itself when the agent's pipe closes, but a killed parent gets no chance to say so
+:: politely, and a helper still running would hold the file we are about to replace.
+taskkill /F /IM danbaiwa-rawprint.exe >nul 2>&1
+for /f "delims=" %%E in ('dir /b "!DEST!\danbaiwa-rawprint-v*.exe" 2^>nul') do (
+  taskkill /F /IM "%%E" >nul 2>&1
+)
 timeout /t 1 /nobreak >nul
 if not exist "!DEST!" mkdir "!DEST!" >nul 2>&1
 copy /y "%SRC%" "!DEST!\print-server.cjs" >nul
@@ -100,7 +108,10 @@ if errorlevel 1 (
 
 :: Rebuilt from the new source on next start. Deleting it costs one second, and
 :: keeping a stale one would pair a new agent with the old spooling behaviour.
-if exist "!DEST!\danbaiwa-rawprint.exe" del /f /q "!DEST!\danbaiwa-rawprint.exe" >nul 2>&1
+:: The agent now names the helper after its own version and cleans up the rest itself,
+:: so this is belt and braces for a machine upgraded from an older build.
+del /f /q "!DEST!\danbaiwa-rawprint.exe" >nul 2>&1
+del /f /q "!DEST!\danbaiwa-rawprint-v*.exe" >nul 2>&1
 
 :: The launcher carries this till's settings, so the agent itself stays generic
 :: and can be replaced by copying a newer file over it.

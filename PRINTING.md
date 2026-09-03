@@ -143,6 +143,25 @@ port is taken — but it is one more thing to explain later.
 deliberately: a task running as SYSTEM cannot see a printer that was installed for one
 user only, and would silently print nothing.
 
+### Speed, and where the wait actually is
+
+The agent starts the raw-print helper once and keeps it alive with an open printer
+handle. A receipt costs a pipe write — about **1ms**, measured — where launching a
+process per receipt cost **129ms** on a fast machine and more on a till.
+
+That is the whole of the app’s share. Anything left is the **Windows print spooler**,
+which queues each job to disk and schedules it, and which no amount of work in this
+repository can shorten. To remove it:
+
+> Settings → Printers & scanners → your printer → Printer properties → **Advanced** →
+> **Print directly to the printer**. On the same tab, make sure *Start printing after
+> last page is spooled* is not selected.
+
+To tell the two apart, print a test receipt from Manager Console → Printer Setup: it
+reports how many milliseconds the app took. A small number there with a slow paper feed
+means the spooler, not the app. The agent also logs its own timing per job
+(`OK ticket #123 -> PRINTER (raw, 4ms)`).
+
 ### Updating it later
 
 Copy the newer `print-server.cjs` over

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Ticket } from '../types/ticket';
+import { Ticket, TicketTender } from '../types/ticket';
 import { dbService } from '../services/db/IndexedDbService';
 import { generateCompositeKey } from '../utils/compositeKey';
 import { PrintAdapter } from '../services/print/PrintAdapter';
@@ -30,7 +30,8 @@ interface TicketState {
   printError: string | null;
   clearPrintError: () => void;
   loadTickets: (userId?: string) => Promise<void>;
-  createAndPrintTicket: (amount: number, cashierId?: string) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
+  /** Tender defaults to cash: the fast path at the counter must stay the fast path. */
+  createAndPrintTicket: (amount: number, cashierId?: string, tender?: TicketTender) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
   voidTicket: (ticketId: string, reason: string, voidedBy: string) => Promise<void>;
   triggerFlash: (amount: number) => void;
@@ -54,7 +55,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     set({ tickets, ticketsTodayCount: todayCount, isLoading: false });
   },
 
-  createAndPrintTicket: async (amount: number, cashierId: string = '') => {
+  createAndPrintTicket: async (amount: number, cashierId: string = '', tender: TicketTender = 'cash') => {
     const config = useDeviceStore.getState().config;
     const locationId = config.locationId || 'LOC01';
     const deviceId = config.deviceId || 'DEV01';
@@ -84,6 +85,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       amount,
       currency: config.currencySymbol || '₦',
       status: 'paid',
+      tender,
       createdAt: nowIso,
       cashierId,
       qrPayload: `TICKET|${compositeId}|${amount}|${nowIso}`,

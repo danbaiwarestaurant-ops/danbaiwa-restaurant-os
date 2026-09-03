@@ -10,7 +10,7 @@ import {
   isSerialSupported, isUsbSupported, directPrintUnavailableReason,
   printDirect, PrinterLink,
 } from '../../../services/print/directPrinter';
-import { buildTicketReceipt } from '../../../services/print/escpos';
+import { buildTicketReceipt, bytesToBase64 } from '../../../services/print/escpos';
 
 /**
  * Printer setup, written for whoever is standing at the till rather than for whoever
@@ -47,7 +47,7 @@ const AGENT_HEALTH = 'http://127.0.0.1:9100/health';
  * spent about a second recompiling itself for every receipt — so "it is running" is not
  * the same question as "it is the right one", and the page has to ask both.
  */
-const EXPECTED_AGENT_VERSION = 2;
+const EXPECTED_AGENT_VERSION = 3;
 
 async function probeAgent(): Promise<number | null> {
   try {
@@ -110,7 +110,15 @@ export const PrinterSetupView: React.FC = () => {
     }
   };
 
-  /** Proves the whole path on real paper — bytes, transport and roll width together. */
+  /**
+   * Proves the whole path on real paper — bytes, transport and roll width together.
+   *
+   * It goes down whichever route a real ticket would, and reports how long that route
+   * took. The timing is not decoration: it separates a slow app from a slow printer,
+   * which is otherwise guesswork. If this says 200ms and the paper still appears a
+   * second later, nothing left in this app can help — the wait is the Windows spooler
+   * and the printer, and the note below says what to do about it.
+   */
   const handleTest = () =>
     run(async () => {
       try {
@@ -121,8 +129,39 @@ export const PrinterSetupView: React.FC = () => {
           timestampText: new Date().toLocaleString(),
           paperWidthMm: widthMm,
         });
-        await printDirect(bytes);
-        return { ok: true, message: 'Test receipt sent. Check the printer.' };
+
+        const startedAt = performance.now();
+
+        if (probe?.status === 'ready-direct') {
+          await printDirect(bytes);
+        } else if (probe?.agentRunning) {
+          const res = await fetch('http://127.0.0.1:9100/print', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ escpos: bytesToBase64(bytes), ticketId: 'PRINTER-TEST' }),
+            signal: AbortSignal.timeout(20000),
+          });
+          const result = await res.json();
+          if (!res.ok || !result.success) {
+            throw new Error(result.error || `The helper answered ${res.status}.`);
+          }
+        } else {
+          return {
+            ok: false,
+            message:
+              'Nothing on this till can print silently yet. Finish Step 1 or Step 2 below first.',
+          };
+        }
+
+        const ms = Math.round(performance.now() - startedAt);
+        return {
+          ok: true,
+          message:
+            `Test receipt sent in ${ms}ms. Check the printer. ` +
+            (ms > 800
+              ? 'That is slower than it should be — see "If receipts are slow" below.'
+              : 'If the paper still takes noticeably longer than that, the delay is in Windows, not the app — see "If receipts are slow" below.'),
+        };
       } catch (e: any) {
         return { ok: false, message: e?.message || 'Test print failed.' };
       }
@@ -196,9 +235,10 @@ export const PrinterSetupView: React.FC = () => {
               The printer helper on this computer is out of date
             </div>
             <p className="text-[11px] font-semibold text-amber-900">
-              Receipts still print, but slowly — the older helper rebuilt part of itself
-              for every single ticket. Download both files again from Step 2 below and run
-              the installer; it replaces the running helper in place.
+              Receipts still print, but slower than they need to — every version of the
+              helper so far has been mainly about removing delay between the button and the
+              paper. Download both files again from Step 2 below and run the installer; it
+              replaces the running helper in place.
             </p>
           </div>
         </div>
@@ -437,6 +477,8 @@ export const PrinterSetupView: React.FC = () => {
               'Windows is holding that port — normally because the printer is installed under Printers & scanners, which does not share. Nothing here can change that. Do Step 2; the helper prints through Windows instead of around it.'],
             ['Nothing prints and there is no error',
               'Check the printer is not paused in Windows: Settings, then Printers & scanners, then your printer. Also check it has paper.'],
+            ['If receipts are slow',
+              'Print a test receipt above and read the time it reports. Under about 300ms means the app has already handed the receipt over and the remaining wait is Windows queuing it. Fix that in Printers & scanners: open your printer, Printer properties, Advanced tab, and choose "Print directly to the printer". That removes the queue entirely. On the same tab make sure "Start printing after last page is spooled" is not selected. If the test itself reports a slow time, your helper is out of date — redo Step 2.'],
           ].map(([q, a]) => (
             <div key={q}>
               <dt className="font-black uppercase tracking-wide text-slate-800">{q}</dt>

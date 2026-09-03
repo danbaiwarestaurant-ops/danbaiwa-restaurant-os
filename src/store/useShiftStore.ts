@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Shift } from '../types/shift';
 import { dbService } from '../services/db/IndexedDbService';
 import { calculateShiftReconciliation } from '../utils/reconciliation';
-import { shiftTickets, summariseTickets } from '../utils/analytics';
+import { shiftTickets, splitByTender } from '../utils/analytics';
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';
 import { useDeviceStore } from './useDeviceStore';
@@ -84,10 +84,12 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     // Previously this summed *every* ticket in the store with no window at all, so
     // expected cash was the account's lifetime revenue and the variance written against
     // the shift was nonsense. shiftTickets bounds it to this cashier, this shift.
+    // Cash only — card and transfer sales are revenue but never entered the drawer, so
+    // counting them into expected cash would flag every non-cash sale as a shortage.
     const cashierTickets = await dbService.getTickets(shift.cashierId);
-    const totalCashTickets = summariseTickets(
+    const totalCashTickets = splitByTender(
       shiftTickets(cashierTickets, { ...shift, closedAt: new Date().toISOString() })
-    ).revenue;
+    ).cash;
 
     const expenses = await dbService.getExpenses(shift.id);
     const approvedExpenses = expenses.filter(e => e.status === 'approved').reduce((sum, e) => sum + e.amount, 0);

@@ -5,6 +5,45 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-03 — Two seconds still sat between the button and the paper
+
+**What the user saw:** silent printing worked and was no longer five seconds, but a
+receipt still took about two seconds to appear. The point of the whole exercise was a
+cashier not waiting, so "faster" was not the bar.
+
+**Root cause:** two separate ones, and only the first belonged to this code.
+
+The agent launched a fresh .NET process for every receipt and opened the printer inside
+it. Measured on this machine that is **129ms per receipt**, and a till is slower than
+this machine. Removing the per-receipt compile in the previous round had left the
+per-receipt *process* untouched — the same mistake one layer down.
+
+The rest is the Windows print spooler, which is not ours to remove. By default a printer
+spools each job to disk and schedules it, and the delay between EndDoc and the paper
+moving is the spooler service, not the app. The Advanced tab of the printer has a
+"Print directly to the printer" setting that skips it entirely.
+
+**Fix:** the helper is now started ONCE, with `--serve`, and stays alive holding an open
+printer handle. Receipts go down its stdin as a length header and that many bytes; it
+answers OK or ERR per receipt. Measured on the same machine that is **1.1ms**, against
+129ms before. A helper that answers ERR is believed rather than retried through the old
+path, because a receipt that may already be on paper must not be printed twice.
+
+The helper is named after the agent version (`danbaiwa-rawprint-v3.exe`) so an older
+build can never be silently reused — the previous name would have been found on disk and
+kept forever.
+
+**And the part that is not code:** the printer setup tab now times the test print and
+says what the number means. Under ~300ms and the app has already handed the receipt over
+— any remaining wait is the spooler, and the page names the checkbox that removes it.
+Both previous rounds of this were settled by measuring, so the agent now reports its own
+milliseconds on every job rather than leaving the next round to guesswork.
+
+**Files:** `print-server.cjs`, `install-print-agent.bat`,
+`src/components/manager/views/PrinterSetupView.tsx`, `PRINTING.md`.
+
+---
+
 ## 2026-09-03 — The print agent had to be started by hand after every reboot
 
 **What the user saw:** step 4 of `install-print-agent.bat` reported that it could not

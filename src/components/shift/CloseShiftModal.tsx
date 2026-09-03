@@ -5,7 +5,7 @@ import { useTicketStore } from '../../store/useTicketStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
 import { formatCurrency } from '../../utils/currency';
 import { calculateShiftReconciliation } from '../../utils/reconciliation';
-import { shiftTickets, shiftExpenses, summariseTickets, sumApprovedExpenses } from '../../utils/analytics';
+import { shiftTickets, shiftExpenses, splitByTender, sumApprovedExpenses } from '../../utils/analytics';
 
 interface CloseShiftModalProps {
   isOpen: boolean;
@@ -26,13 +26,16 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
   // shift opened, and the expenses charged to it. Summing the whole store instead — which
   // is what this did — showed the cashier an expected-cash figure covering every ticket
   // the till had ever issued, so the drawer could never balance.
-  const totalCashTickets = summariseTickets(shiftTickets(tickets, currentShift)).revenue;
+  // Split by how the customer paid: only the cash half can be held against a drawer count.
+  // Card and transfer are shown so the cashier can see their whole shift, but they are not
+  // money anyone can produce at the counter.
+  const sales = splitByTender(shiftTickets(tickets, currentShift));
   const approvedExpenses = sumApprovedExpenses(shiftExpenses(expenses, currentShift));
 
   const countedNum = parseFloat(countedCash) || 0;
   const recon = calculateShiftReconciliation(
     currentShift.openingFloat,
-    totalCashTickets,
+    sales.cash,
     approvedExpenses,
     countedNum
   );
@@ -70,18 +73,34 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
                 <span className="font-mono font-bold">{formatCurrency(recon.openingFloat)}</span>
               </div>
             )}
-            <div className="flex justify-between text-slate-600 font-medium">
-              <span>(+) Total Cash Ticket Sales:</span>
-              <span className="font-mono font-bold text-emerald-600">+{formatCurrency(recon.totalCashTickets)}</span>
+            <div className="flex justify-between font-bold text-slate-900">
+              <span>Total Sales This Shift:</span>
+              <span className="font-mono">{formatCurrency(sales.total)}</span>
             </div>
-            <div className="flex justify-between text-slate-600 font-medium">
+            <div className="flex justify-between text-slate-600 font-medium pl-3">
+              <span>Cash (goes in drawer):</span>
+              <span className="font-mono font-bold text-emerald-600">{formatCurrency(sales.cash)}</span>
+            </div>
+            <div className="flex justify-between text-slate-600 font-medium pl-3">
+              <span>Transfer / POS (not in drawer):</span>
+              <span className="font-mono font-bold text-sky-600">{formatCurrency(sales.transfer)}</span>
+            </div>
+            <div className="border-t border-slate-300 pt-2 flex justify-between text-slate-600 font-medium">
               <span>(−) Approved Shift Expenses:</span>
               <span className="font-mono font-bold text-rose-600">−{formatCurrency(recon.totalApprovedExpenses)}</span>
             </div>
             <div className="border-t border-slate-300 pt-2 flex justify-between font-bold text-slate-900 text-sm">
-              <span>Expected Cash Total:</span>
+              <span>Expected Cash In Drawer:</span>
               <span className="font-mono text-amber-600">{formatCurrency(recon.expectedCash)}</span>
             </div>
+            {/* Says out loud why the drawer target is smaller than the sales figure above it —
+                without this line a cashier reads the gap as money they have lost. */}
+            {sales.transfer > 0 && (
+              <p className="text-[10px] text-slate-500 leading-snug pt-1">
+                Transfer / POS sales are excluded from the drawer count — only cash is
+                counted here.
+              </p>
+            )}
           </div>
 
           <div>

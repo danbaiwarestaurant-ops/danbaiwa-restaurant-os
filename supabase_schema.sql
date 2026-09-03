@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   amount      NUMERIC(12, 2) NOT NULL,
   currency    TEXT NOT NULL DEFAULT '₦',
   status      TEXT NOT NULL DEFAULT 'paid',
+  tender      TEXT NOT NULL DEFAULT 'cash', -- 'cash' | 'transfer' (card and bank transfer)
   cashier_id  TEXT NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
   qr_payload  TEXT NOT NULL,
@@ -190,6 +191,10 @@ ON CONFLICT (id) DO NOTHING;
 
 -- `updated_at`, stamped by Postgres itself (never trusted from the client) so
 -- clock skew between tills can't corrupt the merge order.
+-- Cash / transfer split. Every ticket written before this column existed was a drawer
+-- sale, so the default backfills them correctly and no data migration is needed.
+ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS tender TEXT NOT NULL DEFAULT 'cash';
+
 ALTER TABLE users    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE shifts   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());

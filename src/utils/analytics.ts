@@ -48,6 +48,36 @@ export function summariseTickets(tickets: Ticket[]): SalesTotals {
   };
 }
 
+/**
+ * Cash is the default reading of a ticket with no tender recorded.
+ *
+ * Tickets issued before the cash/transfer split existed carry no `tender`, and every one
+ * of them was a drawer sale. Treating an absent tender as anything else would quietly
+ * remove historic cash from expected cash and flag old shifts as short.
+ */
+export function isCashTicket(t: Ticket): boolean {
+  return (t.tender ?? 'cash') === 'cash';
+}
+
+export interface TenderSplit {
+  /** All non-void revenue, however it was paid. */
+  total: number;
+  /** The part that went into the drawer — the only part a cash count can be checked against. */
+  cash: number;
+  /** Card and bank transfer. Real revenue, but never in the drawer. */
+  transfer: number;
+}
+
+/** Splits a set of tickets into what hit the drawer and what did not. Voids are excluded. */
+export function splitByTender(tickets: Ticket[]): TenderSplit {
+  const valid = tickets.filter(isRevenueTicket);
+  const total = valid.reduce((sum, t) => sum + (t.amount || 0), 0);
+  const cash = valid
+    .filter(isCashTicket)
+    .reduce((sum, t) => sum + (t.amount || 0), 0);
+  return { total, cash, transfer: total - cash };
+}
+
 export function sumApprovedExpenses(expenses: Expense[]): number {
   return expenses
     .filter((e) => e.status === 'approved')
@@ -147,9 +177,11 @@ export function reconcileShift(
     };
   }
 
+  // Cash only: a card or transfer sale is revenue, but it never reached the drawer, so
+  // holding the cashier's count against it would show a shortage they cannot produce.
   return calculateShiftReconciliation(
     shift.openingFloat || 0,
-    summariseTickets(shiftTickets(tickets, shift)).revenue,
+    splitByTender(shiftTickets(tickets, shift)).cash,
     sumApprovedExpenses(shiftExpenses(expenses, shift)),
     shift.countedCash ?? 0
   );
