@@ -3,6 +3,7 @@ import { useDeviceStore } from '../../store/useDeviceStore';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useShiftStore } from '../../store/useShiftStore';
 import { SyncIndicator } from './SyncIndicator';
+import { formatCurrency } from '../../utils/currency';
 import { Settings, LayoutDashboard, DollarSign, Lock } from 'lucide-react';
 import { UserMenu } from './UserMenu';
 
@@ -12,6 +13,8 @@ interface HeaderProps {
   onOpenExpenseModal: () => void;
   onToggleManagerView: () => void;
   onLockTill: () => void;
+  /** Closes the open shift first — see App's handleLogout. */
+  onLogout: () => void;
   isManagerView: boolean;
 }
 
@@ -21,10 +24,11 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExpenseModal,
   onToggleManagerView,
   onLockTill,
+  onLogout,
   isManagerView,
 }) => {
   const { config } = useDeviceStore();
-  const { ticketsTodayCount } = useTicketStore();
+  const { ticketsTodayCount, ticketsTodayTotal } = useTicketStore();
   const { currentShift } = useShiftStore();
 
   return (
@@ -96,16 +100,28 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
 
         {/* Identity + session actions, tucked behind one chip */}
-        <UserMenu onLockTill={onLockTill} />
+        <UserMenu onLockTill={onLockTill} onLogout={onLogout} />
       </div>
 
-      {/* Tickets Today Counter */}
-      <div className="text-right border-l-2 border-slate-200 pl-4">
-        <div className="text-3xl font-black font-mono text-amber-600 leading-none">
-          {ticketsTodayCount}
+      {/* Tickets Today — the count, and what it came to. Both exclude voids, and both
+          run to the local midnight rather than a UTC one. */}
+      <div className="flex items-stretch gap-4 border-l-2 border-slate-200 pl-4">
+        <div className="text-right">
+          <div className="text-3xl font-black font-mono text-amber-600 leading-none">
+            {ticketsTodayCount}
+          </div>
+          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-0.5">
+            Tickets Today
+          </div>
         </div>
-        <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-0.5">
-          Tickets Today
+
+        <div className="text-right border-l border-slate-200 pl-4">
+          <div className="text-3xl font-black font-mono text-slate-900 leading-none tabular-nums">
+            {formatCurrency(ticketsTodayTotal, config.currencySymbol || '₦')}
+          </div>
+          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-0.5">
+            Total Today
+          </div>
         </div>
       </div>
 

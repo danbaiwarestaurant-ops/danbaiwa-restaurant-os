@@ -14,7 +14,7 @@
  */
 
 import { IDbService } from './IDbService';
-import { Ticket } from '../../types/ticket';
+import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
 import { OutboxItem } from '../../types/sync';
@@ -283,6 +283,32 @@ export class IndexedDbService implements IDbService {
       } else {
         await db.tickets.update(ticketId, { status, updatedAt: now });
       }
+      const updated = await db.tickets.get(ticketId);
+      if (updated) await db.outbox.add(queueOutboxRow('tickets', 'UPDATE', updated));
+    });
+  }
+
+  async updateTicketTender(ticketId: string, tender: TicketTender, actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await db.transaction('rw', db.tickets, db.outbox, db.auditLogs, async () => {
+      const before = await db.tickets.get(ticketId);
+      if (!before) return;
+      // Nothing changed, so nothing to log — retagging cash as cash should not fill the
+      // audit trail with entries a manager has to read past.
+      if ((before.tender ?? 'cash') === tender) return;
+
+      await db.tickets.update(ticketId, { tender, updatedAt: now });
+      const entry = auditLogRow({
+        entity: 'ticket',
+        entityId: ticketId,
+        action: 'TENDER_CHANGE',
+        actorId,
+        reason: `${before.tender ?? 'cash'} → ${tender}`,
+        timestamp: now,
+      });
+      await db.auditLogs.add(entry);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', entry));
+
       const updated = await db.tickets.get(ticketId);
       if (updated) await db.outbox.add(queueOutboxRow('tickets', 'UPDATE', updated));
     });

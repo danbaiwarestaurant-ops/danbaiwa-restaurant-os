@@ -26,6 +26,9 @@ export const PinModal: React.FC<PinModalProps> = ({ isOpen, purpose, onClose }) 
   // A screen lock is not an authority check, so it should not call itself one — and the
   // admin-key recovery route has no business on it.
   const isScreenLock = pinModalScope === 'session';
+  // The cashier signing for their own action, not a manager authorising it — so the modal
+  // must not tell them to fetch one.
+  const isCashierSignature = pinModalScope === 'cashier';
 
   useEffect(() => {
     if (isOpen) {
@@ -165,15 +168,25 @@ export const PinModal: React.FC<PinModalProps> = ({ isOpen, purpose, onClose }) 
     }
   };
 
+  // z-[60] puts this above every other modal (all z-50): a PIN challenge is raised *from*
+  // one — logging an expense, voiding a ticket — and at equal z-index it rendered behind
+  // the modal that asked for it, leaving the cashier facing a form that had stopped
+  // responding to anything.
   return (
-    <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xs z-50 flex items-center justify-center p-4 selection:bg-amber-500 selection:text-white">
+    <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xs z-[60] flex items-center justify-center p-4 selection:bg-amber-500 selection:text-white">
       <div className="bg-white border-4 border-slate-900 w-full max-w-sm overflow-hidden shadow-2xl rounded-none">
         {/* Header */}
         <div className="bg-slate-900 text-white p-4 flex items-center justify-between border-b-2 border-amber-500">
           <div className="flex items-center gap-2">
             <Lock className="w-5 h-5 text-amber-500" />
             <h3 className="font-black text-sm uppercase tracking-wider">
-              {isRecoveryMode ? 'Admin Recovery' : isScreenLock ? 'Till Locked' : 'Manager Authorization'}
+              {isRecoveryMode
+                ? 'Admin Recovery'
+                : isScreenLock
+                ? 'Till Locked'
+                : isCashierSignature
+                ? 'Confirm With Your PIN'
+                : 'Manager Authorization'}
             </h3>
           </div>
           {/* Same reason: no dismiss control on a locked screen. */}
@@ -192,15 +205,20 @@ export const PinModal: React.FC<PinModalProps> = ({ isOpen, purpose, onClose }) 
           {!isRecoveryMode ? (
             <>
               <p className="text-xs text-slate-600 font-bold uppercase mb-1 text-center">
-                {purpose || 'Enter Manager PIN to Proceed'}
+                {purpose || (isCashierSignature ? 'Enter Your PIN to Confirm' : 'Enter Manager PIN to Proceed')}
               </p>
+              {isCashierSignature && activeUser && (
+                <p className="text-[11px] text-slate-500 font-semibold normal-case mb-4 text-center">
+                  Signed as {activeUser.name}. This goes on the record against your shift.
+                </p>
+              )}
               {isScreenLock && activeUser && (
                 <p className="text-[11px] text-slate-500 font-semibold normal-case mb-4 text-center">
                   Signed in as {activeUser.name}. Enter your own PIN to carry on — a manager's
                   PIN also works.
                 </p>
               )}
-              {!isScreenLock && <div className="mb-4" />}
+              {!isScreenLock && !isCashierSignature && <div className="mb-4" />}
 
               {/* PIN display. Grows past four boxes as a longer PIN is typed — it was fixed
                   at four, so digits five to eight vanished as they were entered and a
@@ -268,8 +286,9 @@ export const PinModal: React.FC<PinModalProps> = ({ isOpen, purpose, onClose }) 
                 </button>
               </div>
 
-              {/* Emergency Recovery Option — an admin-account route, not an unlock one. */}
-              {!isScreenLock && (
+              {/* Emergency Recovery Option — an admin-account route, not an unlock one,
+                  and not something to dangle in front of a cashier signing for a payout. */}
+              {!isScreenLock && !isCashierSignature && (
               <div className="text-center border-t border-slate-200 pt-3">
                 <button
                   type="button"

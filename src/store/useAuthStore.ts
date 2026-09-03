@@ -261,7 +261,7 @@ interface AuthState {
    * alone who locked the till — or simply let the five-minute idle timer fire — could not
    * get back into it without fetching the owner.
    */
-  pinModalScope: 'admin' | 'session';
+  pinModalScope: 'admin' | 'session' | 'cashier';
 
   /**
    * True while an admin PIN has unlocked the manager console.
@@ -341,8 +341,15 @@ interface AuthState {
    * the current admin PIN, since holding the key is equivalent to knowing the PIN.
    */
   regenerateRecoveryKey: (pin: string) => Promise<{ ok: boolean; key?: string; message?: string }>;
-  switchCashierSession: (userId: string, pin: string) => Promise<boolean>;
-  
+
+  /**
+   * There is deliberately no "switch cashier" action any more.
+   *
+   * A shift now opens at sign-in and closes at sign-out, so swapping the person at the
+   * till without passing through both is what would leave one cashier's takings sitting
+   * inside another's shift. Handing over is: log out (count the drawer), log in.
+   */
+
   /**
    * Re-establishes this browser's Supabase session from the admin PIN, without needing
    * a full log out / log back in. Needed because the cloud password is derived from the
@@ -354,7 +361,7 @@ interface AuthState {
   openPinModal: (
     purpose: string,
     onVerify: (success: boolean) => void,
-    scope?: 'admin' | 'session'
+    scope?: 'admin' | 'session' | 'cashier'
   ) => void;
   closePinModal: () => void;
   validatePin: (pin: string) => Promise<boolean>;
@@ -461,8 +468,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Every account, deactivated ones included. They have to stay visible: the roster is
       // where an admin reactivates someone, and a deactivated cashier's past tickets must
       // still resolve to their name rather than reading "Unknown cashier" for ever.
-      // Anywhere that must not *offer* a disabled account filters on status itself — the
-      // switch-cashier picker and switchCashierSession below, loginUser, validatePin.
+      // Anywhere that must not *offer* a disabled account filters on status itself —
+      // loginUser and validatePin.
       users,
       activeUser,
       isAuthenticated,
@@ -1303,22 +1310,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     };
   },
 
-  switchCashierSession: async (userId: string, pin: string) => {
-    const user = get().users.find(u => u.id === userId);
-    // A deactivated account must not be a way back in. The roster now lists them, so this
-    // check is what keeps "visible in the console" from meaning "usable at the till".
-    if (!user || user.status !== 'active') return false;
-
-    const isValid = await verifySecret(pin, user.pinHash, user.pinSalt);
-    if (isValid) {
-      localStorage.setItem('ticket_pos_session_user_id', user.id);
-      // Handing the till to a different person ends any admin authority the previous
-      // console session had proven.
-      set({ activeUser: user, hasAdminAuthority: false });
-    }
-    return isValid;
-  },
-
   openPinModal: (purpose: string, onVerify: (success: boolean) => void, scope = 'admin' as const) => {
     set({
       isPinModalOpen: true,
@@ -1348,7 +1339,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     // A screen lock only asks "is this still the same person?", so the signed-in user's
     // own PIN unlocks it too.
-    if (pinModalScope === 'session' && activeUser && !candidates.some(u => u.id === activeUser.id)) {
+    //
+    // 'cashier' asks the same question for a different reason: the cashier is signing for
+    // something done out of their own till — money taken from the drawer — so it is their
+    // PIN that has to be on it. An admin PIN still passes, as it does everywhere.
+    if (
+      (pinModalScope === 'session' || pinModalScope === 'cashier') &&
+      activeUser &&
+      !candidates.some(u => u.id === activeUser.id)
+    ) {
       candidates.push(activeUser);
     }
 

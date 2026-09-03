@@ -2,7 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import { useTicketStore } from '../../store/useTicketStore';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { Pager, usePagination } from '../common/Pager';
-import { Ticket as TicketIcon, CheckCircle2, Ban, QrCode } from 'lucide-react';
+import { useAuthStore } from '../../store/useAuthStore';
+import { Ticket as TicketIcon, CheckCircle2, Ban, QrCode, Banknote, Smartphone } from 'lucide-react';
 
 interface RecentTicketsSidebarProps {
   onOpenVoidModal: (ticketId: string) => void;
@@ -16,7 +17,8 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
   onOpenVoidModal,
   onOpenScanModal,
 }) => {
-  const { tickets, markCollected } = useTicketStore();
+  const { tickets, markCollected, changeTender } = useTicketStore();
+  const { activeUser } = useAuthStore();
   const { page, totalPages, start, visible, setPage, next, prev } = usePagination(tickets, PAGE_SIZE);
   const total = tickets.length;
 
@@ -58,6 +60,7 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
           visible.map(t => {
             const isVoid = t.status === 'void';
             const isCollected = t.status === 'collected';
+            const isTransfer = (t.tender ?? 'cash') === 'transfer';
 
             return (
               <div
@@ -94,12 +97,34 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
                     <div className={`font-mono font-black text-base ${isVoid ? 'line-through text-slate-400' : 'text-amber-600'}`}>
                       {formatCurrency(t.amount, t.currency)}
                     </div>
+                    {/* Only the exception is labelled. Badging every cash ticket would put a
+                        tag on ~90% of the list and stop any of them being noticed. */}
+                    {isTransfer && !isVoid && (
+                      <div className="text-[10px] font-black uppercase tracking-wide text-sky-700">
+                        Transfer / POS
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* Actions */}
                 {!isVoid && (
-                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
+                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100 flex-wrap">
+                    {/* Retag rather than void-and-reprint. A mis-tagged payment type is a
+                        clerical slip, and voiding to fix one destroys a ticket the customer
+                        is holding and buries the real voids in noise at close-out. */}
+                    <button
+                      onClick={() => changeTender(t.id, isTransfer ? 'cash' : 'transfer', activeUser?.id ?? 'UNKNOWN')}
+                      title={isTransfer ? 'Recorded as transfer — change to cash' : 'Recorded as cash — change to transfer/POS'}
+                      className="text-[11px] font-bold text-slate-700 hover:text-sky-900 bg-slate-100 hover:bg-sky-50 px-2 py-0.5 border border-slate-300 rounded-none flex items-center gap-1"
+                    >
+                      {isTransfer ? (
+                        <Banknote className="w-3 h-3 text-emerald-600" />
+                      ) : (
+                        <Smartphone className="w-3 h-3 text-sky-600" />
+                      )}
+                      <span>{isTransfer ? 'Mark Cash' : 'Mark Transfer'}</span>
+                    </button>
                     {!isCollected && (
                       <button
                         onClick={() => markCollected(t.id)}

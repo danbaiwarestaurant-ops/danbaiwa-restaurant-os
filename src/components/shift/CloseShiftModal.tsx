@@ -11,9 +11,15 @@ interface CloseShiftModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: (msg: string) => void;
+  /**
+   * True when this close-out is standing in for a log out, so the modal can say that the
+   * session ends with it. A cashier counting a drawer should know they are also handing
+   * the till over, not discover it when the screen returns to the sign-in page.
+   */
+  endsSession?: boolean;
 }
 
-export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClose, onSuccess }) => {
+export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClose, onSuccess, endsSession }) => {
   const { currentShift, closeShift } = useShiftStore();
   const { tickets } = useTicketStore();
   const { expenses } = useExpenseStore();
@@ -55,7 +61,7 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
         <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold uppercase tracking-wider text-sm text-amber-400">
             <Lock className="w-4 h-4" />
-            <span>Close Shift & Reconcile Cash</span>
+            <span>{endsSession ? 'Close Shift & Log Out' : 'Close Shift & Reconcile Cash'}</span>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white">
             <X className="w-5 h-5" />
@@ -168,7 +174,7 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
               disabled={!countedCash}
               className="px-4 py-2 text-xs font-black uppercase bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-none border border-amber-600 shadow-xs"
             >
-              Finalize Shift Close
+              {endsSession ? 'Close Shift & Log Out' : 'Finalize Shift Close'}
             </button>
           </div>
         </form>

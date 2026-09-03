@@ -21,9 +21,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ onRequirePin }) => {
   const { period } = useConsolePeriodStore();
   const currency = config.currencySymbol || '₦';
 
-  // The queue above handles pending and is deliberately *not* period-scoped: it is a list of
-  // things still to be done, and an expense logged last month still needs approving today.
-  // This panel is the settled record, so it follows the reporting window like every other.
+  // The review panel above is deliberately *not* period-scoped: it shows the most recent
+  // payouts whatever window is selected, because reversing one is a thing to do now rather
+  // than a thing to read. This panel is the record, so it follows the reporting window
+  // like every other figure in the console.
   const history = useMemo(
     () =>
       filterByPeriod(expenses, (e) => e.loggedAt, period)
@@ -36,7 +37,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ onRequirePin }) => {
 
   return (
     <div className="space-y-4">
-      {/* Existing approval queue, unchanged — it already enforces the manager PIN. */}
+      {/* Payout review — rejecting is manager-PIN gated, as approving always was. */}
       <ExpenseApprovalQueue onRequirePin={onRequirePin} />
 
       <Panel

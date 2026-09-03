@@ -4,7 +4,7 @@ import { useExpenseStore } from '../../../store/useExpenseStore';
 import { useDeviceStore } from '../../../store/useDeviceStore';
 import { useConsolePeriodStore } from '../../../store/useConsolePeriodStore';
 import { formatCurrency } from '../../../utils/currency';
-import { summariseTickets, sumApprovedExpenses, bucketBreakdown } from '../../../utils/analytics';
+import { summariseTickets, sumApprovedExpenses, bucketBreakdown, splitByTender } from '../../../utils/analytics';
 import { bucketNoun, filterByPeriod, periodBuckets, shiftPeriod } from '../../../utils/period';
 import { toCsv, downloadCsv, timestampedFilename } from '../../../utils/csv';
 import { Panel, DataTable, EmptyState, StatStrip, ConsoleButton } from '../ConsoleUI';
@@ -47,6 +47,7 @@ export const ReportsView: React.FC = () => {
     return {
       previous,
       totals,
+      split: splitByTender(ticketsNow),
       prevTotals,
       spent,
       prevSpent,
@@ -67,6 +68,8 @@ export const ReportsView: React.FC = () => {
     const csv = toCsv(exportable, [
       { header: Noun, value: (r) => r.key },
       { header: 'Revenue', value: (r) => r.revenue },
+      { header: 'Cash', value: (r) => r.cash },
+      { header: 'Transfer/POS', value: (r) => r.transfer },
       { header: 'Approved Expenses', value: (r) => r.expenses },
       { header: 'Net', value: (r) => r.net },
       { header: 'Tickets', value: (r) => r.ticketCount },
@@ -86,6 +89,8 @@ export const ReportsView: React.FC = () => {
         <StatStrip
           stats={[
             { label: 'Revenue', value: formatCurrency(report.totals.revenue, currency) },
+            { label: 'Cash', value: formatCurrency(report.split.cash, currency) },
+            { label: 'Transfer / POS', value: formatCurrency(report.split.transfer, currency) },
             { label: 'Tickets', value: String(report.totals.ticketCount) },
             { label: 'Approved Expenses', value: formatCurrency(report.spent, currency) },
             { label: 'Net', value: formatCurrency(report.totals.revenue - report.spent, currency) },
@@ -157,8 +162,8 @@ export const ReportsView: React.FC = () => {
           <EmptyState>Nothing recorded in {period.label}</EmptyState>
         ) : (
           <DataTable
-            headers={[Noun, 'Revenue', 'Expenses', 'Net', 'Tickets']}
-            alignRight={[1, 2, 3, 4]}
+            headers={[Noun, 'Revenue', 'Cash', 'Transfer / POS', 'Expenses', 'Net', 'Tickets']}
+            alignRight={[1, 2, 3, 4, 5, 6]}
           >
             {report.rows.map((r) => {
               const quiet = r.ticketCount === 0 && r.expenses === 0;
@@ -167,8 +172,16 @@ export const ReportsView: React.FC = () => {
                   <td className="py-2.5 pr-3 font-bold text-slate-900">
                     <span className={quiet ? 'text-slate-400 font-semibold' : ''}>{r.label}</span>
                   </td>
-                  <td className={`py-2.5 pr-3 text-right font-mono tabular-nums font-bold ${quiet ? '' : 'text-emerald-600'}`}>
+                  <td className={`py-2.5 pr-3 text-right font-mono tabular-nums font-bold ${quiet ? '' : 'text-slate-900'}`}>
                     {formatCurrency(r.revenue, currency)}
+                  </td>
+                  {/* Revenue split into the two places the money has to turn up: the drawer,
+                      and the bank. This is the row an owner banks against. */}
+                  <td className={`py-2.5 pr-3 text-right font-mono tabular-nums ${quiet ? '' : 'text-emerald-600'}`}>
+                    {formatCurrency(r.cash, currency)}
+                  </td>
+                  <td className={`py-2.5 pr-3 text-right font-mono tabular-nums ${quiet || !r.transfer ? '' : 'text-sky-700'}`}>
+                    {r.transfer ? formatCurrency(r.transfer, currency) : '—'}
                   </td>
                   <td className={`py-2.5 pr-3 text-right font-mono tabular-nums ${quiet ? '' : 'text-rose-600'}`}>
                     {formatCurrency(r.expenses, currency)}

@@ -15,6 +15,9 @@ function toneFor(action: string): 'ok' | 'warn' | 'danger' | 'muted' {
   const a = action.toUpperCase();
   if (a.includes('VOID') || a.includes('REJECT')) return 'danger';
   if (a.includes('APPROVE')) return 'ok';
+  // A retagged payment type moves money between the drawer figure and the transfer
+  // figure, so it is worth a manager's eye without being an alarm.
+  if (a.includes('TENDER')) return 'warn';
   return 'muted';
 }
 

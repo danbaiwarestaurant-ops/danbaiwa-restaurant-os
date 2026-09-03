@@ -264,6 +264,14 @@ export interface ReceiptSpec {
   timestampText: string;
   paperWidthMm?: number;
   footerText?: string;
+  /**
+   * Printed only when the sale was not cash.
+   *
+   * Cash is what a ticket already implies, so labelling it would spend a line of roll on
+   * every receipt to say nothing. A transfer is the case someone argues about later —
+   * "I paid by transfer" — and that is the one worth the paper.
+   */
+  tenderText?: string;
 }
 
 /**
@@ -307,6 +315,7 @@ export async function composeTicket(spec: ReceiptSpec): Promise<EscPosBuilder> {
   // taller than the body already separates itself, and the line cost 3mm of every roll.
   // The tracking id, on one line, in place of the QR block that used to sit here.
   b.bold(true).line(spec.ticketId).bold(false);
+  if (spec.tenderText) b.bold(true).line(spec.tenderText).bold(false);
   b.line(spec.timestampText);
 
   if (spec.footerText) b.line(spec.footerText);

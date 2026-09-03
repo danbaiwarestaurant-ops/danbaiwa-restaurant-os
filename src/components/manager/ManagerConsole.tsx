@@ -23,6 +23,8 @@ const LAST_VIEW_KEY = 'ticket_pos_console_view';
 interface ManagerConsoleProps {
   onBackToTill: () => void;
   onRequirePin: (purpose: string, onVerified: () => void) => void;
+  /** Routes through close-out when a shift is open — see App's handleLogout. */
+  onLogout: () => void;
 }
 
 /**
@@ -37,7 +39,7 @@ interface ManagerConsoleProps {
  * View state is local rather than routed — this project has no router dependency and one
  * tab strip does not justify adding one.
  */
-export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, onRequirePin }) => {
+export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, onRequirePin, onLogout }) => {
   const { config } = useDeviceStore();
   const { expenses } = useExpenseStore();
   const { stuckCount } = useSyncStore();
@@ -206,7 +208,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
                 </div>
               </div>
             )}
-            <UserMenu />
+            <UserMenu onLogout={onLogout} />
           </div>
         </header>
 

@@ -83,6 +83,8 @@ export class PrintAdapter {
         amountText: formattedAmount,
         ticketId: ticket.id,
         timestampText: formattedTime,
+        // Cash prints nothing — see ReceiptSpec.tenderText.
+        tenderText: ticket.tender === 'transfer' ? 'PAID BY TRANSFER / POS' : undefined,
         paperWidthMm,
       });
 

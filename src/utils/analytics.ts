@@ -226,6 +226,10 @@ export interface BucketRollup {
   key: string;
   label: string;
   revenue: number;
+  /** The cash half of `revenue` — what should have reached the drawer that day. */
+  cash: number;
+  /** The card/transfer half of `revenue` — what should have reached the bank. */
+  transfer: number;
   expenses: number;
   net: number;
   ticketCount: number;
@@ -253,13 +257,15 @@ export function bucketBreakdown(
     };
 
     const soldIn = tickets.filter((t) => isRevenueTicket(t) && within(t.createdAt));
-    const revenue = soldIn.reduce((sum, t) => sum + (t.amount || 0), 0);
+    const { total: revenue, cash, transfer } = splitByTender(soldIn);
     const spent = sumApprovedExpenses(expenses.filter((e) => within(e.loggedAt)));
 
     return {
       key: b.key,
       label: b.label,
       revenue,
+      cash,
+      transfer,
       expenses: spent,
       net: revenue - spent,
       ticketCount: soldIn.length,

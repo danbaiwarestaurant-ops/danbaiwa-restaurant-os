@@ -1,5 +1,5 @@
 import { IDbService } from './IDbService';
-import { Ticket } from '../../types/ticket';
+import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
 import { OutboxItem } from '../../types/sync';
@@ -166,6 +166,27 @@ export class LocalStorageDbService implements IDbService {
       setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
       await this.queueOutbox('tickets', 'UPDATE', tickets[index]);
     }
+  }
+
+  async updateTicketTender(ticketId: string, tender: TicketTender, actorId: string): Promise<void> {
+    const tickets = await this.getTickets();
+    const index = tickets.findIndex(t => t.id === ticketId);
+    if (index === -1) return;
+
+    const before = tickets[index].tender ?? 'cash';
+    if (before === tender) return;
+
+    tickets[index].tender = tender;
+    this.appendAuditLog({
+      entity: 'ticket',
+      entityId: ticketId,
+      action: 'TENDER_CHANGE',
+      actorId,
+      reason: `${before} → ${tender}`,
+      timestamp: new Date().toISOString(),
+    });
+    setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
+    await this.queueOutbox('tickets', 'UPDATE', tickets[index]);
   }
 
   async getNextSeq(locationId: string, deviceId: string): Promise<number> {

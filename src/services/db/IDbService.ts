@@ -1,4 +1,4 @@
-import { Ticket } from '../../types/ticket';
+import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
 import { OutboxItem } from '../../types/sync';
@@ -45,6 +45,15 @@ export interface IDbService {
   getTickets(userId?: string): Promise<Ticket[]>;
   saveTicket(ticket: Ticket): Promise<void>;
   updateTicketStatus(ticketId: string, status: 'paid' | 'collected' | 'void', reason?: string, voidedBy?: string): Promise<void>;
+  /**
+   * Corrects how a ticket was paid.
+   *
+   * Mis-tags are inevitable — the alternative fix is voiding and reprinting a ticket the
+   * customer is already holding, which costs paper and pollutes the void count with
+   * clerical noise. Always audit-logged: this moves money between the drawer figure and
+   * the transfer figure, so it must never be a silent edit.
+   */
+  updateTicketTender(ticketId: string, tender: TicketTender, actorId: string): Promise<void>;
   getNextSeq(locationId: string, deviceId: string): Promise<number>;
 
   // User-Scoped Shifts

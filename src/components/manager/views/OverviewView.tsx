@@ -9,7 +9,7 @@ import { useConsolePeriodStore } from '../../../store/useConsolePeriodStore';
 import { formatCurrency, formatTimestamp } from '../../../utils/currency';
 import {
   summariseTickets, sumApprovedExpenses, bucketRevenue,
-  cashierRollups, reconcileShift,
+  cashierRollups, reconcileShift, splitByTender,
 } from '../../../utils/analytics';
 import { bucketNoun, filterByPeriod, periodBuckets, periodContains, shiftPeriod } from '../../../utils/period';
 import { Panel, KpiCard, KpiTrend, DataTable, EmptyState, StatusBadge } from '../ConsoleUI';
@@ -43,6 +43,7 @@ export const OverviewView: React.FC = () => {
 
     const totals = summariseTickets(inPeriod);
     const prevTotals = summariseTickets(inPrevious);
+    const split = splitByTender(inPeriod);
     const approved = sumApprovedExpenses(expensesInPeriod);
     const prevApproved = sumApprovedExpenses(expensesInPrevious);
 
@@ -66,6 +67,7 @@ export const OverviewView: React.FC = () => {
     return {
       previous,
       totals,
+      split,
       approved,
       series: bucketRevenue(inPeriod, periodBuckets(period)),
       topCashiers: cashierRollups(inPeriod, users).slice(0, 5),
@@ -99,7 +101,13 @@ export const OverviewView: React.FC = () => {
           label={`Revenue — ${period.label}`}
           value={formatCurrency(view.totals.revenue, currency)}
           trend={trend(view.revenueTrend)}
-          hint={`${view.totals.ticketCount} tickets issued`}
+          // The split rides on the revenue card rather than taking a fifth card: it is
+          // how one number is made up, not a separate number, and the KPI row is four wide.
+          hint={
+            view.split.transfer > 0
+              ? `${formatCurrency(view.split.cash, currency)} cash · ${formatCurrency(view.split.transfer, currency)} transfer`
+              : `${view.totals.ticketCount} tickets issued`
+          }
         />
         {/* The mockup's "Profit" needs cost prices, which this app has no model for.
             Approved expenses is the real figure that exists. */}

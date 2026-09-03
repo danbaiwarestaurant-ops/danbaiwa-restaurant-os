@@ -5,6 +5,154 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-03 — A shift is now the cashier's session, and Switch Cashier is gone
+
+**What was wrong:** opening and closing a shift was a separate act from signing in and
+out, so the two could drift apart in both directions. A cashier could sign in and start
+serving without opening a shift — the till refuses to print without one, so this showed up
+as "the buttons don't work" — or sign out and walk away leaving a shift open with nobody
+accountable for the drawer.
+
+"Switch Cashier Session" made it worse: it swapped who was signed in *without touching the
+shift*, so the incoming cashier carried on inside the outgoing cashier's open shift. Every
+ticket they sold, and the drawer count that followed, settled against the wrong person.
+
+**Fix:** the shift is the session.
+
+* Signing in as a cashier opens a shift automatically, once per sign-in. Admins are
+  excluded — an owner signing in to read the books should not accrue an empty shift they
+  then have to count a drawer to close. They keep the header's manual shift button.
+* Logging out closes it. With a shift open, "Log Out" routes through close-out first — the
+  drawer count still has to be taken — and the session ends only once the shift is closed.
+  The modal says "Close Shift & Log Out" so nobody discovers the session ended afterwards.
+  Cancelling the count cancels the log out: better signed in than a shift left open.
+* Switching cashiers is now: log out, log in. `switchCashierSession` is deleted, along with
+  its menu entry and dialog.
+
+The manager console's account menu logs out through the same door, so an owner cannot
+leave a cashier's shift open by signing out from the back office.
+
+**Guarded against:** the auto-open fires once per sign-in and not per render, so a cashier
+who deliberately closes their shift and stays signed in does not get a new one opened
+underneath them. The header button reopens one if they want it.
+
+**Files:** `src/App.tsx`, `src/store/useAuthStore.ts`, `src/components/common/UserMenu.tsx`,
+`src/components/common/Header.tsx`, `src/components/shift/CloseShiftModal.tsx`,
+`src/components/manager/ManagerConsole.tsx`, `src/tests/shiftSession.test.ts`.
+
+---
+
+## 2026-09-03 — Unreviewed payouts showed up as cash shortages against the cashier
+
+**What the user saw:** a cashier paid for gas or supplies out of the drawer, logged it,
+and the till still expected that money to be there. Expected cash only came down once a
+manager signed in and approved the entry — which on a busy night is hours later, or the
+next day — so every unreviewed payout read as a shortage against the cashier at close-out.
+
+**Root cause:** expenses were written with `status: 'pending'`, and `sumApprovedExpenses`
+counts only approved ones. The approval step was modelled as though it happened *before*
+the money left the drawer. It never does: by the time anyone types the entry in, the
+vendor has been paid.
+
+**Fix:** payouts are now recorded as **approved on entry**, and the cashier confirms with
+their own PIN — their signature on money taken out of their own till. The till therefore
+agrees with the drawer from the moment the payout is entered.
+
+The manager's control moves to the other end: from the console they can **reject** any
+payout, which puts the amount straight back into expected cash, and **restore** one they
+rejected. Rejecting is still manager-PIN gated, exactly as approving was.
+
+**New PIN scope:** `openPinModal(..., 'cashier')` accepts the signed-in cashier's own PIN
+(an admin PIN passes, as it does everywhere). It is not the `'session'` scope — that one
+renders the "Till Locked" screen, with no way out, which is not what a payout confirmation
+should look like.
+
+**Also fixed while here:** the PIN modal sat at `z-50`, the same layer as every other
+modal, and was rendered before them in `App.tsx`. Any PIN challenge raised *from* a modal
+therefore appeared behind it, and the cashier was left looking at a form that had stopped
+responding. It is now `z-[60]`. This never bit before because no PIN challenge had ever
+been raised from inside another modal.
+
+**Files:** `src/store/useExpenseStore.ts`, `src/store/useAuthStore.ts`,
+`src/components/expense/ExpenseLoggerModal.tsx`,
+`src/components/expense/ExpenseApprovalQueue.tsx`,
+`src/components/common/PinModal.tsx`, `src/components/manager/views/ExpensesView.tsx`,
+`src/tests/expenseApproval.test.ts`.
+
+**Note on old data:** expenses already sitting at `pending` are untouched and still need a
+manager's approval — they are listed first in the console's review panel. Nothing
+backfills them, because approving a payout nobody has verified is the manager's call.
+
+---
+
+## 2026-09-03 — The till's "Tickets Today" counter rolled over at the wrong hour
+
+**What the user saw:** nothing obvious, which is why it survived. A restaurant still
+serving after midnight would see the header counter reset an hour late, and tickets sold
+in the first hour of the night counted towards the previous day.
+
+**Root cause:** the counter compared `createdAt` against `new Date().toISOString()`'s date
+prefix — a **UTC** day. Lagos is UTC+1, so the local day and the UTC day disagree between
+00:00 and 01:00 local. `AGENTS.md` rule 8 already requires every reported window in this
+app to be local time; the manager console obeys it through `period.ts`, but this counter
+in `useTicketStore` predates that and was never brought in line.
+
+**Fix:** both header figures now go through `summariseToday()`, which uses `dayKey()` —
+the same local-day helper the console's analytics use.
+
+**Why it was worth fixing now:** a ticket *count* being off by an hour's worth of tickets
+is easy to miss. The header now also shows the day's **total takings** beside it, and a
+cashier will check that against the drawer, so a wrong day boundary would have turned into
+a phantom shortage on the busiest nights.
+
+**Files:** `src/store/useTicketStore.ts`, `src/components/common/Header.tsx`,
+`src/tests/tenderSplit.test.ts`.
+
+---
+
+## 2026-09-03 — Card and transfer sales were counted as cash in the drawer
+
+**What the user saw:** shifts that took any card or bank-transfer payment could never
+balance at close-out. The cashier counted the drawer, the app said they were short by
+roughly the value of the day's transfers, and the shift landed in the manager console
+flagged with a variance nobody could explain or make up.
+
+**Root cause:** the till had no concept of how a customer paid. `Ticket` carried no
+tender field, so close-out summed *every* ticket in the shift into `totalCashTickets`
+and fed that into `expected cash = float + sales − approved expenses`. A transfer sale is
+real revenue but it never enters the drawer, so every naira taken by transfer became a
+naira of phantom shortage. This was in both close-out paths — the live figure the
+cashier sees in `CloseShiftModal`, and the figure `closeShift` writes permanently onto
+the shift record.
+
+**Fix:** tickets now record a `tender` of `'cash'` or `'transfer'` (card and bank
+transfer are one bucket — to a cashier counting cash they are the same thing). New
+`splitByTender()` in `analytics.ts` divides a shift's non-void revenue into drawer cash
+and transfer/POS, and every reconciliation path now expects **cash only** in the drawer.
+Approved expenses are still charged against cash, since that is where the money was
+taken from.
+
+The field is optional and an absent tender reads as cash, because every ticket written
+before this existed was a drawer sale — that default is what keeps historic shifts
+balancing, and narrowing `tender` to a required field later would reintroduce this bug
+backwards through the whole history.
+
+**Close-out now shows** total sales, the cash and transfer/POS split beneath it, then
+expenses, then expected cash in the drawer — plus a line saying transfers are excluded,
+so the gap between the sales figure and the drawer target does not read as a loss.
+
+**Files:** `src/types/ticket.ts`, `src/utils/analytics.ts`, `src/store/useShiftStore.ts`,
+`src/store/useTicketStore.ts`, `src/components/shift/CloseShiftModal.tsx`,
+`supabase_schema.sql`, `src/tests/tenderSplit.test.ts`.
+
+**Deployment note:** `supabase_schema.sql` adds `tickets.tender` (`ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS`, defaulting to `'cash'`). Run it **before** deploying the app —
+the sync layer maps ticket fields to columns generically, so tills would otherwise push a
+`tender` column Postgres does not have and every ticket would pile up in the outbox.
+
+---
+
+
 ## 2026-09-03 — Two seconds still sat between the button and the paper
 
 **What the user saw:** silent printing worked and was no longer five seconds, but a

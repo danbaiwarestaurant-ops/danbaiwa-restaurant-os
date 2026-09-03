@@ -5,10 +5,13 @@ import { generateCompositeKey } from '../utils/compositeKey';
 import { PrintAdapter } from '../services/print/PrintAdapter';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
+import { dayKey } from '../utils/analytics';
 
 interface TicketState {
   tickets: Ticket[];
   ticketsTodayCount: number;
+  /** What those tickets came to. Voids excluded, exactly as in the count beside it. */
+  ticketsTodayTotal: number;
   isLoading: boolean;
   activeFlashingAmount: number | null;
   /**
@@ -34,12 +37,34 @@ interface TicketState {
   createAndPrintTicket: (amount: number, cashierId?: string, tender?: TicketTender) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
   voidTicket: (ticketId: string, reason: string, voidedBy: string) => Promise<void>;
+  /** Fixes a mis-tagged payment type without voiding and reprinting the customer's ticket. */
+  changeTender: (ticketId: string, tender: TicketTender, actorId: string) => Promise<void>;
   triggerFlash: (amount: number) => void;
+}
+
+/**
+ * Today's tickets and what they came to, for the header counters.
+ *
+ * The day boundary is **local**, via dayKey — not the UTC date prefix this used to
+ * compare against. In Lagos (UTC+1) that boundary falls at 1am local, so a restaurant
+ * still serving after midnight had the first hour of its night counted into the previous
+ * day. It never showed up while the only figure was a ticket count; it would show up
+ * immediately now that a money total sits beside it and gets checked against a drawer.
+ * See AGENTS.md rule 8 — every reported window in this app is local time.
+ */
+function summariseToday(tickets: Ticket[]): { count: number; amount: number } {
+  const today = dayKey(new Date());
+  const mine = tickets.filter((t) => t.status !== 'void' && dayKey(t.createdAt) === today);
+  return {
+    count: mine.length,
+    amount: mine.reduce((sum, t) => sum + (t.amount || 0), 0),
+  };
 }
 
 export const useTicketStore = create<TicketState>((set, get) => ({
   tickets: [],
   ticketsTodayCount: 0,
+  ticketsTodayTotal: 0,
   isLoading: false,
   activeFlashingAmount: null,
   scope: undefined,
@@ -50,9 +75,8 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     set({ isLoading: true, scope: userId });
     await dbService.init();
     const tickets = await dbService.getTickets(userId);
-    const todayStr = new Date().toISOString().split('T')[0];
-    const todayCount = tickets.filter(t => t.createdAt.startsWith(todayStr) && t.status !== 'void').length;
-    set({ tickets, ticketsTodayCount: todayCount, isLoading: false });
+    const today = summariseToday(tickets);
+    set({ tickets, ticketsTodayCount: today.count, ticketsTodayTotal: today.amount, isLoading: false });
   },
 
   createAndPrintTicket: async (amount: number, cashierId: string = '', tender: TicketTender = 'cash') => {
@@ -100,9 +124,8 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // picked up the just-saved row, which would otherwise duplicate it here.
     const currentTickets = get().tickets.filter(t => t.id !== newTicket.id);
     const updatedTickets = [newTicket, ...currentTickets];
-    const todayStr = nowIso.split('T')[0];
-    const todayCount = updatedTickets.filter(t => t.createdAt.startsWith(todayStr) && t.status !== 'void').length;
-    set({ tickets: updatedTickets, ticketsTodayCount: todayCount });
+    const today = summariseToday(updatedTickets);
+    set({ tickets: updatedTickets, ticketsTodayCount: today.count, ticketsTodayTotal: today.amount });
 
     // STEP 3: Visual flash effect
     get().triggerFlash(amount);
@@ -148,6 +171,14 @@ export const useTicketStore = create<TicketState>((set, get) => ({
 
   voidTicket: async (ticketId: string, reason: string, voidedBy: string) => {
     await dbService.updateTicketStatus(ticketId, 'void', reason, voidedBy);
+    await get().loadTickets(get().scope);
+    useSyncStore.getState().checkOutbox().then(() => {
+      useSyncStore.getState().triggerSyncWorker();
+    });
+  },
+
+  changeTender: async (ticketId: string, tender: TicketTender, actorId: string) => {
+    await dbService.updateTicketTender(ticketId, tender, actorId);
     await get().loadTickets(get().scope);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();

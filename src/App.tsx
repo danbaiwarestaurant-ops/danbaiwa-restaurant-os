@@ -32,7 +32,7 @@ const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 export function App() {
   const { loadConfig } = useDeviceStore();
   const { loadTickets, voidTicket, printError, clearPrintError } = useTicketStore();
-  const { currentShift, loadShift, loadShiftHistory } = useShiftStore();
+  const { currentShift, loadShift, loadShiftHistory, openShift } = useShiftStore();
   const { loadExpenses } = useExpenseStore();
   const { checkOutbox } = useSyncStore();
   const { loadAuditLogs } = useAuditStore();
@@ -48,12 +48,15 @@ export function App() {
     closePinModal,
     grantAdminAuthority,
     revokeAdminAuthority,
+    logoutUser,
   } = useAuthStore();
 
   // Modals state
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isOpenShiftOpen, setIsOpenShiftOpen] = useState(false);
   const [isCloseShiftOpen, setIsCloseShiftOpen] = useState(false);
+  /** True while the close-shift modal is standing in for a log out — see handleLogout. */
+  const [logoutAfterClose, setLogoutAfterClose] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isScanModalOpen, setIsScanModalOpen] = useState(false);
   const [isVoidModalOpen, setIsVoidModalOpen] = useState(false);
@@ -67,6 +70,9 @@ export function App() {
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
 
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  /** Whose sign-in has already had a shift opened for it — see the data-loading effect. */
+  const autoOpenedForRef = useRef<string | null>(null);
+
 
   const showSuccess = (msg: string) => {
     setToastMsg(msg);
@@ -120,8 +126,25 @@ export function App() {
 
     const rollupScope = activeUser.role === 'admin' ? undefined : activeUser.id;
     loadTickets(rollupScope);
-    loadShift(activeUser.id);
     loadExpenses(undefined, rollupScope);
+
+    // A cashier signing in *is* the shift starting. Nobody signs into a till to stand at
+    // it doing nothing, and the old separate "Start Shift" step was one a cashier could
+    // skip — leaving them unable to print, or worse, ringing up a service whose takings
+    // belonged to nobody's shift. Only cashiers: an owner signing in to read the books
+    // should not accrue an empty shift they then have to count a drawer to close.
+    loadShift(activeUser.id).then(() => {
+      if (activeUser.role !== 'cashier') return;
+      if (useShiftStore.getState().currentShift) return;
+      // Once per sign-in, never per render: a cashier who deliberately closes their shift
+      // and stays signed in must not have a new one opened underneath them.
+      if (autoOpenedForRef.current === activeUser.id) return;
+      autoOpenedForRef.current = activeUser.id;
+
+      openShift(0, activeUser.name, activeUser.id)
+        .then(() => showSuccess(`Shift opened for ${activeUser.name}`))
+        .catch((e: any) => showError(e?.message || 'Could not open a shift for this sign-in'));
+    });
   }, [isAuthenticated, activeUser?.id, activeUser?.role, isManagerView]);
 
   // 5-Minute Inactivity Idle Auto-Lock Timer
@@ -226,6 +249,26 @@ export function App() {
   // Mounted above every view so it cannot be skipped past by whatever screen follows
   // registration.
 
+  /**
+   * Logging out ends the shift, because the shift *is* the session.
+   *
+   * An open shift cannot simply be abandoned — the drawer has to be counted against it —
+   * so a log out with one open routes through close-out first, and the session ends only
+   * once the shift is closed. Cancelling the count cancels the log out: better to stay
+   * signed in than to leave a shift open with nobody accountable for the till.
+   */
+  const handleLogout = () => {
+    if (currentShift) {
+      setLogoutAfterClose(true);
+      setIsCloseShiftOpen(true);
+      return;
+    }
+    if (window.confirm('Log out of the till? Syncing carries on in the background.')) {
+      autoOpenedForRef.current = null;
+      logoutUser();
+    }
+  };
+
   const requireManagerPin = (purpose: string, onVerified: () => void) => {
     openPinModal(purpose, (verified) => {
       if (verified) onVerified();
@@ -246,6 +289,9 @@ export function App() {
             setIsManagerView(false);
           }}
           onRequirePin={requireManagerPin}
+          // The console's account menu logs out through the same door as the till's, so an
+          // owner cannot leave a cashier's shift open by signing out from the back office.
+          onLogout={handleLogout}
         />
         <Toast message={toastMsg} type={toastType} onClose={() => setToastMsg(null)} />
         <PinModal isOpen={isPinModalOpen} purpose={pinModalPurpose} onClose={closePinModal} />
@@ -270,6 +316,7 @@ export function App() {
         onLockTill={() =>
           openPinModal('Till Locked — Enter Your PIN to Resume', () => {}, 'session')
         }
+        onLogout={handleLogout}
         isManagerView={isManagerView}
       />
 
@@ -309,7 +356,22 @@ export function App() {
       {/* Modals */}
       <QuickConfigModal isOpen={isConfigOpen} onClose={() => setIsConfigOpen(false)} />
       <OpenShiftModal isOpen={isOpenShiftOpen} onClose={() => setIsOpenShiftOpen(false)} onSuccess={showSuccess} />
-      <CloseShiftModal isOpen={isCloseShiftOpen} onClose={() => setIsCloseShiftOpen(false)} onSuccess={showSuccess} />
+      <CloseShiftModal
+        isOpen={isCloseShiftOpen}
+        endsSession={logoutAfterClose}
+        onClose={() => {
+          setIsCloseShiftOpen(false);
+          // Backing out of the count is backing out of the log out too.
+          setLogoutAfterClose(false);
+        }}
+        onSuccess={(msg) => {
+          showSuccess(msg);
+          if (!logoutAfterClose) return;
+          setLogoutAfterClose(false);
+          autoOpenedForRef.current = null;
+          logoutUser();
+        }}
+      />
       <ExpenseLoggerModal isOpen={isExpenseModalOpen} onClose={() => setIsExpenseModalOpen(false)} onSuccess={showSuccess} />
       <ScanCollectorModal isOpen={isScanModalOpen} onClose={() => setIsScanModalOpen(false)} onSuccess={showSuccess} />
       <VoidReasonModal

@@ -1,10 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useAuthStore } from '../../store/useAuthStore';
-import { KeyRound, Lock, LogOut, UserCheck, ChevronDown } from 'lucide-react';
+import { Lock, LogOut, ChevronDown } from 'lucide-react';
 
 interface UserMenuProps {
   /** Locks the till behind the PIN screen — same path as the idle auto-lock. */
   onLockTill?: () => void;
+  /**
+   * Logs out through the till's own flow, which closes the open shift (and takes the
+   * cash count) before ending the session. Without it this falls back to a plain sign
+   * out — correct only where there can be no shift to leave hanging.
+   */
+  onLogout?: () => void;
   /** Dark styling for the manager console topbar. */
   variant?: 'light' | 'dark';
 }
@@ -20,15 +26,15 @@ interface UserMenuProps {
  * Log Out here ends the staff session only; the device stays enrolled with the cloud so
  * the queue keeps draining. Disconnecting the device from the cloud is a separate,
  * explicit act (System Logout, in the console's settings).
+ *
+ * There is no "switch cashier" entry any more. A shift opens at sign-in and closes at
+ * sign-out, so swapping who is on the till without going through both would file one
+ * cashier's takings inside another's shift. Handing over is: log out, log in.
  */
-export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, variant = 'light' }) => {
-  const { users, activeUser, switchCashierSession, logoutUser } = useAuthStore();
+export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, onLogout, variant = 'light' }) => {
+  const { activeUser, logoutUser } = useAuthStore();
 
   const [isOpen, setIsOpen] = useState(false);
-  const [isSwitching, setIsSwitching] = useState(false);
-  const [selectedUserId, setSelectedUserId] = useState('');
-  const [switchPin, setSwitchPin] = useState('');
-  const [switchError, setSwitchError] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -56,23 +62,15 @@ export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, variant = 'light
     .map((p) => p[0]?.toUpperCase())
     .join('') || '?';
 
-  const handleSwitchSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedUserId || !switchPin) return;
-
-    const success = await switchCashierSession(selectedUserId, switchPin);
-    if (success) {
-      setIsSwitching(false);
-      setSwitchPin('');
-      setSwitchError(false);
-    } else {
-      setSwitchError(true);
-      setSwitchPin('');
-    }
-  };
-
   const handleLogout = async () => {
     setIsOpen(false);
+    // The till's own flow owns the confirmation, because on an open shift logging out
+    // means counting the drawer first — a yes/no prompt would be answered before the
+    // person knew what they were agreeing to.
+    if (onLogout) {
+      onLogout();
+      return;
+    }
     if (window.confirm('Log out of the till? Syncing carries on in the background.')) {
       await logoutUser();
     }
@@ -115,19 +113,6 @@ export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, variant = 'light
               </div>
             </div>
 
-            <button
-              role="menuitem"
-              onClick={() => {
-                if (users.length > 0) setSelectedUserId(users[0].id);
-                setIsSwitching(true);
-                setIsOpen(false);
-              }}
-              className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-bold uppercase text-slate-800 hover:bg-slate-100 text-left"
-            >
-              <UserCheck className="w-4 h-4 text-amber-600 flex-shrink-0" />
-              <span>Switch Cashier</span>
-            </button>
-
             {onLockTill && (
               <button
                 role="menuitem"
@@ -154,81 +139,6 @@ export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, variant = 'light
         )}
       </div>
 
-      {/* Switch Cashier — unchanged behaviour, just no longer reachable by mis-tap. */}
-      {isSwitching && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white border-2 border-slate-900 w-full max-w-sm p-6 rounded-none shadow-2xl">
-            <h4 className="font-black text-sm uppercase text-slate-900 mb-3 flex items-center gap-2">
-              <KeyRound className="w-4 h-4 text-amber-600" />
-              <span>Switch Cashier Session</span>
-            </h4>
-
-            {switchError && (
-              <div className="mb-3 p-2 bg-rose-50 border border-rose-400 text-rose-900 text-xs font-bold uppercase rounded-none">
-                Invalid Staff PIN
-              </div>
-            )}
-
-            <form onSubmit={handleSwitchSubmit} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-                  Select Staff Member
-                </label>
-                <select
-                  value={selectedUserId}
-                  onChange={(e) => setSelectedUserId(e.target.value)}
-                  className="w-full p-2.5 border-2 border-slate-300 text-xs font-bold text-slate-900 bg-white rounded-none"
-                >
-                  {/* Deactivated accounts stay in the roster so an admin can reactivate
-                      them, but they must not be offered as a way onto the till. */}
-                  {users.filter((u) => u.status === 'active').map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.name} (@{u.username}) — {u.role.toUpperCase()}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-                  Enter Staff PIN
-                </label>
-                <input
-                  type="password"
-                  value={switchPin}
-                  onChange={(e) => setSwitchPin(e.target.value.replace(/\D/g, ''))}
-                  placeholder="Enter PIN"
-                  maxLength={8}
-                  className="w-full p-2.5 border-2 border-slate-300 text-center font-mono font-black text-lg text-slate-900 rounded-none focus:border-amber-500 focus:outline-none"
-                  autoFocus
-                  required
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2 border-t">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsSwitching(false);
-                    setSwitchPin('');
-                    setSwitchError(false);
-                  }}
-                  className="px-3 py-1.5 text-xs font-bold uppercase border border-slate-300 rounded-none"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={!switchPin}
-                  className="px-4 py-1.5 text-xs font-black uppercase bg-amber-500 text-white rounded-none border border-amber-600 shadow-xs"
-                >
-                  Switch Session
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </>
   );
 };

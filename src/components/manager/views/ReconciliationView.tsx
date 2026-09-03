@@ -5,7 +5,7 @@ import { useDeviceStore } from '../../../store/useDeviceStore';
 import { useConsolePeriodStore } from '../../../store/useConsolePeriodStore';
 import { formatCurrency, formatTimestamp } from '../../../utils/currency';
 import { filterByPeriod } from '../../../utils/period';
-import { shiftTickets } from '../../../utils/analytics';
+import { shiftTickets, splitByTender } from '../../../utils/analytics';
 import { Panel, DataTable, EmptyState, StatusBadge, StatStrip } from '../ConsoleUI';
 import { Pager, usePagination } from '../../common/Pager';
 import { ScrollText } from 'lucide-react';
@@ -30,22 +30,30 @@ export const ReconciliationView: React.FC = () => {
     [shiftHistory, period]
   );
 
-  // Voids are attributed to a shift the same way its takings are — the cashier's tickets
-  // inside the shift's open window — so the count on a row is that cashier's own write-offs.
-  const voidsByShift = useMemo(() => {
-    const map = new Map<string, { count: number; value: number }>();
+  // Voids and the cash/transfer split are both attributed to a shift the same way its
+  // takings are — the cashier's tickets inside the shift's open window — so a row's
+  // figures are that cashier's own, and one pass over the tickets produces all of them.
+  const byShift = useMemo(() => {
+    const map = new Map<string, { voidCount: number; voidValue: number; cash: number; transfer: number }>();
     for (const s of shifts) {
-      const voided = shiftTickets(tickets, s).filter((t) => t.status === 'void');
+      const own = shiftTickets(tickets, s);
+      const voided = own.filter((t) => t.status === 'void');
+      const split = splitByTender(own);
       map.set(s.id, {
-        count: voided.length,
-        value: voided.reduce((sum, t) => sum + t.amount, 0),
+        voidCount: voided.length,
+        voidValue: voided.reduce((sum, t) => sum + t.amount, 0),
+        cash: split.cash,
+        transfer: split.transfer,
       });
     }
     return map;
   }, [shifts, tickets]);
 
-  const totalVoids = [...voidsByShift.values()].reduce((sum, v) => sum + v.count, 0);
-  const totalVoidValue = [...voidsByShift.values()].reduce((sum, v) => sum + v.value, 0);
+  const rows = [...byShift.values()];
+  const totalVoids = rows.reduce((sum, v) => sum + v.voidCount, 0);
+  const totalVoidValue = rows.reduce((sum, v) => sum + v.voidValue, 0);
+  const totalCash = rows.reduce((sum, v) => sum + v.cash, 0);
+  const totalTransfer = rows.reduce((sum, v) => sum + v.transfer, 0);
 
   const closed = shifts.filter((s) => s.status === 'closed');
   const flagged = closed.filter((s) => Math.abs(s.variance ?? 0) > 0.01);
@@ -65,6 +73,8 @@ export const ReconciliationView: React.FC = () => {
           { label: 'With Variance', value: String(flagged.length) },
           { label: 'Net Variance', value: formatCurrency(totalVariance, currency) },
           { label: 'Still Open', value: String(shifts.length - closed.length) },
+          { label: 'Cash Sales', value: formatCurrency(totalCash, currency) },
+          { label: 'Transfer / POS', value: formatCurrency(totalTransfer, currency) },
           { label: 'Void Tickets', value: String(totalVoids) },
           { label: 'Void Value', value: formatCurrency(totalVoidValue, currency) },
         ]}
@@ -79,20 +89,21 @@ export const ReconciliationView: React.FC = () => {
               'Opened',
               'Cashier',
               'Till',
+              'Cash',
+              'Transfer / POS',
               'Voids',
-              'Void Value',
               'Expected',
               'Counted',
               'Variance',
               'Status',
             ]}
-            alignRight={[3, 4, 5, 6, 7, 8]}
+            alignRight={[3, 4, 5, 6, 7, 8, 9]}
           >
             {visible.map((s) => {
               const isOpen = s.status === 'open';
               const variance = s.variance ?? 0;
               const flaggedRow = !isOpen && Math.abs(variance) > 0.01;
-              const voids = voidsByShift.get(s.id) ?? { count: 0, value: 0 };
+              const own = byShift.get(s.id) ?? { voidCount: 0, voidValue: 0, cash: 0, transfer: 0 };
               return (
                 <tr key={s.id} className="hover:bg-slate-50">
                   <td className="py-2.5 pr-3 text-slate-600">{formatTimestamp(s.openedAt)}</td>
@@ -100,19 +111,29 @@ export const ReconciliationView: React.FC = () => {
                   <td className="py-2.5 pr-3 font-mono text-[11px] text-slate-500">
                     {s.locationId}-{s.deviceId}
                   </td>
-                  <td
-                    className={`py-2.5 pr-3 text-right font-mono font-bold tabular-nums ${
-                      voids.count > 0 ? 'text-rose-600' : 'text-slate-400'
-                    }`}
-                  >
-                    {voids.count}
+                  {/* What the drawer should hold, and what never touched it. Read together
+                      these explain the Expected figure two columns along. */}
+                  <td className="py-2.5 pr-3 text-right font-mono font-bold tabular-nums text-emerald-700">
+                    {formatCurrency(own.cash, currency)}
                   </td>
                   <td
                     className={`py-2.5 pr-3 text-right font-mono tabular-nums ${
-                      voids.count > 0 ? 'text-rose-600' : 'text-slate-400'
+                      own.transfer > 0 ? 'font-bold text-sky-700' : 'text-slate-400'
                     }`}
                   >
-                    {voids.count > 0 ? formatCurrency(voids.value, currency) : '—'}
+                    {own.transfer > 0 ? formatCurrency(own.transfer, currency) : '—'}
+                  </td>
+                  {/* Count over value, in one cell: the count is what a manager scans a
+                      column for, and the value is only ever the follow-up question. */}
+                  <td
+                    className={`py-2.5 pr-3 text-right tabular-nums ${
+                      own.voidCount > 0 ? 'text-rose-600' : 'text-slate-400'
+                    }`}
+                  >
+                    <div className="font-mono font-bold">{own.voidCount}</div>
+                    {own.voidCount > 0 && (
+                      <div className="font-mono text-[10px]">{formatCurrency(own.voidValue, currency)}</div>
+                    )}
                   </td>
                   <td className="py-2.5 pr-3 text-right font-mono tabular-nums">
                     {isOpen ? '—' : formatCurrency(s.expectedCash ?? 0, currency)}
