@@ -39,6 +39,16 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 
+/**
+ * Bumped whenever this file changes in a way a till needs to pick up.
+ *
+ * Reported by /health so the app can tell a stale agent from a current one. Without
+ * it, an agent left over from an older install answers every health check perfectly
+ * while behaving nothing like the current build — which is exactly how the slow
+ * per-receipt spooling survived unnoticed on a machine that looked healthy.
+ */
+const AGENT_VERSION = 2;
+
 const PORT = Number(process.env.PRINT_PORT) || 9100;
 const DEFAULT_PRINTER = process.env.PRINT_PRINTER || 'POS-58 11.3.0.1';
 const IS_WINDOWS = process.platform === 'win32';
@@ -62,130 +72,173 @@ const ALLOWED_ORIGINS = new Set([
 // ── Raw spooling ──────────────────────────────────────────────────────────────
 
 /**
- * The Windows half, as a PowerShell script that P/Invokes the spooler directly.
+ * The Windows half: a tiny console program that P/Invokes the spooler, compiled ONCE.
  *
- * There is no way to submit a RAW job from Node without either a native module (which
- * would put a C++ toolchain on every till) or the printer being shared over SMB (which
- * needs configuring per machine and breaks when the share name changes). winspool.drv is
- * already present on every Windows install and takes the printer by the exact name that
- * appears in Printers & scanners — the same name the operator already knows.
+ * The first version of this ran the same C# through `powershell -File` on every receipt,
+ * with `Add-Type` compiling the source each time. Measured on a fast machine that cost
+ * 358-1029ms for the compile plus ~500ms of PowerShell startup — **per ticket** — and on
+ * a slower till it was the five-second delay between pressing a preset and hearing the
+ * printer. Silent printing exists to save time at the counter, so paying a second of
+ * compilation for every receipt defeated the entire point.
  *
- * OpenPrinter → StartDocPrinter(RAW) → WritePrinter → close. Anything that fails throws,
- * and PowerShell's non-zero exit is what the caller sees.
+ * Compiling to an exe once at startup brings it to ~240ms, which is .NET process startup
+ * and nothing else. There is still no native module and nothing to install: csc ships
+ * with the .NET Framework that is already on every Windows machine.
+ *
+ * winspool.drv is used rather than a printer share because it takes the printer by the
+ * exact name that appears in Printers & scanners — the name the operator already knows —
+ * and needs no sharing configured. RAW means the bytes reach the device untouched, with
+ * no driver rendering and therefore no dialog.
  */
-const RAW_PRINT_PS1 = `
-param([Parameter(Mandatory=$true)][string]$PrinterName,
-      [Parameter(Mandatory=$true)][string]$FilePath)
-
-$ErrorActionPreference = 'Stop'
-
-Add-Type -TypeDefinition @"
+const RAW_PRINT_SOURCE = `
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
 
-public class RawPrinter {
+public class RawPrint {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public class DOCINFO {
         [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
         [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
         [MarshalAs(UnmanagedType.LPWStr)] public string pDataType;
     }
-
     [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool OpenPrinter(string src, out IntPtr hPrinter, IntPtr pd);
+    public static extern bool OpenPrinter(string src, out IntPtr h, IntPtr pd);
     [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool ClosePrinter(IntPtr hPrinter);
+    public static extern bool ClosePrinter(IntPtr h);
     [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool StartDocPrinter(IntPtr hPrinter, int level, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFO di);
+    public static extern bool StartDocPrinter(IntPtr h, int level, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFO di);
     [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool EndDocPrinter(IntPtr hPrinter);
+    public static extern bool EndDocPrinter(IntPtr h);
     [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool StartPagePrinter(IntPtr hPrinter);
+    public static extern bool StartPagePrinter(IntPtr h);
     [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool EndPagePrinter(IntPtr hPrinter);
+    public static extern bool EndPagePrinter(IntPtr h);
     [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);
+    public static extern bool WritePrinter(IntPtr h, IntPtr buf, int count, out int written);
 
-    public static void Send(string printerName, byte[] bytes) {
-        IntPtr hPrinter;
-        if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero))
-            throw new Exception("Cannot open printer '" + printerName + "'. Check the name in Printers & scanners. (Win32 " + Marshal.GetLastWin32Error() + ")");
+    public static int Main(string[] args) {
+        if (args.Length < 2) { Console.Error.WriteLine("usage: RawPrint <printer> <file>"); return 2; }
         try {
-            DOCINFO di = new DOCINFO();
-            di.pDocName = "Danbaiwa Receipt";
-            di.pDataType = "RAW";
-            if (!StartDocPrinter(hPrinter, 1, di)) throw new Exception("StartDocPrinter failed (Win32 " + Marshal.GetLastWin32Error() + ")");
+            byte[] bytes = File.ReadAllBytes(args[1]);
+            IntPtr h;
+            if (!OpenPrinter(args[0], out h, IntPtr.Zero))
+                throw new Exception("Cannot open printer '" + args[0] + "'. Check the name in Printers & scanners. (Win32 " + Marshal.GetLastWin32Error() + ")");
             try {
-                if (!StartPagePrinter(hPrinter)) throw new Exception("StartPagePrinter failed (Win32 " + Marshal.GetLastWin32Error() + ")");
+                DOCINFO di = new DOCINFO();
+                di.pDocName = "Danbaiwa Receipt"; di.pDataType = "RAW";
+                if (!StartDocPrinter(h, 1, di)) throw new Exception("StartDocPrinter failed (Win32 " + Marshal.GetLastWin32Error() + ")");
                 try {
-                    IntPtr buf = Marshal.AllocCoTaskMem(bytes.Length);
+                    if (!StartPagePrinter(h)) throw new Exception("StartPagePrinter failed (Win32 " + Marshal.GetLastWin32Error() + ")");
                     try {
-                        Marshal.Copy(bytes, 0, buf, bytes.Length);
-                        int written;
-                        if (!WritePrinter(hPrinter, buf, bytes.Length, out written))
-                            throw new Exception("WritePrinter failed (Win32 " + Marshal.GetLastWin32Error() + ")");
-                    } finally { Marshal.FreeCoTaskMem(buf); }
-                } finally { EndPagePrinter(hPrinter); }
-            } finally { EndDocPrinter(hPrinter); }
-        } finally { ClosePrinter(hPrinter); }
+                        IntPtr buf = Marshal.AllocCoTaskMem(bytes.Length);
+                        try {
+                            Marshal.Copy(bytes, 0, buf, bytes.Length);
+                            int written;
+                            if (!WritePrinter(h, buf, bytes.Length, out written))
+                                throw new Exception("WritePrinter failed (Win32 " + Marshal.GetLastWin32Error() + ")");
+                        } finally { Marshal.FreeCoTaskMem(buf); }
+                    } finally { EndPagePrinter(h); }
+                } finally { EndDocPrinter(h); }
+            } finally { ClosePrinter(h); }
+            return 0;
+        } catch (Exception e) { Console.Error.WriteLine(e.Message); return 1; }
     }
 }
-"@
-
-[RawPrinter]::Send($PrinterName, [System.IO.File]::ReadAllBytes($FilePath))
 `;
 
-let cachedScriptPath = null;
+/** Next to the script, so it survives a reboot and is built once per install. */
+const RAW_PRINT_EXE = path.join(__dirname, "danbaiwa-rawprint.exe");
 
-/** The helper is written once per process run, into the temp directory. */
-function rawPrintScriptPath() {
-  if (cachedScriptPath && fs.existsSync(cachedScriptPath)) return cachedScriptPath;
-  cachedScriptPath = path.join(os.tmpdir(), 'danbaiwa-rawprint.ps1');
-  fs.writeFileSync(cachedScriptPath, RAW_PRINT_PS1, 'utf8');
-  return cachedScriptPath;
-}
+let rawPrintReady = null;
 
-function sendRawWindows(printerName, filePath) {
-  return new Promise((resolve, reject) => {
+/**
+ * Build the helper if it is not already there. Started at boot so the first ticket of
+ * the day does not pay for it, and awaited by each job in case one arrives first.
+ */
+function ensureRawPrintExe() {
+  if (!IS_WINDOWS) return Promise.resolve(null);
+  if (rawPrintReady) return rawPrintReady;
+
+  rawPrintReady = new Promise((resolve) => {
+    if (fs.existsSync(RAW_PRINT_EXE)) return resolve(RAW_PRINT_EXE);
+
+    const buildScript = path.join(os.tmpdir(), "danbaiwa-build-rawprint.ps1");
+    fs.writeFileSync(
+      buildScript,
+      "param([string]$Out)\n$ErrorActionPreference='Stop'\n$src = @'\n" +
+        RAW_PRINT_SOURCE +
+        "\n'@\nAdd-Type -TypeDefinition $src -OutputAssembly $Out -OutputType ConsoleApplication\n",
+      "utf8"
+    );
+
     execFile(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', rawPrintScriptPath(),
-        '-PrinterName', printerName,
-        '-FilePath', filePath,
-      ],
-      { windowsHide: true, timeout: 20000 },
-      (err, _stdout, stderr) => {
-        if (err) return reject(new Error(String(stderr || err.message).trim()));
-        resolve();
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", buildScript, "-Out", RAW_PRINT_EXE],
+      { windowsHide: true, timeout: 60000 },
+      (err, _out, stderr) => {
+        fs.unlink(buildScript, () => {});
+        if (err || !fs.existsSync(RAW_PRINT_EXE)) {
+          console.warn("[Print Agent] could not build the fast print helper; falling back to the slower path:", String(stderr || err.message).trim());
+          return resolve(null);
+        }
+        console.log("[Print Agent] fast print helper ready");
+        resolve(RAW_PRINT_EXE);
       }
     );
   });
+
+  return rawPrintReady;
 }
 
-/** macOS and Linux already have a raw path through CUPS. */
-function sendRawUnix(printerName, filePath) {
+function runRawPrintExe(exe, printerName, filePath) {
   return new Promise((resolve, reject) => {
-    execFile('lp', ['-d', printerName, '-o', 'raw', filePath], { timeout: 20000 }, (err, _o, stderr) => {
+    execFile(exe, [printerName, filePath], { windowsHide: true, timeout: 20000 }, (err, _o, stderr) => {
       if (err) return reject(new Error(String(stderr || err.message).trim()));
       resolve();
     });
   });
 }
 
-async function sendRaw(printerName, bytes) {
-  const tmpFile = path.join(os.tmpdir(), `danbaiwa-receipt-${Date.now()}-${process.pid}.bin`);
-  fs.writeFileSync(tmpFile, bytes);
-  try {
-    if (IS_WINDOWS) await sendRawWindows(printerName, tmpFile);
-    else await sendRawUnix(printerName, tmpFile);
-  } finally {
-    fs.unlink(tmpFile, () => {});
-  }
+/** macOS and Linux already have a raw path through CUPS. */
+function sendRawUnix(printerName, filePath) {
+  return new Promise((resolve, reject) => {
+    execFile("lp", ["-d", printerName, "-o", "raw", filePath], { timeout: 20000 }, (err, _o, stderr) => {
+      if (err) return reject(new Error(String(stderr || err.message).trim()));
+      resolve();
+    });
+  });
+}
+
+/**
+ * Jobs are spooled strictly one after another.
+ *
+ * Receipts must come off the roll in the order they were rung up, and a cashier hitting
+ * four presets in three seconds otherwise starts four processes at once that finish in
+ * whatever order the OS feels like.
+ */
+let queue = Promise.resolve();
+
+function sendRaw(printerName, bytes) {
+  const job = queue.then(async () => {
+    const tmpFile = path.join(os.tmpdir(), `danbaiwa-receipt-${Date.now()}-${process.pid}.bin`);
+    fs.writeFileSync(tmpFile, bytes);
+    try {
+      if (!IS_WINDOWS) return await sendRawUnix(printerName, tmpFile);
+      const exe = await ensureRawPrintExe();
+      if (exe) return await runRawPrintExe(exe, printerName, tmpFile);
+      throw new Error(
+        "The print helper could not be built on this machine, so receipts cannot be spooled. " +
+          "Check that the .NET Framework is present (it ships with Windows) and restart the agent."
+      );
+    } finally {
+      fs.unlink(tmpFile, () => {});
+    }
+  });
+
+  // The chain must survive a failed job, or one bad receipt stops every later one.
+  queue = job.catch(() => {});
+  return job;
 }
 
 function listPrinters() {
@@ -263,7 +316,13 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
   if (req.method === 'GET' && url.pathname === '/health') {
-    return sendJson(res, 200, { ok: true, service: 'Danbaiwa Print Agent', port: PORT, raw: true });
+    return sendJson(res, 200, {
+      ok: true,
+      service: 'Danbaiwa Print Agent',
+      port: PORT,
+      raw: true,
+      version: AGENT_VERSION,
+    });
   }
 
   if (req.method === 'GET' && url.pathname === '/printers') {
@@ -315,6 +374,8 @@ const server = http.createServer(async (req, res) => {
 if (require.main === module) {
   // Loopback only: the app always calls 127.0.0.1, so there is no reason for this to be
   // reachable from the network, and every reason for it not to be.
+  void ensureRawPrintExe();
+
   server.listen(PORT, '127.0.0.1', () => {
     console.log('');
     console.log('  Danbaiwa Restaurant OS - Print Agent');

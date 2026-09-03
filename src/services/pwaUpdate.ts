@@ -61,6 +61,15 @@ interface UpdateState {
   dismiss: () => void;
   /** Activate the waiting worker and reload onto it. */
   applyUpdate: () => void;
+  /**
+   * Throw away the installed app files and fetch them again from scratch.
+   *
+   * For the till that shows the update prompt, is told to update, and stays exactly
+   * where it was. At that point the service worker is not cooperating and there is
+   * nothing left to negotiate with — so this removes it outright rather than asking
+   * it again. Records, settings and the queue are in IndexedDB and are not touched.
+   */
+  forceReinstall: () => Promise<void>;
   /** Ask the server now rather than waiting for the timer. */
   checkNow: () => Promise<void>;
 }
@@ -83,8 +92,54 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   applyUpdate: () => {
     // updateSW(true) tells the waiting worker to take over and reloads onto it. Without
     // it the worker waits for every window to close, which on a kiosk never happens.
-    if (applyFn) void applyFn(true);
-    else window.location.reload();
+    if (!applyFn) {
+      window.location.reload();
+      return;
+    }
+
+    // …and when that does nothing, say so and fix it anyway.
+    //
+    // The polite handover is a request: the page asks the waiting worker to take over
+    // and waits for the browser to report that it did. On a till where that request
+    // goes unanswered — a worker wedged in a state it will not leave — the button
+    // appears to do nothing at all, for ever, which is precisely the report this
+    // exists to answer. Give it a few seconds, then stop asking.
+    let handedOver = false;
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener(
+        'controllerchange',
+        () => {
+          handedOver = true;
+        },
+        { once: true }
+      );
+    }
+
+    void applyFn(true);
+
+    setTimeout(() => {
+      if (!handedOver) void get().forceReinstall();
+    }, 5000);
+  },
+
+  forceReinstall: async () => {
+    try {
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((r) => r.unregister().catch(() => false)));
+      }
+      if (typeof caches !== 'undefined') {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+      }
+    } catch (e) {
+      console.warn('[PWA] could not fully clear the old app files:', e);
+    } finally {
+      // A plain reload can still be answered from the browser's own HTTP cache, which
+      // on a till that has been stuck for days is the last place the old build hides.
+      // A one-off query string cannot be.
+      window.location.replace(`${window.location.pathname}?fresh=${Date.now()}`);
+    }
   },
 
   checkNow: async () => {
@@ -127,6 +182,12 @@ async function checkForUpdate(): Promise<boolean> {
 
 /** Wires the service worker up. Called once, from main.tsx. */
 export function initPwaUpdates(): void {
+  // Tidy away the cache-buster forceReinstall navigates with, so it does not sit in
+  // the address bar or ride along into anything that reads the current URL.
+  if (new URLSearchParams(window.location.search).has('fresh')) {
+    window.history.replaceState(null, '', window.location.pathname);
+  }
+
   applyFn = registerSW({
     onNeedRefresh() {
       useUpdateStore.setState({ updateReady: true, dismissed: false });

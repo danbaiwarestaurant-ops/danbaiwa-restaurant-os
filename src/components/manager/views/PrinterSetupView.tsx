@@ -31,18 +31,33 @@ type Status = 'ready-direct' | 'ready-agent' | 'not-ready';
 interface Probe {
   status: Status;
   agentRunning: boolean;
+  /** null when no agent answered; a number when one did. */
+  agentVersion: number | null;
   link: PrinterLink | null;
   blockedReason: string | null;
 }
 
 const AGENT_HEALTH = 'http://127.0.0.1:9100/health';
 
-async function isAgentRunning(): Promise<boolean> {
+/**
+ * What the current app expects the helper on this machine to be.
+ *
+ * Must match AGENT_VERSION in print-server.cjs. An older helper answers every health
+ * check perfectly while behaving nothing like the current one — the version before this
+ * spent about a second recompiling itself for every receipt — so "it is running" is not
+ * the same question as "it is the right one", and the page has to ask both.
+ */
+const EXPECTED_AGENT_VERSION = 2;
+
+async function probeAgent(): Promise<number | null> {
   try {
     const res = await fetch(AGENT_HEALTH, { signal: AbortSignal.timeout(1200) });
-    return res.ok;
+    if (!res.ok) return null;
+    const body = await res.json();
+    // A helper predating version reporting is version 1 by definition.
+    return typeof body?.version === 'number' ? body.version : 1;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -72,10 +87,11 @@ export const PrinterSetupView: React.FC = () => {
   const widthMm = config.paperWidthMm ?? 58;
 
   const refresh = useCallback(async () => {
-    const [link, agentRunning] = await Promise.all([loadPrinterLink(), isAgentRunning()]);
+    const [link, agentVersion] = await Promise.all([loadPrinterLink(), probeAgent()]);
+    const agentRunning = agentVersion !== null;
     const blockedReason = directPrintUnavailableReason();
     const status: Status = link ? 'ready-direct' : agentRunning ? 'ready-agent' : 'not-ready';
-    setProbe({ status, agentRunning, link, blockedReason });
+    setProbe({ status, agentRunning, agentVersion, link, blockedReason });
   }, []);
 
   useEffect(() => {
@@ -171,6 +187,22 @@ export const PrinterSetupView: React.FC = () => {
           Re-check
         </button>
       </div>
+
+      {probe?.agentRunning && probe.agentVersion !== null && probe.agentVersion < EXPECTED_AGENT_VERSION && (
+        <div className="border-2 border-amber-400 bg-amber-50 p-4 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+          <div className="space-y-1.5">
+            <div className="text-xs font-black uppercase tracking-wide text-amber-950">
+              The printer helper on this computer is out of date
+            </div>
+            <p className="text-[11px] font-semibold text-amber-900">
+              Receipts still print, but slowly — the older helper rebuilt part of itself
+              for every single ticket. Download both files again from Step 2 below and run
+              the installer; it replaces the running helper in place.
+            </p>
+          </div>
+        </div>
+      )}
 
       {note && (
         <div
@@ -336,12 +368,19 @@ export const PrinterSetupView: React.FC = () => {
               </Step>
             </ol>
 
+            <p className="text-[11px] font-semibold text-slate-600 border-t border-slate-200 pt-3">
+              <strong>Already have the helper and just need a newer one?</strong> Same steps —
+              download both files again and run the installer. It stops the old helper first,
+              so nothing is left running the previous version.
+            </p>
+
             <div className="flex items-center gap-2 pt-1">
               <ConsoleButton onClick={refresh} variant="primary">
                 Re-check now
               </ConsoleButton>
               <span className="text-[11px] font-semibold text-slate-500">
-                Helper currently {probe.agentRunning ? 'running' : 'not running'} on this computer.
+                Helper currently {probe.agentRunning ? 'running' : 'not running'} on this computer
+                {probe.agentRunning && ` (version ${probe.agentVersion}, current is ${EXPECTED_AGENT_VERSION})`}.
               </span>
             </div>
           </div>

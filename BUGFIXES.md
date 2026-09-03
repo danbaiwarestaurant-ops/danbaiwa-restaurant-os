@@ -5,6 +5,219 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-03 — The print agent had to be started by hand after every reboot
+
+**What the user saw:** step 4 of `install-print-agent.bat` reported that it could not
+register the startup task and that someone would have to run `start-hidden.vbs` after
+every reboot. They were doing exactly that — keeping a shortcut on the desktop and
+clicking it each morning — on a till that is meant to be unattended.
+
+**Root cause:** the installer treated `schtasks /create` returning non-zero as the end of
+the road. It is not: `schtasks` is refused often enough in the field (Group Policy
+restricting Task Scheduler, a non-admin account, security software) and it is only one of
+at least three ways Windows starts a program at logon. The Startup folder and the
+per-user `Run` key both need no Administrator rights and no scheduler service at all. The
+warning was accurate about the consequence and wrong about the cause — automating it was
+always possible.
+
+**Fix:** `install-print-agent.bat` now tries three mechanisms in order and reports which
+one took: Task Scheduler, then a script in the Startup folder, then the current user's
+`Run` key. All three are cleared first, so re-running the installer can never leave two
+entries racing to bind port 9100. The warning survives only for the case where all three
+are blocked, and now says that this points at a policy or security product rather than at
+the till.
+
+The Startup-folder entry is generated rather than copied: `start-hidden.vbs` locates
+`run-agent.cmd` relative to itself, which from the Startup folder resolves to the wrong
+place, so the generated one carries the absolute path.
+
+**Files:** `install-print-agent.bat`, `PRINTING.md`.
+
+---
+
+## 2026-09-03 — Silent printing took five seconds a ticket, and the whole till felt slow with it
+
+**What the user saw:** after installing the print agent, receipts did print silently — but
+more than five seconds after the button was pressed. Pressing several presets in a row
+produced nothing for a while and then all of them together. The delay was not confined to
+the paper: the toast confirming the sale and the entry appearing in the sidebar, both of
+which used to be instant, now lagged too. Silent printing exists to save time at the
+counter, so this defeated the point of having it.
+
+**Root cause:** two independent faults, one in the agent and one in the app.
+
+1. **The agent compiled a C# program on every single receipt.** `sendRaw` spawned
+   `powershell.exe` per job, and that script used `Add-Type -TypeDefinition` to compile the
+   winspool P/Invoke wrapper from source at runtime. Measured on a fast machine:
+   **358–1029ms for the compile alone, plus ~500ms of PowerShell startup, per ticket.** On
+   a slower till that is the whole five seconds. Concurrent presses each spawned their own
+   PowerShell, so a burst contended and then emerged together.
+2. **The till waited for the printer before reporting the sale.** `createAndPrintTicket`
+   awaited `PrintAdapter.printTicket` and returned its message, so the toast — and the
+   caller — sat behind a spooler round trip. The sale itself was already committed and on
+   screen; only the confirmation of it was blocked.
+
+**Fix:**
+- `print-server.cjs` — the P/Invoke wrapper is compiled **once** to
+  `danbaiwa-rawprint.exe` and invoked directly with `execFile`. Measured end to end:
+  ~180ms per job against ~850–1750ms before. The build runs at agent startup so the first
+  ticket of the day does not pay for it either, and falls back with a clear message if the
+  .NET Framework compiler is somehow unavailable. Jobs are also queued strictly serially,
+  so receipts leave the roll in the order they were rung up rather than in whatever order
+  four concurrent processes happened to finish.
+- `src/store/useTicketStore.ts` — the print is dispatched and **not awaited**. The paper is
+  a side effect of the sale, not part of it. Because a failure can no longer travel in the
+  return value, a `printError` field carries it instead and `src/App.tsx` raises the error
+  toast when it arrives — so an unplugged printer is noticed at the counter rather than
+  discovered at the end of a shift, when nobody can say which tickets never came out.
+- `src/services/print/directPrinter.ts` — `isDirectPrinterReady()` was doing a database
+  read and a walk of the browser's granted-device list on every receipt. Now cached, and
+  invalidated when the pairing changes or a print fails.
+
+---
+
+## 2026-09-03 — A till showed the update banner, the cashier pressed it, and nothing ever changed
+
+**What the user saw:** every other device picked up new deployments from the live link.
+One machine did not. It displayed the "a new version is ready" banner, the banner was
+clicked, and the app carried on running the old build — through thousands of reloads.
+Opening the same URL in Microsoft Edge on that same machine showed the current version
+immediately.
+
+**Root cause:** two separate faults in how a new build reaches a running till.
+
+1. **A waiting service worker never activates on a kiosk.** A new build installs and then
+   sits in the `waiting` state until every window running the old one has closed. A reload
+   is itself such a window, so reloading can never release it. The till was checked for
+   updates only at startup — and a kiosk never starts up — and the prompt was drawn at the
+   **bottom** of the screen, the one edge kiosk mode makes easy to miss.
+2. **`updateSW(true)` is a request, not a guarantee.** It asks the waiting worker to take
+   over and waits for the browser to report the handover. On this machine the request went
+   unanswered, so the button genuinely did nothing, and there was no path that did not
+   depend on the worker's cooperation. Edge was unaffected because a service worker
+   registration belongs to the browser, not to the machine.
+
+**Fix:**
+- `src/services/pwaUpdate.ts` (new) — checks for updates every 15 minutes, on
+  `visibilitychange`, and on `online`. `applyUpdate` now watches for `controllerchange`
+  after asking, and escalates to `forceReinstall` after five seconds of silence.
+  `forceReinstall` unregisters every worker, deletes every cache, and navigates with a
+  one-off `?fresh=` query string so the HTTP cache cannot answer either. IndexedDB is
+  untouched, so records, settings and the outbox survive and the till comes back signed in.
+- `src/components/common/UpdateBanner.tsx` (new) — the prompt moved to the top of the
+  screen, rendered as a React component above the app rather than appended to `document.body`.
+  Dismiss hides it for ten minutes rather than for good.
+- `src/components/manager/AppVersionSettings.tsx` (new) — shows the running build, a
+  **Check for updates** button, and **Reinstall the app on this till** for when a machine
+  is stuck and no banner ever appears.
+- `vite.config.ts` — stamps `__APP_BUILD__` (version + build time) into the bundle, so
+  "is this till on the new version?" is answerable by looking. Also surfaced in the login
+  screen's diagnostics panel.
+- `src/main.tsx`, `src/App.tsx` — banner mounted above the auth guard, the till and the
+  console.
+- `Launch POS (Vercel).bat` — finds Chrome **or** Edge, and kills the matching process
+  (killing `chrome.exe` does nothing when launching Edge, and `--kiosk-printing` is only
+  honoured by a fresh process).
+
+---
+
+## 2026-09-02 — Silent printing needed Node on every till, and the receipt was mostly blank roll
+
+**What the user saw:** printing silently from a client's device meant installing Node,
+cloning the repository and downloading ~230MB of headless Chromium per machine. Tickets
+took a second or two to appear and were far longer than the information on them.
+
+**Root cause:** the receipt was built as HTML, rendered to a PDF through Playwright's
+Chromium, and spooled through `pdf-to-printer`. That is an enormous amount of machinery to
+produce a few hundred bytes of printer commands, it put a browser engine on every till, and
+the resulting PDF was still at the mercy of whatever paper size the printer driver claimed.
+The layout also devoted roughly 28mm — over a third of the ticket — to a QR code.
+
+**Fix:**
+- `src/services/print/escpos.ts` (new) — the receipt as ESC/POS bytes, built once and used
+  by every route. `fitWidth` sizes magnified text to the roll instead of letting it wrap
+  mid-number; `encodeText` transliterates (₦ → N) so nothing above `0x7f` reaches the
+  printer; `EscPosBuilder` tracks its own height so ticket length is a tested property.
+- `src/services/print/directPrinter.ts` (new) — Web Serial and WebUSB, so a till with a
+  reachable printer needs **nothing installed at all** and works from the deployed PWA
+  unchanged.
+- `print-server.cjs` — Express, Playwright and `pdf-to-printer` all removed. It is now a
+  single zero-dependency file that spools a RAW job through `winspool.drv`. Install is Node
+  plus two files, with no `npm install`.
+- `install-print-agent.bat` (new) — per-user install, **no Administrator required**, and
+  deliberately not SYSTEM: a task running as SYSTEM cannot see a printer installed for one
+  user only and silently prints nothing.
+- Ticket layout: **76mm → 42mm**. The QR became a one-line tracking id, the amount doubled
+  in size, the business name grew, and the subtitle, footer, one rule and two feed lines
+  went.
+- `DeviceConfig.paperWidthMm` (58 | 80) rides in `account_settings`, so an account that
+  moves to 80mm printers sets it once from anywhere.
+- `src/components/manager/views/PrinterSetupView.tsx` (new) — a guided tab that states in
+  one line whether receipts print silently, and serves the agent and installer as download
+  links (`scripts/copy-print-agent.mjs` → `public/print-agent/`).
+
+**Follow-up the same day:** pairing recorded a printer that could not be opened. Choosing a
+port in the browser's chooser only grants permission; it says nothing about whether the
+port opens. A USB printer whose Windows driver holds the port exclusively therefore paired
+"successfully" and then failed on every ticket — and worse, a saved-but-dead pairing takes
+priority over the print agent, so a machine that *was* printing correctly would stop.
+`pairSerial` now opens and closes the port before saving anything, and
+`explainOpenFailure` replaces the browser's identical-for-every-cause "Failed to open
+serial port" with the actual diagnosis.
+
+---
+
+## 2026-09-02 — Password reset links opened the wrong site, and an account could only be used on the machine it was created on
+
+**What the user saw:** three complaints.
+
+1. Password reset emails led to a Vercel page that was not the till.
+2. Signing in on a browser profile the account had never been used on was refused, whatever
+   combination of credentials was tried.
+3. "Create Account" accepted an email that already belonged to a live business, from a
+   different browser profile.
+
+**Root cause:**
+
+1. Supabase honours `redirectTo` **only** when the exact URL is on the project's Redirect
+   URLs allow-list, and silently substitutes the project's Site URL otherwise. Tills run on
+   addresses that were not on that list.
+2. Two faults. The cloud sign-in only ever tried the PIN-derived password, so typing the
+   account password came back as "invalid credentials" — and once a local profile existed,
+   the cloud was never consulted at all, so a stale or wrong local copy refused the correct
+   current credentials for ever. Separately, an account whose email was never confirmed has
+   no session on the machine that registered it, so its `users` row (PIN and password
+   hashes included) is never uploaded and no other device can pull it down.
+3. The duplicate check was `select('id').eq('email', …)` against the `users` table, run on
+   the anon key with no session. Every RLS policy there is granted `TO authenticated`, so
+   it **always** returned nothing. `authenticateAdminWithSupabase` then signed the caller
+   in to the existing account and reported it as a fresh signup, and registration wrote new
+   PIN, password and recovery-key hashes over a live business's and synced them up.
+
+**Fix:**
+- `src/services/supabase/supabaseClient.ts` — `authRedirectUrl()` (with a
+  `VITE_AUTH_REDIRECT_URL` override), and `signUpNewAdminAccount()`, which refuses an
+  existing email. It detects both duplicate shapes: the plain "User already registered"
+  error, and the obfuscated response Supabase returns when email confirmations are on — a
+  user object with an **empty `identities` array**, which the old code read as success.
+- `src/store/useAuthStore.ts` — cloud adoption tries both the derived and the typed secret;
+  a failed *local* check now asks the cloud before declaring the credentials wrong, and
+  repairs the stale local hash on success; a verified cloud sign-in with no profile in the
+  cloud rebuilds one locally. That rebuild is written **local-only** and backdated: it
+  shares a primary key with the genuine profile the original till still owes, so uploading
+  it would permanently replace the real record — including the recovery key — on every
+  device. `cloudBackfill.ts` skips rows flagged `rebuiltLocally`.
+- Registration now warns loudly when a sign-up returns no session, because that account
+  cannot be used on any other device until its email is confirmed.
+- `src/components/auth/TillDiagnostics.tsx` (new) — a "Why can't I sign in?" panel on the
+  login screen. A kiosk has no address bar and no devtools, so the address, whether the
+  origin is secure, whether PIN checks are even possible, and which accounts the machine
+  holds were all unanswerable from the seat.
+- `src/services/auth/loginErrors.ts` — cloud refusals now carry the provider's own words
+  instead of dropping them.
+
+---
+
 ## 2026-09-01 — Sync crawled through the queue one row at a time, and the sync button kept demanding the admin PIN
 
 **What the user saw:** two complaints about the same badge.

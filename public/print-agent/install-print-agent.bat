@@ -78,6 +78,18 @@ set /p "APPURL=  App URL [!APPURL!]: "
 :: --- 4. Install -----------------------------------------------------------
 echo.
 echo  [3/5] Installing to !DEST! ...
+
+:: Stop an agent that is already running, FIRST.
+::
+:: Without this, re-running the installer to pick up a newer print-server.cjs
+:: silently changes nothing: the old agent still holds port 9100, so the new one
+:: exits immediately with EADDRINUSE, and the health check at the end is answered
+:: by the old process. The installer reports success and the till carries on
+:: running the version you were trying to replace.
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":9100" ^| findstr "LISTENING"') do (
+  taskkill /F /PID %%P >nul 2>&1
+)
+timeout /t 1 /nobreak >nul
 if not exist "!DEST!" mkdir "!DEST!" >nul 2>&1
 copy /y "%SRC%" "!DEST!\print-server.cjs" >nul
 if errorlevel 1 (
@@ -85,6 +97,10 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+
+:: Rebuilt from the new source on next start. Deleting it costs one second, and
+:: keeping a stale one would pair a new agent with the old spooling behaviour.
+if exist "!DEST!\danbaiwa-rawprint.exe" del /f /q "!DEST!\danbaiwa-rawprint.exe" >nul 2>&1
 
 :: The launcher carries this till's settings, so the agent itself stays generic
 :: and can be replaced by copying a newer file over it.
@@ -104,14 +120,56 @@ echo        OK
 :: --- 5. Start at logon ----------------------------------------------------
 echo.
 echo  [4/5] Registering it to start at logon...
+
+:: Three ways to start at logon, tried in order.
+::
+:: This used to try Task Scheduler alone and, when schtasks returned non-zero, print a
+:: warning telling the operator to double-click a file after every reboot. That was a
+:: false surrender: schtasks is refused often enough (Group Policy, a non-admin account,
+:: security software) and it is not the only mechanism Windows has. The Startup folder
+:: and the per-user Run key both need no Administrator rights and no scheduler service.
+:: A till should never depend on somebody remembering to click something.
+
+set "STARTUPDIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "STARTUPFILE=!STARTUPDIR!\DanbaiwaPOS Print Agent.vbs"
+set "RUNKEY=HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+set "AUTOSTART="
+
+:: Clear all three first, so re-running the installer can never leave two entries
+:: fighting to bind the same port.
 schtasks /delete /tn "%TASKNAME%" /f >nul 2>&1
-schtasks /create /tn "%TASKNAME%" /tr "wscript.exe \"!DEST!\start-hidden.vbs\"" /sc ONLOGON /f >nul
-if errorlevel 1 (
-  echo  WARNING: Could not register the startup task. The agent still works,
-  echo           but someone must start it after each reboot by running:
-  echo           !DEST!\start-hidden.vbs
+if exist "!STARTUPFILE!" del /f /q "!STARTUPFILE!" >nul 2>&1
+reg delete "!RUNKEY!" /v "%TASKNAME%" /f >nul 2>&1
+
+:: 1. Task Scheduler - the tidiest, and visible in a place administrators look.
+schtasks /create /tn "%TASKNAME%" /tr "wscript.exe \"!DEST!\start-hidden.vbs\"" /sc ONLOGON /f >nul 2>&1
+if not errorlevel 1 set "AUTOSTART=Task Scheduler"
+
+:: 2. Startup folder - the oldest and most permissive mechanism Windows has.
+::    A copy of start-hidden.vbs would not work here: it locates run-agent.cmd relative
+::    to itself, and from the Startup folder that resolves to the wrong place. This one
+::    carries the absolute path instead.
+if not defined AUTOSTART (
+  if not exist "!STARTUPDIR!" mkdir "!STARTUPDIR!" >nul 2>&1
+  > "!STARTUPFILE!" echo Set sh = CreateObject("WScript.Shell")
+  >>"!STARTUPFILE!" echo sh.Run """!DEST!\run-agent.cmd""", 0, False
+  if exist "!STARTUPFILE!" set "AUTOSTART=Startup folder"
+)
+
+:: 3. The current user's Run key - no folder to be tidied away by anyone.
+if not defined AUTOSTART (
+  reg add "!RUNKEY!" /v "%TASKNAME%" /t REG_SZ /d "wscript.exe \"!DEST!\start-hidden.vbs\"" /f >nul 2>&1
+  if not errorlevel 1 set "AUTOSTART=Run key"
+)
+
+if defined AUTOSTART (
+  echo        OK - via !AUTOSTART!
 ) else (
-  echo        OK
+  echo  WARNING: None of the three startup methods could be registered on this PC,
+  echo           which is unusual and suggests a policy or security product is
+  echo           blocking all of them. Until that is lifted, someone must run this
+  echo           after each reboot:
+  echo           !DEST!\start-hidden.vbs
 )
 
 :: --- 6. Start now and verify ---------------------------------------------
@@ -140,10 +198,12 @@ echo  Done. Receipts will now print silently to:
 echo        !PRINTER!
 echo.
 echo  Set the roll width (58mm or 80mm) in the app under
-echo  Manager Console - Settings - Receipt Printer.
+echo  Manager Console - Printer Setup.
 echo.
-echo  To remove later:
+echo  To remove later, whichever of these was used:
 echo        schtasks /delete /tn "%TASKNAME%" /f
+echo        del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DanbaiwaPOS Print Agent.vbs"
+echo        reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "%TASKNAME%" /f
 echo  ---------------------------------------------
 echo.
 pause

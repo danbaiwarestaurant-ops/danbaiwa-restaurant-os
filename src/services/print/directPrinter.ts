@@ -68,10 +68,26 @@ export async function loadPrinterLink(): Promise<PrinterLink | null> {
 
 export async function savePrinterLink(link: PrinterLink): Promise<void> {
   await db.config.put({ key: LINK_KEY, value: link });
+  readyCache = null;
 }
 
 export async function clearPrinterLink(): Promise<void> {
   await db.config.delete(LINK_KEY);
+  readyCache = null;
+}
+
+/**
+ * Whether a printer is reachable, remembered between tickets.
+ *
+ * This is asked once per receipt, and answering it means a database read plus a walk of
+ * the browser's granted-device list. Cheap individually, wasteful on every sale, and
+ * pure latency between the cashier pressing a preset and the paper moving. Invalidated
+ * whenever the pairing changes, and whenever a print actually fails.
+ */
+let readyCache: boolean | null = null;
+
+export function resetDirectPrinterCache(): void {
+  readyCache = null;
 }
 
 const nav = (): any => (typeof navigator === 'undefined' ? {} : (navigator as any));
@@ -323,14 +339,21 @@ export async function pairUsb(): Promise<PairResult> {
 
 /** Whether a paired printer is present and reachable right now. */
 export async function isDirectPrinterReady(): Promise<boolean> {
+  if (readyCache !== null) return readyCache;
   const link = await loadPrinterLink();
-  if (!link) return false;
-  try {
-    if (link.transport === 'serial') return !!(await findGrantedSerialPort(link));
-    return !!(await findGrantedUsbDevice(link));
-  } catch {
+  if (!link) {
+    readyCache = false;
     return false;
   }
+  try {
+    readyCache =
+      link.transport === 'serial'
+        ? !!(await findGrantedSerialPort(link))
+        : !!(await findGrantedUsbDevice(link));
+  } catch {
+    readyCache = false;
+  }
+  return readyCache;
 }
 
 /**

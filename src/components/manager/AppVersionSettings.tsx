@@ -12,7 +12,8 @@ import { buildLabel, useUpdateStore } from '../../services/pwaUpdate';
  * one until every window closes — so the build has to be readable, per till, on screen.
  */
 export const AppVersionSettings: React.FC = () => {
-  const { updateReady, checking, lastCheckMessage, checkNow, applyUpdate } = useUpdateStore();
+  const { updateReady, checking, lastCheckMessage, checkNow, applyUpdate, forceReinstall } =
+    useUpdateStore();
 
   return (
     <Panel
@@ -60,9 +61,27 @@ export const AppVersionSettings: React.FC = () => {
 
         <p className="text-[11px] font-semibold text-slate-500">
           The till checks on its own every fifteen minutes and whenever it comes back
-          online. If a till is stuck on an old version and this button does not shift it,
-          close the app completely — every window — and open it again.
+          online.
         </p>
+
+        <div className="border-t-2 border-slate-200 pt-3 space-y-2">
+          <div className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+            Still showing an old version?
+          </div>
+          <p className="text-[11px] font-semibold text-slate-600">
+            If this till keeps showing an old version — the update button does nothing, or
+            other devices are on a newer build than this one — press this. It deletes the
+            app files stored on this machine and downloads them again.
+          </p>
+          <p className="text-[11px] font-semibold text-slate-600">
+            <strong>Your data is safe.</strong> Tickets, shifts, staff and settings are
+            stored separately and are not touched. The till reloads once and comes back
+            signed in.
+          </p>
+          <ConsoleButton onClick={() => void forceReinstall()}>
+            Reinstall the app on this till
+          </ConsoleButton>
+        </div>
       </div>
     </Panel>
   );

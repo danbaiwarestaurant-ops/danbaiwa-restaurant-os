@@ -19,6 +19,16 @@ interface TicketState {
    * to every cashier's tickets the first time they voided anything.
    */
   scope: string | undefined;
+  /**
+   * A print that failed after the sale was already recorded and shown.
+   *
+   * Printing no longer blocks the ticket, so a failure can no longer be reported by
+   * the return value — but it must still be reported. App picks this up and raises
+   * the error toast, so an unplugged printer is noticed at the counter rather than
+   * discovered at the end of the shift.
+   */
+  printError: string | null;
+  clearPrintError: () => void;
   loadTickets: (userId?: string) => Promise<void>;
   createAndPrintTicket: (amount: number, cashierId?: string) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
@@ -32,6 +42,8 @@ export const useTicketStore = create<TicketState>((set, get) => ({
   isLoading: false,
   activeFlashingAmount: null,
   scope: undefined,
+  printError: null,
+  clearPrintError: () => set({ printError: null }),
 
   loadTickets: async (userId?: string) => {
     set({ isLoading: true, scope: userId });
@@ -93,8 +105,24 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // STEP 3: Visual flash effect
     get().triggerFlash(amount);
 
-    // STEP 4: Dispatch thermal print (after DB commit — crash-safe)
-    const printRes = await PrintAdapter.printTicket(newTicket, config.businessName, config.paperWidthMm);
+    // STEP 4: Dispatch the print — deliberately NOT awaited.
+    //
+    // The sale is already committed and on screen; the paper is a side effect of it,
+    // not part of it. Awaiting the printer made the whole till feel slow: the toast,
+    // the sidebar entry and the next keystroke all waited on a spooler round trip, so
+    // the cashier stood still for as long as the printer took. Silent printing exists
+    // to save time at the counter, and blocking on it spent that saving straight back.
+    //
+    // Failures are surfaced through printError instead of the return value.
+    void PrintAdapter.printTicket(newTicket, config.businessName, config.paperWidthMm)
+      .then((printRes) => {
+        if (!printRes.success) {
+          set({ printError: `Ticket #${newTicket.id} did not print: ${printRes.message}` });
+        }
+      })
+      .catch((e: any) => {
+        set({ printError: `Ticket #${newTicket.id} did not print: ${e?.message || 'unknown printer error'}` });
+      });
 
     // Trigger outbox check and immediate cloud sync push
     useSyncStore.getState().checkOutbox().then(() => {
@@ -104,7 +132,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     return {
       success: true,
       ticket: newTicket,
-      message: printRes.message,
+      message: `Ticket #${newTicket.id} issued`,
     };
   },
 

@@ -31,7 +31,7 @@ const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 
 export function App() {
   const { loadConfig } = useDeviceStore();
-  const { loadTickets, voidTicket } = useTicketStore();
+  const { loadTickets, voidTicket, printError, clearPrintError } = useTicketStore();
   const { currentShift, loadShift, loadShiftHistory } = useShiftStore();
   const { loadExpenses } = useExpenseStore();
   const { checkOutbox } = useSyncStore();
@@ -83,6 +83,16 @@ export function App() {
     loadUsers();
     checkOutbox();
   }, []);
+
+  // Printing is dispatched without blocking the sale, so a failure arrives after the
+  // ticket has already been reported as issued. Raise it when it does — otherwise an
+  // unplugged printer is discovered at the end of the shift, by which point nobody
+  // knows which tickets never came out.
+  useEffect(() => {
+    if (!printError) return;
+    showError(printError);
+    clearPrintError();
+  }, [printError]);
 
   // Reload data whenever the signed-in user or the view changes.
   //

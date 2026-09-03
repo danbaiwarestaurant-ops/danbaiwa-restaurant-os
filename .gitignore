@@ -30,3 +30,9 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Print agent helper, compiled on first run by print-server.cjs
+danbaiwa-rawprint.exe
+
+# Copied from the repo root by scripts/copy-print-agent.mjs
+public/print-agent/

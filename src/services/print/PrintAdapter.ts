@@ -1,7 +1,7 @@
 import { Ticket } from '../../types/ticket';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { buildTicketReceipt, bytesToBase64, paperSpec } from './escpos';
-import { isDirectPrinterReady, printDirect } from './directPrinter';
+import { isDirectPrinterReady, printDirect, resetDirectPrinterCache } from './directPrinter';
 
 export interface PrintResult {
   success: boolean;
@@ -99,6 +99,8 @@ export class PrintAdapter {
         } catch (e: any) {
           // An unplugged printer must not lose the ticket: fall through to the routes
           // below rather than failing the sale.
+          // The cached 'yes, a printer is there' is now suspect — re-check next ticket.
+          resetDirectPrinterCache();
           console.warn('[PrintAdapter] Direct print failed, falling back:', e?.message);
         }
       }

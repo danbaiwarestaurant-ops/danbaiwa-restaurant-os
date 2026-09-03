@@ -121,6 +121,24 @@ It lists the printers installed on that PC, asks you to type the one to use, ask
 the app URL, installs itself into the user's AppData, registers itself to start at
 logon with no visible window, starts it, and confirms it is answering.
 
+### Starting at logon
+
+Three mechanisms are tried in order, and the installer reports which one took:
+
+1. **Task Scheduler** — the tidiest, and where an administrator would look for it.
+2. **Startup folder** (`shell:startup`) — the oldest and most permissive mechanism
+   Windows has. No Administrator rights, no scheduler service.
+3. **The current user’s Run key** — `HKCU\…\CurrentVersion\Run`.
+
+All three are cleared before any is set, so re-running the installer never leaves two
+entries racing to bind port 9100. Only if all three are refused does it fall back to
+asking you to start the agent by hand — and that points at a Group Policy or a security
+product rather than at the till.
+
+If you have been starting it from a shortcut yourself, delete that shortcut after
+running the installer again. A duplicate is harmless — the second copy exits because the
+port is taken — but it is one more thing to explain later.
+
 **No Administrator rights needed.** It installs per-user and runs at that user's logon,
 deliberately: a task running as SYSTEM cannot see a printer that was installed for one
 user only, and would silently print nothing.
@@ -166,15 +184,27 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\DanbaiwaPOS"
 
 The last resort, used automatically when neither route above is available.
 
-Chrome launched with `--kiosk-printing` intercepts `window.print()` and sends the job
-straight to the Windows default printer. Use `Launch POS (Vercel).bat`.
+A browser launched with `--kiosk-printing` intercepts `window.print()` and sends the job
+straight to the Windows default printer. Use `Launch POS (Vercel).bat`, which finds
+Chrome or Edge automatically — set `BROWSER` at the top of that file to force one.
 
-**Chrome must be fully closed first.** If Chrome is already running, the new window joins
+**The browser must be fully closed first.** If it is already running, the new window joins
 the existing process, which was started without the flag, and the dialog comes back. The
 `.bat` handles this with `taskkill`.
 
-Limitations: Chrome only, page size decided by the driver rather than the app, and a
-client who simply opens the URL in an ordinary browser gets the print dialog.
+Limitations: Chromium browsers only (Chrome, Edge), page size decided by the driver rather
+than the app, and a client who simply opens the URL in an ordinary browser gets the print
+dialog.
+
+### A till stuck on an old version
+
+A service worker registration belongs to the browser, not to the machine, and can get
+wedged for one site: that browser alone keeps serving an old build however often it is
+reloaded, while every other device — and the other browser on the same PC — is fine.
+
+In the app: Settings > App Version shows the build, and **Reinstall the app on this till**
+clears it. From outside: F12 > Application > Service workers > Unregister, then
+Ctrl+Shift+R. Or set `BROWSER=EDGE` in the launcher and move on; nothing is lost by it.
 
 ---
 
