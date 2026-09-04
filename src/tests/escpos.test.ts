@@ -161,12 +161,12 @@ describe('the ticket receipt', () => {
     expect(Array.from(bytes.slice(0, 2))).toEqual([0x1b, 0x40]);
   });
 
-  it('feeds before cutting — the cutter sits past the head', async () => {
+  it('cuts without feeding first — GS V feeds to the blade itself', async () => {
+    // This used to send ESC d 2 before the cut, which paid the head-to-blade distance
+    // twice: once ours, once the printer's. See "roll consumed per ticket" below.
     const bytes = await buildTicketReceipt(spec);
-    const cut = indexOfSeq(bytes, [0x1d, 0x56, 0x42]);
-    const lastFeed = indexOfSeq(bytes.slice(cut - 3), [0x1b, 0x64]);
-    expect(cut).toBeGreaterThan(0);
-    expect(lastFeed).toBe(0);
+    expect(indexOfSeq(bytes, [0x1d, 0x56, 0x42])).toBeGreaterThan(0);
+    expect(indexOfSeq(bytes, [0x1b, 0x64])).toBe(-1);
   });
 
   it('prints the tracking id as one plain line, and no QR at all', async () => {
@@ -176,25 +176,27 @@ describe('the ticket receipt', () => {
     expect(indexOfSeq(bytes, [0x1d, 0x76, 0x30, 0x00])).toBe(-1);
   });
 
-  it('prints the amount at twice the magnification it used to', async () => {
-    // Was GS ! with width 2, height 3 — nibbles (1,2). Now width 4, height 6 — (3,5).
+  it('prints the amount at four times the body height', async () => {
+    // GS ! width 4, height 4 — nibbles (3,3). It was briefly 6x tall, which read no
+    // better across a counter and cost 6mm of roll on every ticket printed.
     const bytes = await buildTicketReceipt(spec);
-    expect(indexOfSeq(bytes, [0x1d, 0x21, (3 << 4) | 5])).toBeGreaterThan(0);
+    expect(indexOfSeq(bytes, [0x1d, 0x21, (3 << 4) | 3])).toBeGreaterThan(0);
   });
 
   it('shrinks a very large amount rather than letting it wrap', async () => {
     const bytes = await buildTicketReceipt({ ...spec, amountText: '₦12,345,678.90' });
     // 14 characters cannot go above width 2 on a 32-column roll.
-    expect(indexOfSeq(bytes, [0x1d, 0x21, (3 << 4) | 5])).toBe(-1);
+    expect(indexOfSeq(bytes, [0x1d, 0x21, (3 << 4) | 3])).toBe(-1);
     expect(indexOfSeq(bytes, [0x1d, 0x21, (1 << 4) | 3])).toBeGreaterThan(0);
   });
 
   it('prints the business name taller than the body text', async () => {
     const bytes = await buildTicketReceipt(spec);
-    // Height nibble 2 means a 3x-tall line; whatever width it fitted to.
+    // Height nibble 1 means a 2x-tall line; whatever width it fitted to. Taller than the
+    // body, shorter than the amount, and a millimetre-for-millimetre choice: it was 3x.
     const at = indexOfSeq(bytes, [0x1d, 0x21]);
     expect(at).toBeGreaterThanOrEqual(0);
-    expect(bytes[at + 2] & 0x0f).toBe(2);
+    expect(bytes[at + 2] & 0x0f).toBe(1);
   });
 
   it('is about half the length of the old QR ticket', async () => {
@@ -231,5 +233,62 @@ describe('the ticket receipt', () => {
     const bytes = await buildTicketReceipt(spec);
     const restored = Buffer.from(bytesToBase64(bytes), 'base64');
     expect(Uint8Array.from(restored)).toEqual(bytes);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Paper consumed
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('roll consumed per ticket', () => {
+  const spec = {
+    businessName: 'DANBAIWA RESTAURANT',
+    amountText: 'N500',
+    ticketId: 'LOC01-DEV01-000042',
+    timestampText: '04/09/26 7:31:02 PM',
+    paperWidthMm: 80 as const,
+  };
+
+  it('fits a ticket into roughly half the roll it used to take', async () => {
+    const b = await composeTicket(spec);
+
+    // Was ~42mm: a 3x business name, a rule, a 6x amount and a 6mm trailing feed. At a
+    // thousand tickets a day every millimetre here is a metre of roll daily, so this is
+    // a budget rather than a formatting preference — read the number before raising it.
+    expect(b.heightMm).toBeLessThanOrEqual(24);
+  });
+
+  it('never sends its own feed before the cut', async () => {
+    // GS V 66 already feeds to the blade. An ESC d before it pays that distance twice.
+    const bytes = await buildTicketReceipt(spec);
+    const cutAt = indexOfSeq(bytes, [0x1d, 0x56, 0x42, 0x00]);
+    expect(cutAt).toBeGreaterThan(0);
+
+    const feedAt = indexOfSeq(bytes, [0x1b, 0x64]); // ESC d n
+    expect(feedAt).toBe(-1);
+  });
+
+  it('pins the line spacing to the character height', async () => {
+    // ESC 3 24. Left at the power-on default of 30 dots, every plain line on every
+    // ticket carries 0.75mm of blank roll.
+    const bytes = await buildTicketReceipt(spec);
+    expect(indexOfSeq(bytes, [0x1b, 0x33, 24])).toBeGreaterThanOrEqual(0);
+  });
+
+  it('still keeps a feed available for printers with no cutter', () => {
+    // Those ignore GS V entirely, so the feed is the only thing that gets the last line
+    // clear of the head to tear against.
+    const b = new EscPosBuilder(PAPER[80]);
+    b.cutAndFeed(3);
+    expect(indexOfSeq(b.build(), [0x1b, 0x64, 3])).toBeGreaterThanOrEqual(0);
+  });
+
+  it('leaves the amount the tallest thing on the ticket', async () => {
+    const b = await composeTicket(spec);
+    const bytes = b.build();
+    // GS ! with height nibble 3 (4x) for the amount, above the name's nibble 1 (2x).
+    expect(indexOfSeq(bytes, [0x1d, 0x21, 0x33])).toBeGreaterThan(
+      indexOfSeq(bytes, [0x1d, 0x21, 0x11])
+    );
   });
 });

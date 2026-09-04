@@ -164,6 +164,25 @@ describe('device identity', () => {
       expect((await loadDeviceIdentity())?.authUserId).toBe(TILL);
     });
 
+    it('enrols once when several callers ask at the same moment', async () => {
+      // Every step of enrolment is an await, so simultaneous callers all read "not
+      // enrolled yet" and all sign up. A single sign-in was minting three cloud identities
+      // inside one second, each with its own membership row, filling the owner's device
+      // list with duplicates of one machine.
+      sessionValue = ownerSession;
+
+      const [a, b, c] = await Promise.all([
+        ensureDeviceEnrolled({ deviceId: 'DEV01' }),
+        ensureDeviceEnrolled({ deviceId: 'DEV01' }),
+        ensureDeviceEnrolled({ deviceId: 'DEV01' }),
+      ]);
+
+      expect(inserted).toHaveLength(1);
+      expect(a?.authUserId).toBe(TILL);
+      expect(b?.authUserId).toBe(TILL);
+      expect(c?.authUserId).toBe(TILL);
+    });
+
     it('gives the till a credential of its own, not one derived from any PIN', async () => {
       sessionValue = ownerSession;
       const identity = await ensureDeviceEnrolled();

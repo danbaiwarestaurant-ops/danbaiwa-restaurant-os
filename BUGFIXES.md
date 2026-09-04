@@ -5,6 +5,45 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-04 — Every ticket was buying its cut feed twice, and its blank lines once
+
+**What the user saw:** noticeably more blank paper above and below each ticket than the
+ticket itself seemed to need. At a thousand tickets a day the roll cost was the complaint,
+not the appearance.
+
+**Root causes — three, of which two were ours:**
+
+1. **The cut feed, paid twice.** `cutAndFeed(2)` sent `ESC d 2` and then `GS V 66 0`. But
+   `GS V 66` *means* "feed to the cutting position, then partial cut" — the printer already
+   advances the head-to-blade distance itself. Our feed was 6mm of blank roll on every
+   ticket, on top of a feed that was going to happen anyway.
+2. **Line spacing left at the power-on default.** ESC/POS starts at 30 dots per line for a
+   font that is 24 dots tall, so each plain line carried 0.75mm of nothing. `ESC 3 24` now
+   pins the feed to the character height.
+3. **Not a bug: the gap at the top.** The cutter sits ~10–15mm past the print head, so the
+   paper between them is blank after each cut and becomes the top of the next ticket. No
+   command removes it; only a printer whose own utility offers reverse feed / "paper
+   saving" can claw it back. Worth checking per venue, but there is nothing to fix here.
+
+**Also cut, deliberately:** the amount from 6x to 4x height (−6mm), the business name from
+3x to 2x (−3mm), and the separator rule above the amount (−3mm). An amount printed four
+times taller than everything around it already separates itself.
+
+**Result:** ~42mm of printed roll per ticket to ~24mm, before the printer's own cut feed.
+At 1,000 tickets a day that is ~18 metres saved daily — roughly 80 rolls a year on an 80m
+roll.
+
+**Guarded by tests:** `escpos.test.ts` now pins the per-ticket height as a *budget*
+(≤24mm), asserts no `ESC d` precedes the cut, and asserts `ESC 3 24` is sent. Raising a
+magnification in `composeTicket` will fail the budget test rather than quietly costing a
+roll a week. `cutAndFeed(n)` still takes a feed for printers with no cutter, which ignore
+`GS V` entirely and need the feed to tear against.
+
+**Files:** `src/services/print/escpos.ts`, `src/tests/escpos.test.ts`.
+
+---
+
+
 ## 2026-09-04 — The till's counters and ticket list ran across shifts
 
 **What the user saw:** on a till worked by two people in a day, the header's ticket count
@@ -192,7 +231,6 @@ the sync layer maps ticket fields to columns generically, so tills would otherwi
 `tender` column Postgres does not have and every ticket would pile up in the outbox.
 
 ---
-
 
 ## 2026-09-03 — Two seconds still sat between the button and the paper
 

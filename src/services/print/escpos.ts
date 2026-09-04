@@ -137,10 +137,19 @@ export class EscPosBuilder {
     return this;
   }
 
-  /** Reset, then pin the code page so the printer's power-on default cannot surprise us. */
+  /**
+   * Reset, pin the code page, and tighten the line spacing.
+   *
+   * ESC/POS powers up at 30 dots per line for a font that is only 24 dots tall, so every
+   * plain line of every ticket carried 0.75mm of blank roll nobody asked for. ESC 3 24
+   * sets the feed to exactly the character height. At a thousand tickets a day those
+   * six dots a line are metres of paper a month.
+   */
   init(): this {
     this.heightMul = 1;
-    return this.raw(ESC, 0x40).raw(ESC, 0x74, 0x00); // ESC @ , ESC t 0 (PC437)
+    return this.raw(ESC, 0x40) // ESC @  — reset
+      .raw(ESC, 0x74, 0x00)    // ESC t 0 — PC437
+      .raw(ESC, 0x33, LINE_DOTS); // ESC 3 n — line spacing = one character height
   }
 
   align(mode: number): this {
@@ -239,14 +248,20 @@ export class EscPosBuilder {
   }
 
   /**
-   * Advance the roll clear of the head and cut.
+   * Cut, letting the printer do its own feed to the blade.
    *
-   * The feed is not decoration: on every one of these printers the cutter sits some
-   * millimetres past the print head, so without it the cut lands in the middle of the
-   * last few lines. Printers with no cutter ignore GS V and simply keep the feed.
+   * `GS V 66 n` means "feed to the cutting position, then partial cut" — the printer
+   * already advances the head-to-blade distance itself. The extra feed this used to send
+   * first was therefore bought twice: 6mm of blank roll on every ticket, on top of the
+   * feed the printer was going to make anyway.
+   *
+   * `feedLines` exists for the printers that have no cutter at all. Those ignore GS V
+   * entirely, so the feed is the only thing that gets the last line clear of the head to
+   * be torn off. Callers with a cutter should leave it at 0.
    */
-  cutAndFeed(feedLines = 4): this {
-    return this.feed(feedLines).raw(GS, 0x56, 0x42, 0x00);
+  cutAndFeed(feedLines = 0): this {
+    if (feedLines > 0) this.feed(feedLines);
+    return this.raw(GS, 0x56, 0x42, 0x00);
   }
 
   build(): Uint8Array {
@@ -300,19 +315,18 @@ export async function composeTicket(spec: ReceiptSpec): Promise<EscPosBuilder> {
   // Taller than the body, and fitted so it never wraps: a business name broken across
   // two lines costs a line of roll and reads as a fault in the printer.
   const nameWidth = fitWidth(spec.businessName, paper.columns, 2);
-  b.size(nameWidth, 3).bold(true).line(spec.businessName).bold(false);
+  b.size(nameWidth, 2).bold(true).line(spec.businessName).bold(false);
 
-  b.size(1, 1).rule("-");
-
-  // The amount is the one thing read across a counter, so it takes the largest
-  // magnification the roll will carry — twice the size it was printed at before.
+  // The amount is the one thing read across a counter, so it stays the largest thing on
+  // the ticket — but four times the body height is already that, and the sixth multiple
+  // was costing 6mm of roll per ticket to say the same number.
+  b.size(1, 1);
   const amountWidth = fitWidth(spec.amountText, paper.columns, 4);
-  b.size(amountWidth, Math.min(6, amountWidth * 2)).bold(true).line(spec.amountText).bold(false);
+  b.size(amountWidth, Math.min(4, amountWidth * 2)).bold(true).line(spec.amountText).bold(false);
   b.size(1, 1);
 
-  // Only one rule, above the amount, separating the business header from the
-  // transaction. A second one below it bought nothing: an amount printed six times
-  // taller than the body already separates itself, and the line cost 3mm of every roll.
+  // No rule between the two. An amount printed four times taller than everything around
+  // it separates itself, and the line cost 3mm of every roll to repeat that.
   // The tracking id, on one line, in place of the QR block that used to sit here.
   b.bold(true).line(spec.ticketId).bold(false);
   if (spec.tenderText) b.bold(true).line(spec.tenderText).bold(false);
@@ -320,8 +334,8 @@ export async function composeTicket(spec: ReceiptSpec): Promise<EscPosBuilder> {
 
   if (spec.footerText) b.line(spec.footerText);
 
-  // Two lines rather than four: enough to clear the cutter, and no more roll than that.
-  return b.cutAndFeed(2);
+  // Nothing but the cut: GS V feeds to the blade on its own. See cutAndFeed.
+  return b.cutAndFeed();
 }
 
 export async function buildTicketReceipt(spec: ReceiptSpec): Promise<Uint8Array> {

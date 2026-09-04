@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTicketStore } from '../../store/useTicketStore';
+import { useDeviceStore } from '../../store/useDeviceStore';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { Pager } from '../common/Pager';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useShiftStore } from '../../store/useShiftStore';
-import { paginateByShift } from '../../utils/analytics';
+import { paginateByShift, shiftTickets, summariseTickets } from '../../utils/analytics';
 import { Ticket as TicketIcon, CheckCircle2, Ban, QrCode, Banknote, Smartphone } from 'lucide-react';
 
 interface RecentTicketsSidebarProps {
@@ -21,7 +22,21 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
 }) => {
   const { tickets, markCollected, changeTender } = useTicketStore();
   const { activeUser } = useAuthStore();
-  const { shiftHistory } = useShiftStore();
+  const { shiftHistory, currentShift } = useShiftStore();
+  const { config } = useDeviceStore();
+
+  /**
+   * The shift's running count and takings, directly above the tickets they are made of.
+   *
+   * These used to sit in the till header, where on a 13" screen the header's action row
+   * wrapped and pushed them onto a line of their own — or off the useful part of the
+   * screen entirely. Here they are always in the same place, at any width, and next to the
+   * list a cashier checks them against.
+   */
+  const shiftTotals = useMemo(
+    () => summariseTickets(currentShift ? shiftTickets(tickets, currentShift) : []),
+    [tickets, currentShift]
+  );
 
   /**
    * Pages that never mix two shifts.
@@ -63,6 +78,28 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
 
   return (
     <div className="bg-white border-l-2 border-slate-300 p-5 flex flex-col h-full overflow-hidden rounded-none">
+      {/* This shift's totals. Voids are excluded from both, and both read '—' until a
+          shift is open, because until then there is nothing for them to belong to. */}
+      <div className="grid grid-cols-2 gap-3 pb-3 mb-3 border-b-2 border-slate-200">
+        <div>
+          <div className="text-2xl font-black font-mono text-amber-600 leading-none tabular-nums">
+            {currentShift ? shiftTotals.ticketCount : '—'}
+          </div>
+          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-1">
+            Tickets This Shift
+          </div>
+        </div>
+
+        <div className="text-right min-w-0">
+          <div className="text-2xl font-black font-mono text-slate-900 leading-none tabular-nums truncate">
+            {currentShift ? formatCurrency(shiftTotals.revenue, config.currencySymbol || '₦') : '—'}
+          </div>
+          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-1">
+            Shift Total
+          </div>
+        </div>
+      </div>
+
       <div className="flex items-center justify-between pb-3 border-b-2 border-slate-200 mb-4">
         <h2 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-2">
           <TicketIcon className="w-4 h-4 text-amber-500" />

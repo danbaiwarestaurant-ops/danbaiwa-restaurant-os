@@ -11,20 +11,15 @@ interface UserMenuProps {
    * out — correct only where there can be no shift to leave hanging.
    */
   onLogout?: () => void;
-  /**
-   * Whether this menu offers a log out at all.
-   *
-   * The till's does not: there, logging out means closing the shift and counting the
-   * drawer, so it belongs on the shift button in the header rather than as a second,
-   * quieter door to the same thing. The console's menu keeps it.
-   */
-  showLogout?: boolean;
   /** Dark styling for the manager console topbar. */
   variant?: 'light' | 'dark';
 }
 
 /**
- * Signed-in identity and every session action, behind one small chip.
+ * Signed-in identity and session actions for the manager console, behind one small chip.
+ *
+ * The till no longer renders this: its header carries the shift/log-out button and a Lock
+ * Till button directly, because a menu you open to reach one item costs a tap for nothing.
  *
  * The till used to keep a cashier-name button and a red "Log Out" button permanently in
  * the action bar, side by side with the buttons used constantly during service. On a
@@ -39,12 +34,7 @@ interface UserMenuProps {
  * sign-out, so swapping who is on the till without going through both would file one
  * cashier's takings inside another's shift. Handing over is: log out, log in.
  */
-export const UserMenu: React.FC<UserMenuProps> = ({
-  onLockTill,
-  onLogout,
-  showLogout = true,
-  variant = 'light',
-}) => {
+export const UserMenu: React.FC<UserMenuProps> = ({ onLockTill, onLogout, variant = 'light' }) => {
   const { activeUser, logoutUser } = useAuthStore();
 
   const [isOpen, setIsOpen] = useState(false);
@@ -140,16 +130,14 @@ export const UserMenu: React.FC<UserMenuProps> = ({
               </button>
             )}
 
-            {showLogout && (
-              <button
-                role="menuitem"
-                onClick={handleLogout}
-                className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-bold uppercase text-rose-800 hover:bg-rose-50 text-left border-t-2 border-slate-200"
-              >
-                <LogOut className="w-4 h-4 text-rose-600 flex-shrink-0" />
-                <span>Log Out</span>
-              </button>
-            )}
+            <button
+              role="menuitem"
+              onClick={handleLogout}
+              className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-bold uppercase text-rose-800 hover:bg-rose-50 text-left border-t-2 border-slate-200"
+            >
+              <LogOut className="w-4 h-4 text-rose-600 flex-shrink-0" />
+              <span>Log Out</span>
+            </button>
           </div>
         )}
       </div>

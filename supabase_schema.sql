@@ -811,6 +811,10 @@ ALTER TABLE tickets ALTER COLUMN qr_payload DROP NOT NULL;
 --
 -- ── 1. Diagnose. Who owns the rows, and is that an account or a till? ────────
 --
+--   -- The users table is small enough to simply look at, and a stuck staff record is
+--   -- nearly always visible here as an account_id that is NULL or unfamiliar:
+--   SELECT id, name, email, role, account_id FROM users ORDER BY account_id NULLS FIRST;
+--
 --   SELECT account_id, count(*) FROM tickets GROUP BY 1 ORDER BY 2 DESC;
 --
 --   -- Any account_id in that list which appears here is a TILL's id, not an account's:
@@ -851,7 +855,29 @@ UPDATE users u SET account_id = u.id
  WHERE u.account_id IS NULL
    AND EXISTS (SELECT 1 FROM auth.users a WHERE a.id = u.id);
 
--- Any users row still stuck after steps 2 and 2b is a genuine cross-account collision —
+-- ── 2c. An admin profile whose id is NOT their auth id ──────────────────────
+--
+-- Step 2b only recognises a profile whose primary key IS the owner's auth uid. An admin
+-- created on the till *before* the account was registered in the cloud carries an ordinary
+-- random uuid instead, so 2b cannot see it — and if that row was uploaded before account
+-- stamping existed, it now sits with account_id IS NULL and matches neither half of the
+-- users policy. Nobody can update it: not the tills (no account_id) and not even the owner
+-- (the id is not their auth.uid()). One row, refused for ever, on every device of every
+-- account that registered in that order. It is the most likely thing still sitting in a
+-- till's queue after 2b has run.
+--
+-- The email is what makes the owner unambiguous: an address identifies exactly one auth
+-- user, and a profile carrying it is that account's own. Compared case-insensitively
+-- because an address typed at a till is not always typed the same way twice.
+
+UPDATE users u
+   SET account_id = a.id
+  FROM auth.users a
+ WHERE u.account_id IS NULL
+   AND u.email IS NOT NULL
+   AND lower(u.email) = lower(a.email);
+
+-- Any users row still stuck after steps 2, 2b and 2c is a genuine cross-account collision —
 -- the cloud holds that id for somebody else. The till names the ids in its console
 -- ("id(s) the cloud holds under another account"); look them up here, from the SQL
 -- editor, where RLS does not apply:

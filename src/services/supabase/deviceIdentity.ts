@@ -133,6 +133,29 @@ export async function ensureDeviceEnrolled(opts: {
 } = {}): Promise<DeviceIdentity | null> {
   if (!isSupabaseConfigured) return null;
 
+  // One enrolment at a time, per till, for as long as one is in flight.
+  //
+  // The "am I already enrolled?" check below is an await, and everything after it is more
+  // awaits — so two callers arriving together both read "not enrolled", both sign up, and
+  // the account collects two auth users and two membership rows for one machine. It is not
+  // hypothetical: a single sign-in was minting three identities within the same second,
+  // and an account's device list filled with duplicate entries that no longer correspond
+  // to anything anyone could point at. Sharing the in-flight promise makes the second
+  // caller wait for the first one's answer, which is the answer it wanted anyway.
+  if (enrolmentInFlight) return enrolmentInFlight;
+  enrolmentInFlight = enrolDevice(opts).finally(() => {
+    enrolmentInFlight = null;
+  });
+  return enrolmentInFlight;
+}
+
+let enrolmentInFlight: Promise<DeviceIdentity | null> | null = null;
+
+async function enrolDevice(opts: {
+  deviceId?: string;
+  locationId?: string;
+  label?: string;
+}): Promise<DeviceIdentity | null> {
   const existing = await loadDeviceIdentity();
   if (existing) return existing;
 
