@@ -22,6 +22,7 @@ import {
 } from '../../utils/backupPaths';
 import { db, TABLE_NAMES, TableName } from './dexieSchema';
 import { getAccountId } from './accountScope';
+import { clearWatermarks } from './syncWatermarks';
 
 const SUPABASE_BUCKET = 'db-backups';
 const BACKUP_DEBOUNCE_MS = 10_000;
@@ -266,6 +267,12 @@ export async function restoreFromCloud(): Promise<{ restored: boolean; reason?: 
       if (rows.length) await (db as any)[name].bulkPut(rows);
     }
   });
+
+  // A snapshot carries the config table too, including the position the *snapshotting*
+  // device had reached in the cloud's history. Inheriting that would tell this machine it
+  // had already read rows it has never seen, and the incremental pull would start after
+  // them. Drop it, so the first pull here is a full one.
+  await clearWatermarks();
 
   console.info(`[cloudBackup] Restored cloud backup from ${candidate.path}`);
   return { restored: true, source: candidate.path };

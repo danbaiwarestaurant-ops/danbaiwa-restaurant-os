@@ -5,6 +5,41 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-04 — The till's counters and ticket list ran across shifts
+
+**What the user saw:** on a till worked by two people in a day, the header's ticket count
+and takings total included the previous cashier's service. The person standing at the till
+was shown a figure they were not answerable for, right next to the drawer they were.
+
+The sidebar had the same fault a page at a time: paging was fixed at eight tickets, so the
+newest page routinely ended with the tail of the previous shift's tickets.
+
+**Root cause:** both were scoped to *the day*, not to *the shift*. The header counters were
+computed in `useTicketStore` over everything created since local midnight, and the sidebar
+used the plain `usePagination` hook, which knows only how many items fit on a page.
+
+**Fix:**
+
+* The header now reads **Tickets This Shift** and **Shift Total**, derived in `Header.tsx`
+  from the open shift's own tickets (`shiftTickets` + `summariseTickets`, so voids are out
+  of both). With no shift open it shows a dash — there is nothing for the figures to belong
+  to. The day-scoped fields are gone from the ticket store entirely.
+* The sidebar pages through `paginateByShift`, which forces a page break at every shift
+  boundary. The shift in progress starts on page one and never shares a page with the one
+  before it; long shifts still break every eight tickets. Nothing is hidden — only where
+  the breaks fall has changed.
+
+`openShift` now refreshes the shift history, and the till loads it: the pager needs the
+shift boundaries, and a shift the history did not know about yet would have had its first
+tickets filed under the previous one.
+
+**Files:** `src/components/common/Header.tsx`,
+`src/components/ticket/RecentTicketsSidebar.tsx`, `src/utils/analytics.ts`,
+`src/store/useTicketStore.ts`, `src/store/useShiftStore.ts`, `src/App.tsx`,
+`src/tests/shiftSession.test.ts`.
+
+---
+
 ## 2026-09-03 — A shift is now the cashier's session, and Switch Cashier is gone
 
 **What was wrong:** opening and closing a shift was a separate act from signing in and
@@ -107,6 +142,12 @@ a phantom shortage on the busiest nights.
 
 **Files:** `src/store/useTicketStore.ts`, `src/components/common/Header.tsx`,
 `src/tests/tenderSplit.test.ts`.
+
+**Superseded 2026-09-04:** those two header figures are no longer day-scoped at all — they
+now count the **open shift** only, derived in `Header.tsx` from the shift's own tickets, and
+`useTicketStore` keeps no day totals. The reason is the same one written up here, taken
+further: a till worked by two people in a day showed each of them the other's takings. The
+local-vs-UTC lesson still stands for anything day-scoped — see AGENTS.md rule 8.
 
 ---
 

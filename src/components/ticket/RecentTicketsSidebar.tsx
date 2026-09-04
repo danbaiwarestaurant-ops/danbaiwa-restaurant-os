@@ -1,8 +1,10 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTicketStore } from '../../store/useTicketStore';
 import { formatCurrency, formatTimestamp } from '../../utils/currency';
-import { Pager, usePagination } from '../common/Pager';
+import { Pager } from '../common/Pager';
 import { useAuthStore } from '../../store/useAuthStore';
+import { useShiftStore } from '../../store/useShiftStore';
+import { paginateByShift } from '../../utils/analytics';
 import { Ticket as TicketIcon, CheckCircle2, Ban, QrCode, Banknote, Smartphone } from 'lucide-react';
 
 interface RecentTicketsSidebarProps {
@@ -19,8 +21,33 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
 }) => {
   const { tickets, markCollected, changeTender } = useTicketStore();
   const { activeUser } = useAuthStore();
-  const { page, totalPages, start, visible, setPage, next, prev } = usePagination(tickets, PAGE_SIZE);
+  const { shiftHistory } = useShiftStore();
+
+  /**
+   * Pages that never mix two shifts.
+   *
+   * The shift in progress owns page one on its own, and the shift before it starts a page
+   * of its own behind it. Fixed-size paging put the tail of somebody else's service at the
+   * bottom of the current page, which is the one a cashier scrolls to check their own.
+   * Older shifts stay reachable — this changes where the breaks fall, not what is kept.
+   */
+  const pages = useMemo(
+    () => paginateByShift(tickets, shiftHistory, PAGE_SIZE),
+    [tickets, shiftHistory]
+  );
+
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, pages.length);
+  const safePage = Math.min(page, totalPages);
+  const visible = pages[safePage - 1] ?? [];
   const total = tickets.length;
+  // Pages vary in length now, so the "1–8 of 40" label counts what actually precedes this
+  // one rather than assuming every page before it was full.
+  const start = pages.slice(0, safePage - 1).reduce((n, p) => n + p.length, 0);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   // Jump back to the first page when a genuinely new ticket lands at the top, so the
   // ticket just issued is actually on screen. Keyed on the newest id rather than on the
@@ -159,13 +186,13 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
           its space. Previously the sidebar hard-capped at the 30 newest tickets with no
           way to reach anything older. */}
       <Pager
-        page={page}
+        page={safePage}
         totalPages={totalPages}
         start={start}
-        pageSize={PAGE_SIZE}
+        pageSize={visible.length}
         total={total}
-        onPrev={prev}
-        onNext={next}
+        onPrev={() => setPage((p) => Math.max(1, p - 1))}
+        onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
         className="pt-3 mt-3 border-t-2 border-slate-200"
       />
     </div>

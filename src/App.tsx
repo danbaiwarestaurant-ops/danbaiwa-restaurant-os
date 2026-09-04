@@ -121,12 +121,19 @@ export function App() {
       loadUsers();
       loadShiftHistory();
       loadAuditLogs();
+      // Still the signed-in user's own shift, not a rollup: the console's shift control
+      // acts on this till, and a stale value there would offer to open a second shift for
+      // a cashier who already has one.
+      loadShift(activeUser.id);
       return;
     }
 
     const rollupScope = activeUser.role === 'admin' ? undefined : activeUser.id;
     loadTickets(rollupScope);
     loadExpenses(undefined, rollupScope);
+    // The sidebar breaks its pages on shift boundaries, so the till needs the shift list
+    // and not only its own open shift.
+    loadShiftHistory();
 
     // A cashier signing in *is* the shift starting. Nobody signs into a till to stand at
     // it doing nothing, and the old separate "Start Shift" step was one a cashier could
@@ -269,6 +276,19 @@ export function App() {
     }
   };
 
+  /**
+   * The manager's hand control over this till's shift, from the console topbar.
+   *
+   * Whichever it needs: close-out when a shift is open, open one when it is not. Note that
+   * the shift it acts on is the *signed-in user's* — entering the console with an admin
+   * PIN does not change who is on the till, so when a cashier is signed in this is their
+   * shift the manager is closing, which is the point of it living here.
+   */
+  const handleToggleShift = () => {
+    if (currentShift) setIsCloseShiftOpen(true);
+    else setIsOpenShiftOpen(true);
+  };
+
   const requireManagerPin = (purpose: string, onVerified: () => void) => {
     openPinModal(purpose, (verified) => {
       if (verified) onVerified();
@@ -292,6 +312,15 @@ export function App() {
           // The console's account menu logs out through the same door as the till's, so an
           // owner cannot leave a cashier's shift open by signing out from the back office.
           onLogout={handleLogout}
+          onToggleShift={handleToggleShift}
+        />
+        {/* The shift modals live in both branches: the control that raises them is in the
+            console now, and the console replaces the till screen rather than sitting on it. */}
+        <OpenShiftModal isOpen={isOpenShiftOpen} onClose={() => setIsOpenShiftOpen(false)} onSuccess={showSuccess} />
+        <CloseShiftModal
+          isOpen={isCloseShiftOpen}
+          onClose={() => setIsCloseShiftOpen(false)}
+          onSuccess={showSuccess}
         />
         <Toast message={toastMsg} type={toastType} onClose={() => setToastMsg(null)} />
         <PinModal isOpen={isPinModalOpen} purpose={pinModalPurpose} onClose={closePinModal} />
@@ -307,10 +336,6 @@ export function App() {
       {/* Top Header */}
       <Header
         onOpenConfig={() => setIsConfigOpen(true)}
-        onOpenShiftModal={() => {
-          if (currentShift) setIsCloseShiftOpen(true);
-          else setIsOpenShiftOpen(true);
-        }}
         onOpenExpenseModal={() => setIsExpenseModalOpen(true)}
         onToggleManagerView={handleToggleManagerView}
         onLockTill={() =>

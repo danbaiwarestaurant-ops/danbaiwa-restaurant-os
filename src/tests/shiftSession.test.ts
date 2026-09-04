@@ -13,6 +13,7 @@ import { useTicketStore } from '../store/useTicketStore';
 import { db, TABLE_NAMES } from '../services/db/dexieSchema';
 import { dbService } from '../services/db/IndexedDbService';
 import { UserAccount } from '../types/user';
+import { paginateByShift, shiftTickets, summariseTickets } from '../utils/analytics';
 
 const ada = { id: 'u-ada', name: 'Ada', role: 'cashier', status: 'active' } as unknown as UserAccount;
 const bola = { id: 'u-bola', name: 'Bola', role: 'cashier', status: 'active' } as unknown as UserAccount;
@@ -71,5 +72,104 @@ describe('A shift is the cashier session', () => {
     const second = await useShiftStore.getState().openShift(0, bola.name, bola.id);
     expect(second.id).not.toBe(first.id);
     expect(useShiftStore.getState().currentShift?.cashierId).toBe('u-bola');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// What the till shows while a shift is running
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('The till header counts the shift, not the day', () => {
+  beforeEach(async () => {
+    await Promise.all(TABLE_NAMES.map((name) => (db as any)[name].clear()));
+    await dbService.init();
+    useShiftStore.setState({ currentShift: null, shiftHistory: [] });
+    useTicketStore.setState({ tickets: [], scope: undefined });
+    useAuthStore.setState({ activeUser: ada });
+  });
+
+  it("leaves the previous shift's takings out of the current one", async () => {
+    // Ada works, closes, and Bola takes over the same till on the same day. The header is
+    // what Bola checks her own drawer against, so Ada's ₦5,000 must not be in it.
+    await useShiftStore.getState().openShift(0, ada.name, ada.id);
+    await useTicketStore.getState().createAndPrintTicket(5000, ada.id);
+    await useShiftStore.getState().closeShift(5000);
+
+    useAuthStore.setState({ activeUser: bola });
+    const bolasShift = await useShiftStore.getState().openShift(0, bola.name, bola.id);
+    await useTicketStore.getState().createAndPrintTicket(2000, bola.id);
+    await useTicketStore.getState().createAndPrintTicket(1000, bola.id);
+    await useTicketStore.getState().loadTickets();
+
+    const mine = shiftTickets(useTicketStore.getState().tickets, bolasShift);
+    const totals = summariseTickets(mine);
+
+    expect(totals.ticketCount).toBe(2);
+    expect(totals.revenue).toBe(3000);
+  });
+
+  it('drops a voided ticket out of both the count and the total', async () => {
+    const shift = await useShiftStore.getState().openShift(0, ada.name, ada.id);
+    const first = await useTicketStore.getState().createAndPrintTicket(2500, ada.id);
+    await useTicketStore.getState().createAndPrintTicket(1500, ada.id);
+    await useTicketStore.getState().voidTicket(first.ticket!.id, 'wrong amount', ada.id);
+
+    const totals = summariseTickets(shiftTickets(useTicketStore.getState().tickets, shift));
+    expect(totals.ticketCount).toBe(1);
+    expect(totals.revenue).toBe(1500);
+  });
+});
+
+describe('The ticket sidebar breaks its pages on shift boundaries', () => {
+  beforeEach(async () => {
+    await Promise.all(TABLE_NAMES.map((name) => (db as any)[name].clear()));
+    await dbService.init();
+    useShiftStore.setState({ currentShift: null, shiftHistory: [] });
+    useTicketStore.setState({ tickets: [], scope: undefined });
+    useAuthStore.setState({ activeUser: ada });
+  });
+
+  it('never puts two shifts on one page, however few tickets each has', async () => {
+    await useShiftStore.getState().openShift(0, ada.name, ada.id);
+    await useTicketStore.getState().createAndPrintTicket(1000, ada.id);
+    await useShiftStore.getState().closeShift(1000);
+
+    useAuthStore.setState({ activeUser: bola });
+    await useShiftStore.getState().openShift(0, bola.name, bola.id);
+    await useTicketStore.getState().createAndPrintTicket(2000, bola.id);
+    await useTicketStore.getState().loadTickets();
+
+    const { tickets } = useTicketStore.getState();
+    const { shiftHistory } = useShiftStore.getState();
+    const pages = paginateByShift(tickets, shiftHistory, 8);
+
+    // Two tickets, a page size of eight, and still two pages — the break is the handover.
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).toHaveLength(1);
+    expect(pages[0][0].cashierId).toBe('u-bola');
+    expect(pages[1][0].cashierId).toBe('u-ada');
+  });
+
+  it('still breaks a long shift every page-size tickets', async () => {
+    const shift = await useShiftStore.getState().openShift(0, ada.name, ada.id);
+    for (let i = 0; i < 5; i++) {
+      await useTicketStore.getState().createAndPrintTicket(100 * (i + 1), ada.id);
+    }
+    await useTicketStore.getState().loadTickets();
+
+    const pages = paginateByShift(useTicketStore.getState().tickets, [shift], 2);
+    expect(pages.map((p) => p.length)).toEqual([2, 2, 1]);
+  });
+
+  it('keeps tickets that belong to no shift in their own group', async () => {
+    // An admin who never opened a shift can still issue tickets. Those must not be swept
+    // into whichever shift happens to sit next to them in the list.
+    const shift = await useShiftStore.getState().openShift(0, ada.name, ada.id);
+    await useTicketStore.getState().createAndPrintTicket(1000, ada.id);
+    await useTicketStore.getState().createAndPrintTicket(2000, 'u-nobody');
+    await useTicketStore.getState().loadTickets();
+
+    const pages = paginateByShift(useTicketStore.getState().tickets, [shift], 8);
+    expect(pages).toHaveLength(2);
   });
 });

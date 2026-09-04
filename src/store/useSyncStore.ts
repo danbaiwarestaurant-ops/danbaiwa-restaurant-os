@@ -458,6 +458,33 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       if (item.tableName === 'users' || item.tableName === 'audit_logs') {
         supabasePayload.location_id = locationId;
       }
+
+      // tickets.tender is NOT NULL with a 'cash' default, but a column default only
+      // applies to a request that never mentions the column. A batch upsert names the
+      // union of every row's keys, so a single ticket carrying a tender makes PostgREST
+      // send tender=NULL for every ticket minted before the cash/transfer split existed —
+      // and Postgres refuses the whole batch (23502), on every pass, for ever. That is a
+      // till's entire ticket history stuck behind rows that are individually fine.
+      //
+      // An absent tender reads as cash everywhere else in the app (see isCashTicket), so
+      // state it explicitly here rather than leaning on a default that is not in play.
+      if (item.tableName === 'tickets' && supabasePayload.tender == null) {
+        supabasePayload.tender = 'cash';
+      }
+
+      // qr_payload is `TICKET|<id>|<amount>|<created_at>` — three columns already on the
+      // row, restated as ~60 bytes of text on every ticket. A restaurant doing 3,000 a day
+      // spends tens of megabytes a year storing that repetition inside a 500 MB budget, so
+      // it is not sent; a till that needs it rebuilds it (see ticketQrPayload).
+      //
+      // Deleted rather than nulled, which is the difference between the column being left
+      // out of the INSERT entirely and being written as NULL. Note the ordering that
+      // follows from it: the schema migration that makes qr_payload nullable has to be
+      // applied BEFORE this build reaches a till, or every ticket is refused (23502). The
+      // reverse pairing is harmless — an older till still sending the text writes it, and
+      // a stored payload is always preferred over a rebuilt one.
+      if (item.tableName === 'tickets') delete supabasePayload.qr_payload;
+
       return supabasePayload;
     };
 
@@ -601,6 +628,18 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
         console.warn(
           `[Sync Store] Whole ${batch.tableName} batch of ${send.length} refused (${error.code ?? 'no code'}: ${error.message}); not splitting — every row fails the same way`
         );
+        // A conflict with a row this session cannot see is repaired in SQL, against
+        // specific ids (see the REPAIR section of supabase_schema.sql). Naming them is
+        // the difference between a repair someone can actually run and a hunt through
+        // the whole table, and the till can never print them any other way — it cannot
+        // read the offending rows back at all.
+        if (isConflictWithInvisibleRow(error)) {
+          const ids = send.slice(0, 20).map((i) => String(i.payload?.id));
+          console.warn(
+            `[Sync Store] ${batch.tableName} id(s) the cloud holds under another account: ` +
+              `${ids.join(', ')}${send.length > ids.length ? `, +${send.length - ids.length} more` : ''}`
+          );
+        }
         for (const item of send) await fail(item, error, true);
         continue;
       }
@@ -745,6 +784,19 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     }
     await get().checkOutbox();
     await get().triggerSyncWorker();
+
+    // And pull, not just push. Someone pressing sync means "make this till agree with the
+    // others *now*", which is a two-way statement — but this button only ever sent, so
+    // whatever the other tills had written was still waiting on the background timer.
+    //
+    // Started, not awaited: the queue count is what the person is watching and it is
+    // already accurate, so holding the button's spinner open for a pull of somebody else's
+    // records would only make a working sync look slow. Imported here rather than at the
+    // top of the file because realtimeSync imports this store, and a static import back
+    // would close the loop.
+    void import('../services/db/realtimeSync')
+      .then(({ runCloudCatchUp }) => runCloudCatchUp({ revive: true }))
+      .catch((e) => console.warn('[Sync Store] Manual sync could not pull from the cloud:', e));
   },
 
   startBackgroundLoop: () => {

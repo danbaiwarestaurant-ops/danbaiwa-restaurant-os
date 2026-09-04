@@ -142,6 +142,59 @@ export function shiftTickets(tickets: Ticket[], shift: Pick<Shift, 'cashierId' |
   });
 }
 
+/**
+ * Which shift a ticket belongs to, or '' when none claims it.
+ *
+ * Same rule as `shiftTickets`, asked the other way round: the cashier who took it, inside
+ * that shift's open window. A ticket can land outside every shift — issued by an admin who
+ * never opened one, or before this device knew about the shift — and those keep their own
+ * group rather than being folded into a neighbouring shift's.
+ */
+export function shiftIdForTicket(ticket: Ticket, shifts: Shift[]): string {
+  const at = Date.parse(ticket.createdAt);
+  if (Number.isNaN(at)) return '';
+
+  const owner = shifts.find((s) => {
+    if (s.cashierId !== ticket.cashierId) return false;
+    const from = Date.parse(s.openedAt);
+    if (Number.isNaN(from)) return false;
+    const to = s.closedAt ? Date.parse(s.closedAt) : Number.POSITIVE_INFINITY;
+    return at >= from && at <= to;
+  });
+
+  return owner?.id ?? '';
+}
+
+/**
+ * Pages of tickets that never span two shifts.
+ *
+ * A page break is forced at every shift boundary, so the shift in progress starts on page
+ * one and the shift before it starts on a page of its own. Without this the newest page
+ * mixed the current shift's tickets with the tail of somebody else's — and the sidebar is
+ * what a cashier checks their own service against.
+ *
+ * `tickets` must already be in the order they should read (newest first, as the store
+ * keeps them). Long shifts still break every `pageSize` tickets.
+ */
+export function paginateByShift(tickets: Ticket[], shifts: Shift[], pageSize: number): Ticket[][] {
+  const pages: Ticket[][] = [];
+  let page: Ticket[] = [];
+  let pageShiftId: string | null = null;
+
+  for (const t of tickets) {
+    const shiftId = shiftIdForTicket(t, shifts);
+    if (page.length > 0 && (shiftId !== pageShiftId || page.length >= pageSize)) {
+      pages.push(page);
+      page = [];
+    }
+    pageShiftId = shiftId;
+    page.push(t);
+  }
+  if (page.length > 0) pages.push(page);
+
+  return pages;
+}
+
 /** The approved expenses charged to one shift. */
 export function shiftExpenses(expenses: Expense[], shift: Pick<Shift, 'id'>): Expense[] {
   return expenses.filter((e) => e.shiftId === shift.id);

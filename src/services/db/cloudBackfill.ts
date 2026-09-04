@@ -18,6 +18,7 @@
  */
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
+import { selectAllPages } from '../supabase/pagedSelect';
 import { db, stripUserRow, UserRow } from './dexieSchema';
 import { getAccountId } from './accountScope';
 import { dbService } from './IndexedDbService';
@@ -60,10 +61,35 @@ export async function runBackfillPush(): Promise<number> {
       const localRows: any[] = await (db as any)[dexie].toArray();
       if (!localRows.length) continue;
 
+      // Ask how many rows the cloud holds before asking which. `head: true` returns the
+      // count in a header and no rows at all, so this costs nothing to transfer — whereas
+      // the id list below is every id the account owns, which at 3,000 tickets a day is
+      // megabytes. When the two agree there is nothing this sweep could queue, and the
+      // expensive read is skipped entirely.
+      //
+      // Equal counts with differing ids is possible in principle (one row missing here,
+      // an unrelated one missing there). It is repaired by the same statement on the next
+      // sweep where the counts do differ, and the outbox — not this net — is what actually
+      // gets a written row to the cloud.
+      const { count, error: countError } = await supabase
+        .from(pg)
+        .select('id', { count: 'exact', head: true })
+        .eq('account_id', accountId);
+
+      if (!countError && typeof count === 'number' && count >= localRows.length) continue;
+
       // Only ids are needed for the diff, so this stays cheap even on a long history.
       // Scoped to this account: without the filter another tenant's ids could read as
       // "already present" and this sweep would skip uploads it needed to make.
-      const { data, error } = await supabase.from(pg).select('id').eq('account_id', accountId);
+      //
+      // Paged, because this diff treats every id it does not see as a row the cloud is
+      // missing — and an unpaged select stops at the project's "Max rows" cap (1000 by
+      // default) without saying so. Past that point the sweep re-queued the overflow on
+      // every pass for ever, uploading rows the cloud already had, and the queue grew by
+      // one with every ticket rung up. See selectAllPages.
+      const { data, error } = await selectAllPages<{ id: string }>(() =>
+        supabase.from(pg).select('id').eq('account_id', accountId)
+      );
       if (error) {
         console.warn(`[cloudBackfill] could not read cloud ids for ${pg}:`, error.message);
         continue;

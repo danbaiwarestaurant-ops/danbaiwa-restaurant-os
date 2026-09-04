@@ -27,8 +27,9 @@ CREATE TABLE IF NOT EXISTS users (
   location_id       TEXT -- Scopes RLS checks for Cashiers/Staff
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_email_sb ON users(email);
-CREATE INDEX IF NOT EXISTS idx_users_location_sb ON users(location_id);
+-- Indexes for these tables are defined once, in the FOOTPRINT section near the end of this
+-- file. They used to be created here and then dropped there, which on a million-row table
+-- meant building an index on every re-run purely to delete it a moment later.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 2. Table: tickets
@@ -50,11 +51,6 @@ CREATE TABLE IF NOT EXISTS tickets (
   voided_at   TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_tickets_cashier_sb ON tickets(cashier_id);
-CREATE INDEX IF NOT EXISTS idx_tickets_created_sb ON tickets(created_at);
-CREATE INDEX IF NOT EXISTS idx_tickets_status_sb  ON tickets(status);
-CREATE INDEX IF NOT EXISTS idx_tickets_location_sb ON tickets(location_id);
-
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3. Table: shifts
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -74,10 +70,6 @@ CREATE TABLE IF NOT EXISTS shifts (
   notes          TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_shifts_cashier_sb ON shifts(cashier_id);
-CREATE INDEX IF NOT EXISTS idx_shifts_status_sb  ON shifts(status);
-CREATE INDEX IF NOT EXISTS idx_shifts_location_sb ON shifts(location_id);
-
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4. Table: expenses
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -95,9 +87,6 @@ CREATE TABLE IF NOT EXISTS expenses (
   reviewed_at      TIMESTAMPTZ,
   rejection_reason TEXT
 );
-
-CREATE INDEX IF NOT EXISTS idx_expenses_shift_sb   ON expenses(shift_id);
-CREATE INDEX IF NOT EXISTS idx_expenses_cashier_sb ON expenses(cashier_id);
 
 -- =============================================================================
 -- Row Level Security (RLS) Setup & Multi-Location Scoping
@@ -240,9 +229,6 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_sb   ON audit_logs(entity_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_location_sb ON audit_logs(location_id);
-
 DROP TRIGGER IF EXISTS trg_audit_logs_updated_at ON audit_logs;
 CREATE TRIGGER trg_audit_logs_updated_at BEFORE INSERT OR UPDATE ON audit_logs
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -309,11 +295,9 @@ ALTER TABLE shifts     ADD COLUMN IF NOT EXISTS account_id UUID;
 ALTER TABLE expenses   ADD COLUMN IF NOT EXISTS account_id UUID;
 ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS account_id UUID;
 
-CREATE INDEX IF NOT EXISTS idx_users_account_sb      ON users(account_id);
-CREATE INDEX IF NOT EXISTS idx_tickets_account_sb    ON tickets(account_id);
-CREATE INDEX IF NOT EXISTS idx_shifts_account_sb     ON shifts(account_id);
-CREATE INDEX IF NOT EXISTS idx_expenses_account_sb   ON expenses(account_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_account_sb ON audit_logs(account_id);
+-- The account_id indexes these tables need are created in the FOOTPRINT section, as
+-- (account_id, updated_at) — a leading column answers everything a plain account_id index
+-- did, and the pair also matches the incremental pull exactly.
 
 -- audit_logs.location_id was NOT NULL under the old scoping. It is descriptive now, and
 -- a till whose config carries no location must still be able to write an audit entry.
@@ -711,10 +695,94 @@ BEGIN
   RAISE NOTICE 'tickets primary key is now (account_id, id)';
 END $$;
 
--- The key no longer leads with id, so a lookup by ticket number alone (scanning a QR
--- code against the whole account, say) has nothing to use. Cheap to keep, and it is not
--- unique — that is the entire point.
-CREATE INDEX IF NOT EXISTS idx_tickets_id_sb ON tickets(id);
+-- An index on id alone used to be created here, for a lookup by ticket number against the
+-- whole account. Nothing performs that lookup — a scanned ticket is checked on the till,
+-- against its own copy — and "cheap to keep" stopped being true at a million rows a year.
+-- See the FOOTPRINT section. One statement brings it back if the cloud ever needs it:
+--
+--   CREATE INDEX idx_tickets_id_sb ON tickets(id);
+
+-- =============================================================================
+-- FOOTPRINT — the cloud is a transport, not a filing cabinet
+-- =============================================================================
+--
+-- A restaurant doing 3,000 tickets a day writes about 1.1 million ticket rows a year.
+-- Against a 500 MB database that makes every byte per row a decision, and two of them
+-- were being spent on nothing at all.
+--
+-- ── 1. Indexes nothing reads ────────────────────────────────────────────────
+--
+-- An index is not free: it is written on every insert and it occupies space per row, for
+-- ever. These were created for queries this application does not make. It reads the cloud
+-- exactly two ways —
+--
+--     select id            where account_id = ...                      (cloudBackfill)
+--     select *             where account_id = ... and updated_at >= ... (realtimeSync)
+--
+-- — plus realtime's own account_id filter. Every report the business actually looks at
+-- (by cashier, by day, by status, by location) is computed on the till against its local
+-- copy, and never touches Postgres at all. So an index on cashier_id or created_at here
+-- has never once been used to answer a question, while costing ~40 bytes on every row.
+--
+-- The (account_id, updated_at) indexes below replace the plain account_id ones: a leading
+-- column serves the same lookups, so nothing is lost, and the incremental pull — the one
+-- query that runs constantly — gets an index that matches it exactly. tickets needs none,
+-- since its primary key already leads with account_id.
+--
+-- Reversible: an index is derived data, and any of these can be recreated in one statement
+-- if a future feature queries the cloud a new way.
+
+DROP INDEX IF EXISTS idx_tickets_cashier_sb;
+DROP INDEX IF EXISTS idx_tickets_created_sb;
+DROP INDEX IF EXISTS idx_tickets_status_sb;
+DROP INDEX IF EXISTS idx_tickets_location_sb;
+DROP INDEX IF EXISTS idx_tickets_id_sb;
+DROP INDEX IF EXISTS idx_tickets_account_sb;
+DROP INDEX IF EXISTS idx_shifts_cashier_sb;
+DROP INDEX IF EXISTS idx_shifts_status_sb;
+DROP INDEX IF EXISTS idx_shifts_location_sb;
+DROP INDEX IF EXISTS idx_shifts_account_sb;
+DROP INDEX IF EXISTS idx_expenses_shift_sb;
+DROP INDEX IF EXISTS idx_expenses_cashier_sb;
+DROP INDEX IF EXISTS idx_expenses_account_sb;
+DROP INDEX IF EXISTS idx_users_email_sb;
+DROP INDEX IF EXISTS idx_users_location_sb;
+DROP INDEX IF EXISTS idx_users_account_sb;
+DROP INDEX IF EXISTS idx_audit_logs_entity_sb;
+DROP INDEX IF EXISTS idx_audit_logs_location_sb;
+DROP INDEX IF EXISTS idx_audit_logs_account_sb;
+
+CREATE INDEX IF NOT EXISTS idx_tickets_sync    ON tickets(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_shifts_sync     ON shifts(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_expenses_sync   ON expenses(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_users_sync      ON users(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_sync ON audit_logs(account_id, updated_at);
+
+-- ── 2. qr_payload, which restates three columns it sits beside ──────────────
+--
+-- It is `TICKET|<id>|<amount>|<created_at>` — about 60 bytes per ticket saying nothing the
+-- row does not already say, which is ~65 MB per restaurant per year. Tills no longer send
+-- it and rebuild it from those three fields instead (ticketQrPayload in remoteMerge.ts),
+-- reproducing the original exactly, so a reprint still scans identically to the paper.
+--
+-- ORDER MATTERS: run this BEFORE deploying the build that stops sending the column. A till
+-- that omits a NOT NULL column with no default has every ticket refused (23502). The other
+-- way round is harmless — an older till still sends the text and it is simply stored.
+--
+-- Existing values are deliberately left alone. They are correct, they are preferred over a
+-- rebuilt payload wherever they exist, and the space they occupy is reclaimed by ordinary
+-- autovacuum as those rows age out. Dropping the column outright is left for later, once
+-- no till in the field is still sending it:
+--
+--   ALTER TABLE tickets DROP COLUMN qr_payload;
+
+ALTER TABLE tickets ALTER COLUMN qr_payload DROP NOT NULL;
+
+-- ── 3. Where the space is actually going ────────────────────────────────────
+--
+--   SELECT relname, pg_size_pretty(pg_total_relation_size(relid))
+--     FROM pg_catalog.pg_statio_user_tables
+--    ORDER BY pg_total_relation_size(relid) DESC;
 
 -- =============================================================================
 -- REPAIR — records the cloud holds but a till is no longer allowed to touch
@@ -763,6 +831,33 @@ UPDATE shifts     t SET account_id = d.account_id FROM account_devices d WHERE t
 UPDATE expenses   t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
 UPDATE audit_logs t SET account_id = d.account_id FROM account_devices d WHERE t.account_id = d.auth_user_id;
 
+-- ── 2b. The owner's own profile row, left ownerless ──────────────────────────
+--
+-- A users row whose id is an auth user IS that account's own profile — users.id is the
+-- owner's auth uid, and their account is themselves. So unlike the ownerless rows in step
+-- 4 below, there is nothing to guess here and nothing that could be handed to the wrong
+-- tenant: the row states its owner in its primary key.
+--
+-- Worth its own statement because of how it presents. The owner's device can still update
+-- that row (the `id = auth.uid()` disjunct in the users policy sees it), so nothing looks
+-- wrong there — but no enrolled till can, and the till's backfill sweep cannot read it
+-- back either, so it re-queues it every pass and every push is refused with the USING
+-- variant. That is the "1 record permanently queued" a till reports for ever while
+-- everything else syncs.
+--
+-- Safe and idempotent.
+
+UPDATE users u SET account_id = u.id
+ WHERE u.account_id IS NULL
+   AND EXISTS (SELECT 1 FROM auth.users a WHERE a.id = u.id);
+
+-- Any users row still stuck after steps 2 and 2b is a genuine cross-account collision —
+-- the cloud holds that id for somebody else. The till names the ids in its console
+-- ("id(s) the cloud holds under another account"); look them up here, from the SQL
+-- editor, where RLS does not apply:
+--
+--   SELECT id, account_id, role, name, email FROM users WHERE id = '<id from console>';
+--
 -- ── 3. Re-enable a till whose enrolment was revoked ──────────────────────────
 --
 -- Deliberately NOT run automatically: a revoked till may have been revoked on purpose

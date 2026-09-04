@@ -33,9 +33,21 @@ const cloudRows: Record<string, any[]> = {
 
 function makeSelect(table: string) {
   let filterAccount: string | undefined;
+  // Set by .range(), which the paged reads use — see selectAllPages.
+  let from = 0;
+  let to: number | undefined;
   const builder: any = {
     eq: (col: string, val: string) => {
       if (col === 'account_id') filterAccount = val;
+      return builder;
+    },
+    order: () => builder,
+    // The incremental pull narrows by updated_at once it has a position stored; these
+    // tests are about *whose* rows come back, so every row here is treated as new.
+    gte: () => builder,
+    range: (start: number, last: number) => {
+      from = start;
+      to = last;
       return builder;
     },
     maybeSingle: () => {
@@ -46,7 +58,8 @@ function makeSelect(table: string) {
       const rows = (cloudRows[table] ?? []).filter(
         (r) => filterAccount === undefined || r.account_id === filterAccount
       );
-      return Promise.resolve({ data: rows, error: null }).then(onFulfilled);
+      const page = to === undefined ? rows : rows.slice(from, to + 1);
+      return Promise.resolve({ data: page, error: null }).then(onFulfilled);
     },
   };
   return builder;

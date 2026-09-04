@@ -2,16 +2,13 @@ import { create } from 'zustand';
 import { Ticket, TicketTender } from '../types/ticket';
 import { dbService } from '../services/db/IndexedDbService';
 import { generateCompositeKey } from '../utils/compositeKey';
+import { ticketQrPayload } from '../services/db/remoteMerge';
 import { PrintAdapter } from '../services/print/PrintAdapter';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
-import { dayKey } from '../utils/analytics';
 
 interface TicketState {
   tickets: Ticket[];
-  ticketsTodayCount: number;
-  /** What those tickets came to. Voids excluded, exactly as in the count beside it. */
-  ticketsTodayTotal: number;
   isLoading: boolean;
   activeFlashingAmount: number | null;
   /**
@@ -43,28 +40,12 @@ interface TicketState {
 }
 
 /**
- * Today's tickets and what they came to, for the header counters.
- *
- * The day boundary is **local**, via dayKey — not the UTC date prefix this used to
- * compare against. In Lagos (UTC+1) that boundary falls at 1am local, so a restaurant
- * still serving after midnight had the first hour of its night counted into the previous
- * day. It never showed up while the only figure was a ticket count; it would show up
- * immediately now that a money total sits beside it and gets checked against a drawer.
- * See AGENTS.md rule 8 — every reported window in this app is local time.
+ * The header's counters are the *shift's*, not the store's, and are derived in Header.tsx
+ * from the open shift's own tickets. There is deliberately no day-scoped total kept here:
+ * a till worked by two people in a day would have shown each of them the other's takings.
  */
-function summariseToday(tickets: Ticket[]): { count: number; amount: number } {
-  const today = dayKey(new Date());
-  const mine = tickets.filter((t) => t.status !== 'void' && dayKey(t.createdAt) === today);
-  return {
-    count: mine.length,
-    amount: mine.reduce((sum, t) => sum + (t.amount || 0), 0),
-  };
-}
-
 export const useTicketStore = create<TicketState>((set, get) => ({
   tickets: [],
-  ticketsTodayCount: 0,
-  ticketsTodayTotal: 0,
   isLoading: false,
   activeFlashingAmount: null,
   scope: undefined,
@@ -75,8 +56,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     set({ isLoading: true, scope: userId });
     await dbService.init();
     const tickets = await dbService.getTickets(userId);
-    const today = summariseToday(tickets);
-    set({ tickets, ticketsTodayCount: today.count, ticketsTodayTotal: today.amount, isLoading: false });
+    set({ tickets, isLoading: false });
   },
 
   createAndPrintTicket: async (amount: number, cashierId: string = '', tender: TicketTender = 'cash') => {
@@ -112,7 +92,10 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       tender,
       createdAt: nowIso,
       cashierId,
-      qrPayload: `TICKET|${compositeId}|${amount}|${nowIso}`,
+      // The one definition of this text. A ticket arriving from another till has it
+      // rebuilt from the same function (see ticketQrPayload), because the cloud no longer
+      // stores a copy — so the two must never drift apart.
+      qrPayload: ticketQrPayload({ id: compositeId, amount, createdAt: nowIso }),
     };
 
     // Commit to DB (synchronous — ticket row is durable before print fires)
@@ -124,8 +107,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // picked up the just-saved row, which would otherwise duplicate it here.
     const currentTickets = get().tickets.filter(t => t.id !== newTicket.id);
     const updatedTickets = [newTicket, ...currentTickets];
-    const today = summariseToday(updatedTickets);
-    set({ tickets: updatedTickets, ticketsTodayCount: today.count, ticketsTodayTotal: today.amount });
+    set({ tickets: updatedTickets });
 
     // STEP 3: Visual flash effect
     get().triggerFlash(amount);

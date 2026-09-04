@@ -5,7 +5,6 @@ import { Ticket } from '../types/ticket';
 import { Shift } from '../types/shift';
 import { IndexedDbService } from '../services/db/IndexedDbService';
 import { db, TABLE_NAMES } from '../services/db/dexieSchema';
-import { useTicketStore } from '../store/useTicketStore';
 
 function ticket(over: Partial<Ticket> = {}): Ticket {
   return {
@@ -248,51 +247,5 @@ describe('Period reporting carries the split', () => {
     );
 
     expect(rows.every((r) => r.revenue === 0 && r.cash === 0 && r.transfer === 0)).toBe(true);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The till header's own two figures
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe("Today's counters on the till header", () => {
-  beforeEach(async () => {
-    await Promise.all(TABLE_NAMES.map((name) => (db as any)[name].clear()));
-    useTicketStore.setState({ tickets: [], ticketsTodayCount: 0, ticketsTodayTotal: 0, scope: undefined });
-  });
-
-  it('totals today’s takings and leaves voids out of both figures', async () => {
-    const svc = new IndexedDbService();
-    await svc.init();
-    const now = new Date();
-    const iso = (h: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate(), h).toISOString();
-
-    await svc.saveTicket(ticket({ id: 'A', amount: 2500, createdAt: iso(9) }));
-    await svc.saveTicket(ticket({ id: 'B', amount: 1500, tender: 'transfer', createdAt: iso(10) }));
-    await svc.saveTicket(ticket({ id: 'C', amount: 9999, status: 'void', createdAt: iso(11) }));
-
-    await useTicketStore.getState().loadTickets();
-
-    // Transfers count towards the day's takings — this figure is the whole shift's
-    // trade, not the drawer. The drawer number is close-out's job.
-    expect(useTicketStore.getState().ticketsTodayCount).toBe(2);
-    expect(useTicketStore.getState().ticketsTodayTotal).toBe(4000);
-  });
-
-  it('uses the local midnight, not the UTC one', async () => {
-    const svc = new IndexedDbService();
-    await svc.init();
-    const now = new Date();
-
-    // 00:30 local. Under the old UTC-prefix comparison this landed on yesterday's date
-    // anywhere east of Greenwich, so a restaurant trading past midnight watched the first
-    // hour of its night go missing from the header.
-    const justAfterLocalMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 30);
-    await svc.saveTicket(ticket({ id: 'A', amount: 3000, createdAt: justAfterLocalMidnight.toISOString() }));
-
-    await useTicketStore.getState().loadTickets();
-
-    expect(useTicketStore.getState().ticketsTodayCount).toBe(1);
-    expect(useTicketStore.getState().ticketsTodayTotal).toBe(3000);
   });
 });

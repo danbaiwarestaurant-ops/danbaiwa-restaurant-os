@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db, TABLE_NAMES } from '../services/db/dexieSchema';
-import { applyRemoteRow, isRowDirty, shouldApplyRemote } from '../services/db/remoteMerge';
+import { applyRemoteRow, isRowDirty, shouldApplyRemote, ticketQrPayload } from '../services/db/remoteMerge';
 import { Ticket } from '../types/ticket';
 
 describe('remoteMerge', () => {
@@ -26,6 +26,49 @@ describe('remoteMerge', () => {
       expect(
         shouldApplyRemote({ updatedAt: '2026-08-29T12:00:00.000Z' }, { updatedAt: '2026-08-29T12:00:00.000Z' })
       ).toBe(false);
+    });
+  });
+
+  describe('ticket QR text', () => {
+    it('rebuilds exactly what the till minted, from a row the cloud no longer stores it on', async () => {
+      // The cloud stopped storing qr_payload — it restates three columns it sits beside,
+      // at ~60 bytes on every one of a million rows a year. A rebuild that differed from
+      // the original by even a character would make a reprint scan differently from the
+      // paper it replaces, so this is the guarantee that lets the column go.
+      const mintedAt = '2026-08-29T12:00:00.000Z';
+      const minted = ticketQrPayload({ id: 'LOC01-DEV01-K3F9QZ-000042', amount: 500, createdAt: mintedAt });
+
+      await applyRemoteRow(
+        'tickets',
+        {
+          id: 'LOC01-DEV01-K3F9QZ-000042',
+          amount: 500,
+          // Postgres hands timestamps back in +00:00 form, not the Z form the till wrote.
+          createdAt: '2026-08-29T12:00:00+00:00',
+          updatedAt: '2026-08-29T12:00:00.000Z',
+        },
+        'UPDATE'
+      );
+
+      expect((await db.tickets.get('LOC01-DEV01-K3F9QZ-000042'))?.qrPayload).toBe(minted);
+    });
+
+    it('never overwrites a payload the cloud does still hold', async () => {
+      await applyRemoteRow(
+        'tickets',
+        {
+          id: 'LOC01-DEV01-OLD-000001',
+          amount: 500,
+          createdAt: '2026-08-29T12:00:00.000Z',
+          qrPayload: 'TICKET|whatever-the-original-said',
+          updatedAt: '2026-08-29T12:00:00.000Z',
+        },
+        'UPDATE'
+      );
+
+      expect((await db.tickets.get('LOC01-DEV01-OLD-000001'))?.qrPayload).toBe(
+        'TICKET|whatever-the-original-said'
+      );
     });
   });
 

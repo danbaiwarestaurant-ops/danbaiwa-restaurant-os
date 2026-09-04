@@ -67,6 +67,9 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
 
     await dbService.saveShift(newShift);
     set({ currentShift: newShift });
+    // The till's sidebar pages by shift boundary, so a shift the history does not know
+    // about yet would have its first tickets filed against the previous one.
+    await get().loadShiftHistory();
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });

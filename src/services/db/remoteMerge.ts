@@ -133,8 +133,38 @@ export async function applyRemoteRow(
   if (pgTable === 'users') {
     const row: UserRow = { ...(camelRow as any), loginKeys: computeLoginKeys(camelRow as any) };
     await dexieTable.put(row);
+  } else if (pgTable === 'tickets') {
+    await dexieTable.put({
+      ...camelRow,
+      qrPayload: camelRow.qrPayload || ticketQrPayload(camelRow as any),
+    });
   } else {
     await dexieTable.put(camelRow);
   }
   return true;
+}
+
+/**
+ * Rebuilds a ticket's QR text from the three fields it was made of.
+ *
+ * The cloud no longer stores qr_payload: it is ~60 bytes per ticket that says nothing the
+ * row does not already say, and at 3,000 tickets a day per restaurant that is tens of
+ * megabytes a year of pure repetition inside a 500 MB budget. Tickets that predate the
+ * change still carry theirs, hence the `||` at the call site — a stored payload is always
+ * used as-is.
+ *
+ * Must reproduce the original byte for byte, because it is what a reprint puts in the QR
+ * code, and a reprint that scans differently from the paper it replaces is worse than no
+ * reprint at all. Two details do that: `new Date(...).toISOString()` normalises Postgres's
+ * `+00:00` back to the `Z` form the till minted, and a JSON number stringifies the same
+ * way here as it did there. See createAndPrintTicket, which is the definition this mirrors.
+ */
+export function ticketQrPayload(row: {
+  id: string;
+  amount: number;
+  createdAt: string;
+}): string {
+  const minted = new Date(row.createdAt);
+  const stamp = Number.isNaN(minted.getTime()) ? row.createdAt : minted.toISOString();
+  return `TICKET|${row.id}|${row.amount}|${stamp}`;
 }

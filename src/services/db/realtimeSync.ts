@@ -17,11 +17,13 @@
  */
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
+import { selectAllPages } from '../supabase/pagedSelect';
 import { toCamelCase } from '../../utils/caseMapping';
 import { applyRemoteRow, applyRemoteSettings, loadDirtyIds, SyncablePgTable } from './remoteMerge';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { runBackfillPush } from './cloudBackfill';
 import { getAccountId, stampLocalRowsWithAccount } from './accountScope';
+import { watermarkFor, advanceWatermark } from './syncWatermarks';
 import { dbService } from './IndexedDbService';
 import { db } from './dexieSchema';
 import { useSyncStore } from '../../store/useSyncStore';
@@ -32,8 +34,37 @@ import { useExpenseStore } from '../../store/useExpenseStore';
 import { useAuditStore } from '../../store/useAuditStore';
 
 const DEVICE_CONFIG_KEY = 'device_config';
-const RECONCILIATION_INTERVAL_MS = 60_000;
+/**
+ * How often the safety-net pull runs.
+ *
+ * This is not how fast changes travel — realtime delivers those within a second, and the
+ * sync badge pushes every local write the moment it is made. This timer only exists to
+ * catch what a dropped websocket missed, so it is a backstop, not the mechanism. At 60
+ * seconds it was 1,440 rounds of five requests per till per day; a till left running
+ * overnight spent the night asking. Five minutes cuts that by 80% and costs nothing that
+ * anyone standing at a till can perceive — and the sync badge now pulls as well as pushes,
+ * so the one case where a person is actively waiting has a button that answers it.
+ */
+const RECONCILIATION_INTERVAL_MS = 5 * 60_000;
 const RELOAD_DEBOUNCE_MS = 150;
+
+/**
+ * How often the deep sweep runs: the id-by-id diff against the cloud, plus a pull that
+ * deliberately reaches back behind this device's own position. See runCloudCatchUp.
+ */
+const DEEP_SWEEP_EVERY_MS = 6 * 60 * 60_000;
+
+/**
+ * How far behind its position the deep sweep re-reads.
+ *
+ * The safety net for the one thing an incremental pull cannot notice on its own: a row
+ * that was somehow not applied while the position moved past it. A day is long enough to
+ * cover any realistic gap and short enough to stay cheap — a full re-read of the account's
+ * whole history would be back to costing more per sweep than a month's transfer allowance.
+ */
+const DEEP_SWEEP_LOOKBACK_MS = 24 * 60 * 60_000;
+
+let lastDeepSweep = 0;
 
 const SYNCABLE_TABLES: SyncablePgTable[] = ['users', 'tickets', 'shifts', 'expenses', 'audit_logs'];
 
@@ -87,11 +118,38 @@ function handleRealtimeChange(pgTable: SyncablePgTable, payload: any): void {
     .catch((e) => console.warn(`[realtimeSync] failed to apply ${pgTable} change:`, e));
 }
 
-/** Pulls every row belonging to this account from all five syncable tables and merges
- *  them in. Additive/merge-only — never deletes a local row just because a page didn't
- *  include it. Returns true if any table actually received a change, so callers (e.g. a
- *  first-time login on a new device) can tell whether anything was really pulled down. */
-export async function runReconciliationPull(): Promise<boolean> {
+/**
+ * Where a table's read should start: this device's stored position, or further back still
+ * if the caller asked to look behind it. Null means "no position — read everything".
+ *
+ * The look-back floor is measured on the local clock, which is fine because it can only
+ * ever widen the window: the stored position is the thing that governs what must not be
+ * skipped, and it is only ever a value the server stamped.
+ */
+async function pullFrom(
+  accountId: string,
+  pgTable: SyncablePgTable,
+  lookBackMs?: number
+): Promise<string | null> {
+  const mark = await watermarkFor(accountId, pgTable);
+  if (!mark || !lookBackMs) return mark;
+
+  const floor = new Date(Date.now() - lookBackMs).toISOString();
+  return floor < mark ? floor : mark;
+}
+
+/** Pulls this account's rows from all five syncable tables and merges them in.
+ *  Additive/merge-only — never deletes a local row just because a page didn't include it.
+ *  Returns true if any table actually received a change, so callers (e.g. a first-time
+ *  login on a new device) can tell whether anything was really pulled down.
+ *
+ *  Incremental by default: each table is read from where this device left off (see
+ *  syncWatermarks). `full` forces the whole history — the first pull on a device has that
+ *  anyway, since it has no position stored yet. `lookBackMs` widens the window behind
+ *  that position without going all the way back, for the periodic deep sweep. */
+export async function runReconciliationPull(
+  opts: { full?: boolean; lookBackMs?: number } = {}
+): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
 
   // Gate on the actual Supabase session, not the local Zustand `isAuthenticated` flag —
@@ -108,25 +166,42 @@ export async function runReconciliationPull(): Promise<boolean> {
 
   for (const pgTable of SYNCABLE_TABLES) {
     try {
+      // Where this device got to last time. Null on a fresh device, after a restore, or
+      // when `full` is asked for — all of which mean "read the lot".
+      const since = opts.full ? null : await pullFrom(accountId, pgTable, opts.lookBackMs);
+
       // Every table now carries account_id, expenses included — so all five filter the
       // same way. RLS enforces the same boundary server-side; this just avoids pulling
       // rows the policy would reject anyway.
-      const { data, error } = await supabase.from(pgTable).select('*').eq('account_id', accountId);
+      //
+      // Paged: an unpaged select silently stops at the project's "Max rows" cap, so an
+      // account with more history than that could never hand a till the rest of it.
+      const { data, error } = await selectAllPages(() => {
+        const query = supabase.from(pgTable).select('*').eq('account_id', accountId);
+        return since ? query.gte('updated_at', since) : query;
+      });
 
       if (error || !data) {
         console.warn(`[realtimeSync] reconciliation pull failed for ${pgTable}:`, error?.message);
         continue;
       }
 
-      // One indexed read for the whole table, rather than a full outbox walk per row —
-      // this sweep touches every record the account has, every minute.
+      // One indexed read for the whole table, rather than a full outbox walk per row.
       const dirtyIds = await loadDirtyIds(pgTable);
 
       let changedAny = false;
+      let newest = '';
       for (const row of data) {
+        const stamp = String((row as any).updated_at ?? '');
+        if (stamp > newest) newest = stamp;
         const changed = await applyRemoteRow(pgTable, toCamelCase(row), 'UPDATE', dirtyIds);
         if (changed) changedAny = true;
       }
+
+      // Only ever advanced after the rows it covers have actually been applied, so a
+      // failure part-way through re-reads them next time rather than skipping them.
+      if (newest) await advanceWatermark(accountId, pgTable, newest);
+
       if (changedAny) {
         scheduleStoreReload(pgTable);
         changedOverall = true;
@@ -186,6 +261,20 @@ export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<
   const { data: sessionData } = await supabase.auth.getSession();
   if (!sessionData?.session) return false;
 
+  // The expensive half of this sweep — comparing every local id against the cloud's, and
+  // reaching back behind what this device has already read — is a safety net, not the
+  // mechanism. Every ordinary write is pushed the instant it is queued, and every remote
+  // change arrives by realtime or on the next minute's incremental pull; this exists only
+  // to catch what those missed.
+  //
+  // It used to run every minute, and it re-read the account's entire history each time.
+  // For a restaurant doing 3,000 tickets a day that is ~100 MB per till per minute to
+  // learn nothing — more than a month's transfer allowance every hour. Now it runs when
+  // something has actually changed (a sign-in, the network returning) and every six hours
+  // otherwise, and even then it looks back a day rather than for ever.
+  const deep = revive || Date.now() - lastDeepSweep >= DEEP_SWEEP_EVERY_MS;
+  if (deep) lastDeepSweep = Date.now();
+
   try {
     const accountId = await getAccountId();
     if (accountId) await stampLocalRowsWithAccount(accountId);
@@ -194,7 +283,7 @@ export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<
     if (revived) {
       console.info(`[realtimeSync] revived ${revived} outbox row(s) that were parked as failed`);
     }
-    const queued = await runBackfillPush();
+    const queued = deep ? await runBackfillPush() : 0;
     if (revive || queued) {
       // Push immediately rather than waiting for the next poll.
       await useSyncStore.getState().checkOutbox();
@@ -204,7 +293,11 @@ export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<
     console.warn('[realtimeSync] upward catch-up failed:', e);
   }
 
-  return runReconciliationPull();
+  // Note that even a revive pulls incrementally. A device that was offline for three days
+  // resumes from its own stored position and gets exactly the three days it missed —
+  // re-reading the whole history would cost the same whether it had missed a minute or a
+  // year, which is precisely the behaviour that made a flaky connection expensive.
+  return runReconciliationPull(deep ? { lookBackMs: DEEP_SWEEP_LOOKBACK_MS } : {});
 }
 
 /** Opens one realtime channel covering all five syncable tables, plus the reconnect/

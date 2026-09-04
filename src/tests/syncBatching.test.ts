@@ -175,6 +175,24 @@ describe('outbox batching', () => {
       expect(useSyncStore.getState().pendingCount).toBe(1);
     });
 
+    it('gives a legacy ticket an explicit tender so it cannot poison the batch', async () => {
+      // tickets.tender is NOT NULL with a 'cash' default, and a default only applies to a
+      // request that never names the column. One modern ticket in the batch names it for
+      // all of them, so every pre-split ticket would go up as tender=NULL and take the
+      // whole batch down with it (23502) on every pass — a till's whole history stuck.
+      await db.outbox.add(queued({ tableName: 'tickets', payload: { id: 'T-legacy', amount: 100 } }));
+      await db.outbox.add(
+        queued({ tableName: 'tickets', payload: { id: 'T-new', amount: 250, tender: 'transfer' } })
+      );
+      await useSyncStore.getState().checkOutbox();
+
+      await useSyncStore.getState().triggerSyncWorker();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].rows.map((r) => r.tender)).toEqual(['cash', 'transfer']);
+      expect(useSyncStore.getState().pendingCount).toBe(0);
+    });
+
     it('sends removals as removals even when batched', async () => {
       await db.outbox.add(queued({ tableName: 'users', action: 'DELETE', payload: { id: 'U1' } }));
       await db.outbox.add(queued({ tableName: 'users', action: 'DELETE', payload: { id: 'U2' } }));

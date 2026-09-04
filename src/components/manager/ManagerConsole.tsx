@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
 import { useSyncStore } from '../../store/useSyncStore';
+import { useShiftStore } from '../../store/useShiftStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { UserMenu } from '../common/UserMenu';
 import { PeriodPicker } from './PeriodPicker';
@@ -16,7 +17,7 @@ import { AuditLogView } from './views/AuditLogView';
 import { PrinterSetupView } from './views/PrinterSetupView';
 import { SettingsView } from './views/SettingsView';
 import { ComingSoonView } from './views/ComingSoonView';
-import { ArrowLeft, UtensilsCrossed, Boxes } from 'lucide-react';
+import { ArrowLeft, UtensilsCrossed, Boxes, Lock } from 'lucide-react';
 
 const LAST_VIEW_KEY = 'ticket_pos_console_view';
 
@@ -25,6 +26,14 @@ interface ManagerConsoleProps {
   onRequirePin: (purpose: string, onVerified: () => void) => void;
   /** Routes through close-out when a shift is open — see App's handleLogout. */
   onLogout: () => void;
+  /**
+   * Opens or closes the shift on this till, whichever it needs.
+   *
+   * The till header no longer carries this. A cashier's shift is their session — it opens
+   * when they sign in, closes when they sign out — so the only hand control over it is the
+   * manager's, and it lives here behind the console's admin PIN.
+   */
+  onToggleShift: () => void;
 }
 
 /**
@@ -39,10 +48,11 @@ interface ManagerConsoleProps {
  * View state is local rather than routed — this project has no router dependency and one
  * tab strip does not justify adding one.
  */
-export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, onRequirePin, onLogout }) => {
+export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, onRequirePin, onLogout, onToggleShift }) => {
   const { config } = useDeviceStore();
   const { expenses } = useExpenseStore();
   const { stuckCount } = useSyncStore();
+  const { currentShift } = useShiftStore();
   const admin = useAuthStore((s) => s.users.find((u) => u.role === 'admin'));
 
   const [view, setView] = useState<ConsoleViewId>(() => {
@@ -195,6 +205,25 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
                 either live (Live Tickets), account state rather than a record (Settings,
                 Staff directory management) or not built yet. */}
             {active.periodScoped && <PeriodPicker />}
+
+            {/* The shift control, moved off the till. Says whose shift it is, because from
+                here it may well be a cashier's rather than the manager's own. */}
+            <button
+              onClick={onToggleShift}
+              title={
+                currentShift
+                  ? `Close ${currentShift.cashierName}'s shift and count the drawer`
+                  : 'Open a shift on this till'
+              }
+              className={`flex items-center gap-1.5 px-3 py-1.5 border-2 text-xs font-black uppercase transition rounded-none ${
+                currentShift
+                  ? 'bg-emerald-50 border-emerald-400 text-emerald-900 hover:bg-emerald-100'
+                  : 'bg-rose-50 border-rose-400 text-rose-900 hover:bg-rose-100'
+              }`}
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>{currentShift ? `Close Shift — ${currentShift.cashierName}` : 'Open Shift'}</span>
+            </button>
             {/* The console reports the account, not whoever is signed in at the till, so it
                 names the admin whose books these are — the till's own identity stays in the
                 avatar menu beside it. */}
