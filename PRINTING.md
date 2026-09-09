@@ -123,17 +123,34 @@ logon with no visible window, starts it, and confirms it is answering.
 
 ### Starting at logon
 
-Three mechanisms are tried in order, and the installer reports which one took:
+Three mechanisms are tried in order, and each one is **proved before it is accepted**:
+the installer stops the agent, triggers the entry exactly the way a logon would, and asks
+port 9100 whether an agent answered. A mechanism that registers cleanly but cannot start
+anything is undone and the next is tried.
 
 1. **Task Scheduler** — the tidiest, and where an administrator would look for it.
+   Frequently refused on a non-admin account, in which case it never gets used.
 2. **Startup folder** (`shell:startup`) — the oldest and most permissive mechanism
-   Windows has. No Administrator rights, no scheduler service.
+   Windows has. No Administrator rights, no scheduler service. This is the one most
+   tills end up on.
 3. **The current user’s Run key** — `HKCU\…\CurrentVersion\Run`.
 
-All three are cleared before any is set, so re-running the installer never leaves two
-entries racing to bind port 9100. Only if all three are refused does it fall back to
-asking you to start the agent by hand — and that points at a Group Policy or a security
-product rather than at the till.
+The installer prints which one took, and *started and answered* alongside it. Only if all
+three fail to actually start the agent does it fall back to asking you to start it by
+hand — and that points at a Group Policy or a security product rather than at the till.
+
+> **Fixed in this version.** Every till installed before this reported `OK - via Startup
+> folder` and then came up dead after each reboot. The `.vbs` written into the Startup
+> folder was built inside a batch `if` block, and cmd's parser ate the closing bracket of
+> `CreateObject("WScript.Shell")` before it reached the file — so the script could not
+> parse. The agent the installer started by hand kept printing all day, which is why the
+> fault only ever showed up the next morning, and why re-running the installer looked like
+> a cure. The file is now written outside the block, and, more to the point, the installer
+> no longer trusts any mechanism it has not watched start the agent. **Re-run
+> `install-print-agent.bat` on every till to pick this up.**
+
+All three entries are cleared before any is set, so re-running the installer never leaves
+two racing to bind port 9100.
 
 If you have been starting it from a shortcut yourself, delete that shortcut after
 running the installer again. A duplicate is harmless — the second copy exits because the
@@ -142,6 +159,10 @@ port is taken — but it is one more thing to explain later.
 **No Administrator rights needed.** It installs per-user and runs at that user's logon,
 deliberately: a task running as SYSTEM cannot see a printer that was installed for one
 user only, and would silently print nothing.
+
+**Per-user, per-machine.** Because of that, the agent belongs to one Windows account on
+one PC. A different till, or a different Windows user on the same till, has no agent
+until the installer is run there. That part is by design, not a fault.
 
 ### Speed, and where the wait actually is
 
