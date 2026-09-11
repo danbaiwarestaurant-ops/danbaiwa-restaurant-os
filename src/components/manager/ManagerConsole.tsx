@@ -9,6 +9,7 @@ import { PeriodPicker } from './PeriodPicker';
 import { CONSOLE_NAV, ConsoleViewId, navGroups, navItem } from './consoleNav';
 import { OverviewView } from './views/OverviewView';
 import { SalesRecordView } from './views/SalesRecordView';
+import { ServerSalesView } from './views/ServerSalesView';
 import { StaffView } from './views/StaffView';
 import { ExpensesView } from './views/ExpensesView';
 import { ReconciliationView } from './views/ReconciliationView';
@@ -85,6 +86,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
     switch (view) {
       case 'overview': return <OverviewView />;
       case 'salesHistory': return <SalesRecordView />;
+      case 'serverSales': return <ServerSalesView />;
       case 'staff': return <StaffView />;
       case 'expenses': return <ExpensesView onRequirePin={onRequirePin} />;
       case 'reconciliation': return <ReconciliationView />;

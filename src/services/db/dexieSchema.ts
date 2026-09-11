@@ -12,6 +12,7 @@ import { UserAccount } from '../../types/user';
 import { Ticket } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
+import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 
 /** Storage-only row shape: UserAccount plus a derived, indexable lookup array that
@@ -66,6 +67,7 @@ export class TicketPosDB extends Dexie {
   sequences!: Table<SequenceRow, string>;
   shifts!: Table<Shift, string>;
   expenses!: Table<Expense, string>;
+  serverSales!: Table<ServerSalesEntry, string>;
   outbox!: Table<OutboxItem, string>;
   auditLogs!: Table<AuditLogRow, string>;
 
@@ -81,6 +83,16 @@ export class TicketPosDB extends Dexie {
       outbox: 'id, status, createdAt',
       auditLogs: 'id, entity, entityId, actorId, timestamp',
     });
+
+    // v2 adds serverSales. Dexie carries every existing table forward untouched when a
+    // version only introduces one, so this is additive: no till loses data upgrading, and
+    // a till still on v1 simply has not got the table yet.
+    this.version(2).stores({
+      // businessDay is the axis every read uses — the console asks for a period, never for
+      // one server's history — and [businessDay+serverId] makes the "is there already a
+      // count for this person today?" lookup an index hit rather than a table scan.
+      serverSales: 'id, businessDay, serverId, [businessDay+serverId]',
+    });
   }
 }
 
@@ -93,6 +105,7 @@ export const TABLE_NAMES = [
   'sequences',
   'shifts',
   'expenses',
+  'serverSales',
   'outbox',
   'auditLogs',
 ] as const;

@@ -107,6 +107,20 @@ export function fitWidth(text: string, columns: number, max: number): number {
 }
 
 /**
+ * `text` cut to one line of this roll.
+ *
+ * Unlike an amount or a business name, a person's name cannot be shrunk to fit — the
+ * body font is already the smallest this prints — so an over-long one is trimmed rather
+ * than left to wrap onto a second line and read as a printer fault. The ellipsis is a
+ * plain full stop run: the code page a thermal head falls back to renders "…" as noise.
+ */
+export function fitLine(text: string, columns: number): string {
+  const clean = text.trim();
+  if (clean.length <= columns) return clean;
+  return `${clean.slice(0, Math.max(1, columns - 3))}...`;
+}
+
+/**
  * Accumulates a command stream.
  *
  * Deliberately a plain array of bytes rather than a string: ESC/POS interleaves binary
@@ -287,6 +301,28 @@ export interface ReceiptSpec {
    * "I paid by transfer" — and that is the one worth the paper.
    */
   tenderText?: string;
+  /**
+   * Present only on a staff meal, and its presence is what selects that layout.
+   *
+   * A staff meal is a different document from a sale, not a sale with a note on it. A
+   * sale's job is to state an amount across a counter, so the amount is the largest
+   * thing on it. A staff meal's job is to say who may collect a plate nobody paid for —
+   * so the person is the largest thing on it, the amount shrinks to a record line, and
+   * the ticket says on its face that no money changed hands. Printing it as a sale with
+   * a banner, which is where this started, leaves a ₦1,500 ticket that reads as ₦1,500
+   * taken at a glance.
+   */
+  staffMeal?: {
+    /** Who the meal is for — the line the pass matches a face against. */
+    forName: string;
+    /** Their role, e.g. 'Kitchen Staff'. Omitted when it is not known. */
+    roleText?: string;
+    /**
+     * Who issued it. Not decoration: a plate leaving the kitchen unpaid needs a name
+     * against it, and the only reason to print that name is so it can be asked about.
+     */
+    issuedBy?: string;
+  };
 }
 
 /**
@@ -338,8 +374,63 @@ export async function composeTicket(spec: ReceiptSpec): Promise<EscPosBuilder> {
   return b.cutAndFeed();
 }
 
+/**
+ * A staff meal, laid out as what it is.
+ *
+ * The hierarchy is inverted from a sale, deliberately. On a sale the amount is four
+ * times the body height because it is read across a counter by someone about to hand
+ * money over. Nobody hands money over for this, and an amount printed that large is
+ * actively misleading — at a glance across a busy pass it reads as a plate that was
+ * paid for. So the person's name takes that position instead, because matching a face
+ * to a plate is the one thing this ticket is used for, and the value drops to a plain
+ * record line for the books.
+ *
+ * Longer than a sale ticket by about four lines, and that is the right trade: staff
+ * meals are a handful a day against hundreds of sales, and each one is a plate the
+ * business gave away, which is worth 12mm of roll to document properly.
+ */
+export async function composeStaffMeal(spec: ReceiptSpec): Promise<EscPosBuilder> {
+  const meal = spec.staffMeal!;
+  const paper = paperSpec(spec.paperWidthMm);
+  const b = new EscPosBuilder(paper);
+
+  b.init().align(ALIGN_CENTER);
+
+  // First off the roll, before anything else can be mistaken for a price.
+  b.size(fitWidth('STAFF MEAL', paper.columns, 2), 2).bold(true).line('STAFF MEAL').bold(false);
+  b.size(1, 1).bold(true).line('NOT FOR SALE').bold(false);
+
+  // The business name is context here, not the headline it is on a sale — this ticket
+  // is never handed to a customer, so it does not have to introduce the restaurant.
+  b.line(spec.businessName);
+  b.rule('-');
+
+  // The largest thing on the ticket: who may collect this plate.
+  const name = fitLine(meal.forName, paper.columns);
+  b.size(fitWidth(name, paper.columns, 2), 2).bold(true).line(name).bold(false);
+  b.size(1, 1);
+  if (meal.roleText) b.line(fitLine(meal.roleText, paper.columns));
+
+  b.rule('-');
+
+  // Left-aligned for the record block: these are label/value pairs, and centring them
+  // makes a column of values nobody can scan down.
+  b.align(ALIGN_LEFT);
+  b.columns('Meal value', spec.amountText);
+  if (meal.issuedBy) b.columns('Issued by', fitLine(meal.issuedBy, paper.columns - 11));
+  b.line(spec.ticketId);
+  b.line(spec.timestampText);
+
+  if (spec.footerText) b.align(ALIGN_CENTER).line(spec.footerText);
+
+  return b.cutAndFeed();
+}
+
 export async function buildTicketReceipt(spec: ReceiptSpec): Promise<Uint8Array> {
-  return (await composeTicket(spec)).build();
+  // One entry point for both documents, so no caller has to know there are two — and so
+  // a staff meal can never be printed through the sale layout by a route that forgot.
+  const composed = spec.staffMeal ? await composeStaffMeal(spec) : await composeTicket(spec);
+  return composed.build();
 }
 /** Bytes → base64, for handing a receipt to the local agent over JSON. */
 export function bytesToBase64(bytes: Uint8Array): string {

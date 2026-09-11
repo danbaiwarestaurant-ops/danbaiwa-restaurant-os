@@ -6,6 +6,8 @@ import { ticketQrPayload } from '../services/db/remoteMerge';
 import { PrintAdapter } from '../services/print/PrintAdapter';
 import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
+import { useAuthStore } from './useAuthStore';
+import { roleLabel } from '../utils/roles';
 
 interface TicketState {
   tickets: Ticket[];
@@ -30,8 +32,19 @@ interface TicketState {
   printError: string | null;
   clearPrintError: () => void;
   loadTickets: (userId?: string) => Promise<void>;
-  /** Tender defaults to cash: the fast path at the counter must stay the fast path. */
-  createAndPrintTicket: (amount: number, cashierId?: string, tender?: TicketTender) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
+  /**
+   * Tender defaults to cash: the fast path at the counter must stay the fast path.
+   *
+   * `staffMeal` names the employee a 'staff' ticket is for. It is required in practice
+   * for that tender — a staff meal attributable to nobody is just an untracked giveaway —
+   * and enforced here rather than in the UI so no future caller can skip it.
+   */
+  createAndPrintTicket: (
+    amount: number,
+    cashierId?: string,
+    tender?: TicketTender,
+    staffMeal?: { staffId: string; staffName: string }
+  ) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
   voidTicket: (ticketId: string, reason: string, voidedBy: string) => Promise<void>;
   /** Fixes a mis-tagged payment type without voiding and reprinting the customer's ticket. */
@@ -59,7 +72,22 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     set({ tickets, isLoading: false });
   },
 
-  createAndPrintTicket: async (amount: number, cashierId: string = '', tender: TicketTender = 'cash') => {
+  createAndPrintTicket: async (
+    amount: number,
+    cashierId: string = '',
+    tender: TicketTender = 'cash',
+    staffMeal?: { staffId: string; staffName: string }
+  ) => {
+    // Refused rather than defaulted. A staff meal with no employee on it cannot be
+    // reported, cannot be questioned, and is indistinguishable from food walking out of
+    // the kitchen — which is the exact thing recording staff meals exists to prevent.
+    if (tender === 'staff' && !staffMeal?.staffId) {
+      return {
+        success: false,
+        message: 'A staff meal has to name the employee it is for.',
+      };
+    }
+
     const config = useDeviceStore.getState().config;
     const locationId = config.locationId || 'LOC01';
     const deviceId = config.deviceId || 'DEV01';
@@ -92,6 +120,9 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       tender,
       createdAt: nowIso,
       cashierId,
+      ...(tender === 'staff' && staffMeal
+        ? { staffId: staffMeal.staffId, staffName: staffMeal.staffName }
+        : {}),
       // The one definition of this text. A ticket arriving from another till has it
       // rebuilt from the same function (see ticketQrPayload), because the cloud no longer
       // stores a copy — so the two must never drift apart.
@@ -121,7 +152,20 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // to save time at the counter, and blocking on it spent that saving straight back.
     //
     // Failures are surfaced through printError instead of the return value.
-    void PrintAdapter.printTicket(newTicket, config.businessName, config.paperWidthMm)
+    // The roster facts the receipt needs and the ticket row does not hold: what the
+    // employee does, and who authorised the plate. Resolved here rather than stored,
+    // because both are properties of the roster and would go stale on the record.
+    const printContext =
+      tender === 'staff' && staffMeal
+        ? {
+            staffRoleText: roleLabel(
+              useAuthStore.getState().users.find((u) => u.id === staffMeal.staffId)?.role
+            ),
+            issuedByName: useAuthStore.getState().users.find((u) => u.id === cashierId)?.name,
+          }
+        : undefined;
+
+    void PrintAdapter.printTicket(newTicket, config.businessName, config.paperWidthMm, printContext)
       .then((printRes) => {
         if (!printRes.success) {
           set({ printError: `Ticket #${newTicket.id} did not print: ${printRes.message}` });
@@ -139,7 +183,10 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     return {
       success: true,
       ticket: newTicket,
-      message: `Ticket #${newTicket.id} issued`,
+      message:
+        tender === 'staff' && staffMeal
+          ? `Staff meal #${newTicket.id} issued for ${staffMeal.staffName}`
+          : `Ticket #${newTicket.id} issued`,
     };
   },
 

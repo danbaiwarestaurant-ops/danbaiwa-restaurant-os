@@ -22,15 +22,18 @@ import { selectAllPages } from '../supabase/pagedSelect';
 import { db, stripUserRow, UserRow } from './dexieSchema';
 import { getAccountId } from './accountScope';
 import { dbService } from './IndexedDbService';
-import { SyncablePgTable } from './remoteMerge';
+import { SyncablePgTable, SyncableDexieTable } from './remoteMerge';
 
-const BACKFILL_TABLES: { pg: SyncablePgTable; dexie: 'users' | 'tickets' | 'shifts' | 'expenses' | 'auditLogs' }[] = [
+const BACKFILL_TABLES: { pg: SyncablePgTable; dexie: SyncableDexieTable }[] = [
   // Order matters: shifts must exist in the cloud before expenses, which carry a
   // NOT NULL foreign key onto them.
   { pg: 'users', dexie: 'users' },
   { pg: 'shifts', dexie: 'shifts' },
   { pg: 'tickets', dexie: 'tickets' },
   { pg: 'expenses', dexie: 'expenses' },
+  // No foreign key of its own — a server's count references a user row, not a shift — so
+  // its position here only has to be after users.
+  { pg: 'server_sales', dexie: 'serverSales' },
   { pg: 'audit_logs', dexie: 'auditLogs' },
 ];
 

@@ -57,7 +57,7 @@ export const ReportsView: React.FC = () => {
 
   // Empty buckets are real information on screen, but padding a CSV with 20 zero rows just
   // makes the file harder to read in a spreadsheet.
-  const exportable = report.rows.filter((r) => r.ticketCount > 0 || r.expenses > 0);
+  const exportable = report.rows.filter((r) => r.ticketCount > 0 || r.expenses > 0 || r.staffMealCount > 0);
 
   // "hour" | "day" | "month" — one word driving the heading, the column and the caption, so
   // a fourth unit cannot leave one of them saying something else.
@@ -72,6 +72,8 @@ export const ReportsView: React.FC = () => {
       { header: 'Transfer/POS', value: (r) => r.transfer },
       { header: 'Approved Expenses', value: (r) => r.expenses },
       { header: 'Net', value: (r) => r.net },
+      { header: 'Staff Meals', value: (r) => r.staffMeals },
+      { header: 'Staff Meal Count', value: (r) => r.staffMealCount },
       { header: 'Tickets', value: (r) => r.ticketCount },
     ]);
     downloadCsv(timestampedFilename(`report-${period.label.replace(/\s+/g, '-')}`), csv);
@@ -162,11 +164,11 @@ export const ReportsView: React.FC = () => {
           <EmptyState>Nothing recorded in {period.label}</EmptyState>
         ) : (
           <DataTable
-            headers={[Noun, 'Revenue', 'Cash', 'Transfer / POS', 'Expenses', 'Net', 'Tickets']}
-            alignRight={[1, 2, 3, 4, 5, 6]}
+            headers={[Noun, 'Revenue', 'Cash', 'Transfer / POS', 'Expenses', 'Net', 'Staff Meals', 'Tickets']}
+            alignRight={[1, 2, 3, 4, 5, 6, 7]}
           >
             {report.rows.map((r) => {
-              const quiet = r.ticketCount === 0 && r.expenses === 0;
+              const quiet = r.ticketCount === 0 && r.expenses === 0 && r.staffMealCount === 0;
               return (
                 <tr key={r.key} className={quiet ? 'text-slate-400' : 'hover:bg-slate-50'}>
                   <td className="py-2.5 pr-3 font-bold text-slate-900">
@@ -188,6 +190,13 @@ export const ReportsView: React.FC = () => {
                   </td>
                   <td className={`py-2.5 pr-3 text-right font-mono tabular-nums font-black ${quiet ? '' : 'text-amber-600'}`}>
                     {formatCurrency(r.net, currency)}
+                  </td>
+                  {/* Sits after net, not inside it. No money left the business for a staff
+                      meal — the food was bought and counted as stock already — so netting
+                      it off here would charge the same plate twice. It is shown because it
+                      is a real cost to watch, not because it belongs in the arithmetic. */}
+                  <td className={`py-2.5 pr-3 text-right font-mono tabular-nums ${quiet || !r.staffMeals ? '' : 'text-amber-700'}`}>
+                    {r.staffMeals ? formatCurrency(r.staffMeals, currency) : '—'}
                   </td>
                   <td className="py-2.5 text-right font-mono tabular-nums">{r.ticketCount}</td>
                 </tr>

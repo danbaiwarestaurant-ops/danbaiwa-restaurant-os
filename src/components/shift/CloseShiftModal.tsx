@@ -6,6 +6,7 @@ import { useExpenseStore } from '../../store/useExpenseStore';
 import { formatCurrency } from '../../utils/currency';
 import { calculateShiftReconciliation } from '../../utils/reconciliation';
 import { shiftTickets, shiftExpenses, splitByTender, sumApprovedExpenses } from '../../utils/analytics';
+import { staleDayCount } from '../../utils/shiftDay';
 
 interface CloseShiftModalProps {
   isOpen: boolean;
@@ -17,9 +18,16 @@ interface CloseShiftModalProps {
    * the till over, not discover it when the screen returns to the sign-in page.
    */
   endsSession?: boolean;
+  /**
+   * True when this count is being forced because the shift belongs to an earlier trading
+   * day. It cannot be dismissed: the whole reason it is on screen is that yesterday's
+   * takings must be settled before today's first ticket joins them, and a cancel button
+   * would put the till straight back into the state this is here to end.
+   */
+  mandatory?: boolean;
 }
 
-export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClose, onSuccess, endsSession }) => {
+export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClose, onSuccess, endsSession, mandatory }) => {
   const { currentShift, closeShift } = useShiftStore();
   const { tickets } = useTicketStore();
   const { expenses } = useExpenseStore();
@@ -37,6 +45,19 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
   // money anyone can produce at the counter.
   const sales = splitByTender(shiftTickets(tickets, currentShift));
   const approvedExpenses = sumApprovedExpenses(shiftExpenses(expenses, currentShift));
+
+  // How far behind this shift has fallen, and the day it actually belongs to. Shown
+  // rather than merely implied: a cashier asked to count a drawer needs to know which
+  // day's money they are being held to, especially when it is not the money in front
+  // of them right now.
+  const daysBehind = staleDayCount(currentShift);
+  const openedLabel = new Date(currentShift.openedAt).toLocaleString(undefined, {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
   const countedNum = parseFloat(countedCash) || 0;
   const recon = calculateShiftReconciliation(
@@ -61,14 +82,40 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
         <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold uppercase tracking-wider text-sm text-amber-400">
             <Lock className="w-4 h-4" />
-            <span>{endsSession ? 'Close Shift & Log Out' : 'Close Shift & Reconcile Cash'}</span>
+            <span>
+              {mandatory
+                ? "Close Previous Day's Shift"
+                : endsSession
+                  ? 'Close Shift & Log Out'
+                  : 'Close Shift & Reconcile Cash'}
+            </span>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">
-            <X className="w-5 h-5" />
-          </button>
+          {/* No way out of a forced count — see the `mandatory` prop. */}
+          {!mandatory && (
+            <button onClick={onClose} className="text-slate-400 hover:text-white">
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {mandatory && (
+            <div className="bg-amber-50 border-2 border-amber-400 p-3 space-y-1 rounded-none">
+              <div className="flex items-center gap-2 text-amber-900 font-black uppercase text-xs tracking-wider">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  {daysBehind > 1 ? `Shift left open for ${daysBehind} days` : 'Shift left open from the previous day'}
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-900 leading-snug font-medium">
+                This shift has been running since <span className="font-bold">{openedLabel}</span>.
+                Count the drawer and close it before starting today&apos;s service — otherwise
+                today&apos;s sales are added to it and neither day&apos;s cash can be checked.
+                A new shift opens for you as soon as this one is closed.
+              </p>
+            </div>
+          )}
+
           {/* Summary Rollup Box */}
           <div className="bg-slate-50 border-2 border-slate-200 p-4 space-y-2 text-xs rounded-none">
             {/* Shifts no longer record an opening float, so this line would read ₦0 on
@@ -91,6 +138,15 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
               <span>Transfer / POS (not in drawer):</span>
               <span className="font-mono font-bold text-sky-600">{formatCurrency(sales.transfer)}</span>
             </div>
+            {/* Outside the sales total above it, and outside the drawer target below —
+                shown so the cashier can see what the kitchen gave away on their shift
+                without any of it being money they are asked to produce. */}
+            {sales.staff > 0 && (
+              <div className="flex justify-between text-slate-600 font-medium border-t border-slate-300 pt-2">
+                <span>Staff meals (not a sale):</span>
+                <span className="font-mono font-bold text-amber-700">{formatCurrency(sales.staff)}</span>
+              </div>
+            )}
             <div className="border-t border-slate-300 pt-2 flex justify-between text-slate-600 font-medium">
               <span>(−) Approved Shift Expenses:</span>
               <span className="font-mono font-bold text-rose-600">−{formatCurrency(recon.totalApprovedExpenses)}</span>
@@ -162,19 +218,21 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
           </div>
 
           <div className="flex justify-end gap-2 pt-2 border-t">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-bold uppercase border border-slate-300 rounded-none text-slate-700 hover:bg-slate-100"
-            >
-              Cancel
-            </button>
+            {!mandatory && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-bold uppercase border border-slate-300 rounded-none text-slate-700 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+            )}
             <button
               type="submit"
               disabled={!countedCash}
               className="px-4 py-2 text-xs font-black uppercase bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-none border border-amber-600 shadow-xs"
             >
-              {endsSession ? 'Close Shift & Log Out' : 'Finalize Shift Close'}
+              {mandatory ? 'Close It & Start Today' : endsSession ? 'Close Shift & Log Out' : 'Finalize Shift Close'}
             </button>
           </div>
         </form>

@@ -21,11 +21,15 @@ import { RecentTicketsSidebar } from './components/ticket/RecentTicketsSidebar';
 import { ThermalReceiptTemplate } from './components/ticket/ThermalReceiptTemplate';
 import { VoidReasonModal } from './components/ticket/VoidReasonModal';
 import { ScanCollectorModal } from './components/ticket/ScanCollectorModal';
+import { StaffMealModal } from './components/ticket/StaffMealModal';
 
 import { OpenShiftModal } from './components/shift/OpenShiftModal';
 import { CloseShiftModal } from './components/shift/CloseShiftModal';
 import { ExpenseLoggerModal } from './components/expense/ExpenseLoggerModal';
 import { ManagerConsole } from './components/manager/ManagerConsole';
+
+import { isStaleShift, staleDayCount } from './utils/shiftDay';
+import { takesSales } from './utils/roles';
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 
@@ -57,7 +61,15 @@ export function App() {
   const [isCloseShiftOpen, setIsCloseShiftOpen] = useState(false);
   /** True while the close-shift modal is standing in for a log out — see handleLogout. */
   const [logoutAfterClose, setLogoutAfterClose] = useState(false);
+  /**
+   * True while the close-shift modal is being forced because the open shift belongs to an
+   * earlier trading day — see the data-loading effect. The count cannot be dismissed in
+   * this state: the point of it is that yesterday's takings are settled before today's
+   * first ticket is added to them.
+   */
+  const [mustCloseStaleShift, setMustCloseStaleShift] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
+  const [isStaffMealOpen, setIsStaffMealOpen] = useState(false);
   const [isScanModalOpen, setIsScanModalOpen] = useState(false);
   const [isVoidModalOpen, setIsVoidModalOpen] = useState(false);
   const [selectedVoidTicketId, setSelectedVoidTicketId] = useState<string | null>(null);
@@ -100,6 +112,48 @@ export function App() {
     clearPrintError();
   }, [printError]);
 
+  /**
+   * What to do with the shift this sign-in landed on. Called after every loadShift.
+   *
+   * Three cases, in order:
+   *
+   * 1. The open shift belongs to an earlier trading day. Nothing ever closed a shift on
+   *    its own, so a cashier who signed out at night without counting the drawer used to
+   *    be handed yesterday's shift straight back — and a second day of tickets was filed
+   *    against it, with the expected cash of both days rolled into one variance nobody
+   *    could account for. Force the count before any of today's work touches it.
+   * 2. A shift is open and is today's. Carry on with it, which is the ordinary case for a
+   *    cashier returning from a break or a lock screen.
+   * 3. No shift is open and someone who takes sales is signing in. Open one — signing in
+   *    *is* the shift starting, and the old separate "Start Shift" step was one that could
+   *    be skipped, leaving them ringing up a service whose takings belonged to nobody.
+   *    Cashiers and servers only: an owner signing in to read the books should not accrue
+   *    an empty shift they then have to count a drawer to close, and kitchen or store
+   *    staff have no takings to reconcile at all.
+   */
+  const settleShiftForSignIn = () => {
+    if (!activeUser) return;
+    const open = useShiftStore.getState().currentShift;
+
+    if (isStaleShift(open)) {
+      setMustCloseStaleShift(true);
+      setIsCloseShiftOpen(true);
+      return;
+    }
+
+    setMustCloseStaleShift(false);
+    if (open) return;
+    if (!takesSales(activeUser.role)) return;
+    // Once per sign-in, never per render: a cashier who deliberately closes their shift
+    // and stays signed in must not have a new one opened underneath them.
+    if (autoOpenedForRef.current === activeUser.id) return;
+    autoOpenedForRef.current = activeUser.id;
+
+    openShift(0, activeUser.name, activeUser.id)
+      .then(() => showSuccess(`Shift opened for ${activeUser.name}`))
+      .catch((e: any) => showError(e?.message || 'Could not open a shift for this sign-in'));
+  };
+
   // Reload data whenever the signed-in user or the view changes.
   //
   // At the till, tickets and expenses roll up across the account for an admin but stay
@@ -124,7 +178,7 @@ export function App() {
       // Still the signed-in user's own shift, not a rollup: the console's shift control
       // acts on this till, and a stale value there would offer to open a second shift for
       // a cashier who already has one.
-      loadShift(activeUser.id);
+      loadShift(activeUser.id).then(settleShiftForSignIn);
       return;
     }
 
@@ -135,24 +189,31 @@ export function App() {
     // and not only its own open shift.
     loadShiftHistory();
 
-    // A cashier signing in *is* the shift starting. Nobody signs into a till to stand at
-    // it doing nothing, and the old separate "Start Shift" step was one a cashier could
-    // skip — leaving them unable to print, or worse, ringing up a service whose takings
-    // belonged to nobody's shift. Only cashiers: an owner signing in to read the books
-    // should not accrue an empty shift they then have to count a drawer to close.
-    loadShift(activeUser.id).then(() => {
-      if (activeUser.role !== 'cashier') return;
-      if (useShiftStore.getState().currentShift) return;
-      // Once per sign-in, never per render: a cashier who deliberately closes their shift
-      // and stays signed in must not have a new one opened underneath them.
-      if (autoOpenedForRef.current === activeUser.id) return;
-      autoOpenedForRef.current = activeUser.id;
-
-      openShift(0, activeUser.name, activeUser.id)
-        .then(() => showSuccess(`Shift opened for ${activeUser.name}`))
-        .catch((e: any) => showError(e?.message || 'Could not open a shift for this sign-in'));
-    });
+    loadShift(activeUser.id).then(settleShiftForSignIn);
   }, [isAuthenticated, activeUser?.id, activeUser?.role, isManagerView]);
+
+  /**
+   * Catches the trading day turning over under a till that nobody has signed out of.
+   *
+   * settleShiftForSignIn only runs on a sign-in or a view change, so a machine left on
+   * overnight with the same cashier signed in would never re-examine its open shift —
+   * which is the original fault exactly: yesterday's shift quietly collecting today's
+   * tickets. A minute's resolution is far finer than the hour boundary it is watching
+   * for, and the check is two date comparisons against state already in memory.
+   */
+  useEffect(() => {
+    if (!isAuthenticated || !currentShift) return;
+
+    const check = () => {
+      if (!isStaleShift(useShiftStore.getState().currentShift)) return;
+      setMustCloseStaleShift(true);
+      setIsCloseShiftOpen(true);
+    };
+
+    check();
+    const timer = setInterval(check, 60_000);
+    return () => clearInterval(timer);
+  }, [isAuthenticated, currentShift?.id, currentShift?.openedAt]);
 
   // 5-Minute Inactivity Idle Auto-Lock Timer
   useEffect(() => {
@@ -289,6 +350,32 @@ export function App() {
     else setIsOpenShiftOpen(true);
   };
 
+  /**
+   * What follows a successful close-out, which depends on why it was raised.
+   *
+   * A forced close of yesterday's shift is the one case that continues rather than ends:
+   * the drawer has been settled against the day it belongs to, and the cashier is standing
+   * there ready to work, so today's shift starts immediately. Making them sign out and
+   * back in to get one would be the same interruption the forced count already cost them.
+   */
+  const handleShiftClosed = (msg: string) => {
+    showSuccess(msg);
+
+    if (mustCloseStaleShift) {
+      setMustCloseStaleShift(false);
+      // Cleared so settleShiftForSignIn will open today's shift — this sign-in has already
+      // had one opened for it, and that guard would otherwise refuse the second.
+      autoOpenedForRef.current = null;
+      settleShiftForSignIn();
+      return;
+    }
+
+    if (!logoutAfterClose) return;
+    setLogoutAfterClose(false);
+    autoOpenedForRef.current = null;
+    logoutUser();
+  };
+
   const requireManagerPin = (purpose: string, onVerified: () => void) => {
     openPinModal(purpose, (verified) => {
       if (verified) onVerified();
@@ -319,8 +406,9 @@ export function App() {
         <OpenShiftModal isOpen={isOpenShiftOpen} onClose={() => setIsOpenShiftOpen(false)} onSuccess={showSuccess} />
         <CloseShiftModal
           isOpen={isCloseShiftOpen}
+          mandatory={mustCloseStaleShift}
           onClose={() => setIsCloseShiftOpen(false)}
-          onSuccess={showSuccess}
+          onSuccess={handleShiftClosed}
         />
         <Toast message={toastMsg} type={toastType} onClose={() => setToastMsg(null)} />
         <PinModal isOpen={isPinModalOpen} purpose={pinModalPurpose} onClose={closePinModal} />
@@ -337,6 +425,7 @@ export function App() {
       <Header
         onOpenConfig={() => setIsConfigOpen(true)}
         onOpenExpenseModal={() => setIsExpenseModalOpen(true)}
+        onOpenStaffMealModal={() => setIsStaffMealOpen(true)}
         onToggleManagerView={handleToggleManagerView}
         onLockTill={() =>
           openPinModal('Till Locked — Enter Your PIN to Resume', () => {}, 'session')
@@ -384,20 +473,21 @@ export function App() {
       <CloseShiftModal
         isOpen={isCloseShiftOpen}
         endsSession={logoutAfterClose}
+        mandatory={mustCloseStaleShift}
         onClose={() => {
           setIsCloseShiftOpen(false);
           // Backing out of the count is backing out of the log out too.
           setLogoutAfterClose(false);
         }}
-        onSuccess={(msg) => {
-          showSuccess(msg);
-          if (!logoutAfterClose) return;
-          setLogoutAfterClose(false);
-          autoOpenedForRef.current = null;
-          logoutUser();
-        }}
+        onSuccess={handleShiftClosed}
       />
       <ExpenseLoggerModal isOpen={isExpenseModalOpen} onClose={() => setIsExpenseModalOpen(false)} onSuccess={showSuccess} />
+      <StaffMealModal
+        isOpen={isStaffMealOpen}
+        onClose={() => setIsStaffMealOpen(false)}
+        onSuccess={showSuccess}
+        onError={showError}
+      />
       <ScanCollectorModal isOpen={isScanModalOpen} onClose={() => setIsScanModalOpen(false)} onSuccess={showSuccess} />
       <VoidReasonModal
         isOpen={isVoidModalOpen}

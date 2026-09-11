@@ -126,6 +126,19 @@ del /f /q "!DEST!\danbaiwa-rawprint-v*.exe" >nul 2>&1
 > "!DEST!\start-hidden.vbs" echo Set sh = CreateObject("WScript.Shell")
 >>"!DEST!\start-hidden.vbs" echo here = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))
 >>"!DEST!\start-hidden.vbs" echo sh.Run """" ^& here ^& "run-agent.cmd""", 0, False
+
+:: The Startup folder needs its own copy that does NOT locate run-agent.cmd relative to
+:: itself - from the Startup folder that resolves to the wrong place. This one carries
+:: the absolute path.
+::
+:: It is written HERE, at the top level of the script, and not inside the `if` block that
+:: registers it. Written inside a block, cmd's parser ended the block at the first `)` of
+:: CreateObject("WScript.Shell") and the `)` never reached the file, so every till got a
+:: VBScript that could not parse. The installer still reported success - it only checked
+:: the file existed - the agent it started by hand kept printing all day, and nothing came
+:: back after the next reboot. That is the whole of the "does not auto start" bug.
+> "!DEST!\start-hidden-abs.vbs" echo Set sh = CreateObject("WScript.Shell")
+>>"!DEST!\start-hidden-abs.vbs" echo sh.Run """!DEST!\run-agent.cmd""", 0, False
 echo        OK
 
 :: --- 5. Start at logon ----------------------------------------------------
@@ -152,46 +165,75 @@ schtasks /delete /tn "%TASKNAME%" /f >nul 2>&1
 if exist "!STARTUPFILE!" del /f /q "!STARTUPFILE!" >nul 2>&1
 reg delete "!RUNKEY!" /v "%TASKNAME%" /f >nul 2>&1
 
+:: Each mechanism is now PROVEN before it is accepted: the agent is stopped, the entry is
+:: triggered exactly the way a logon would trigger it, and the port is asked whether an
+:: agent answered. A mechanism that registers cleanly but cannot actually start anything -
+:: a malformed schtasks /tr, a script host blocked by policy, a broken .vbs - is undone and
+:: the next one is tried, instead of being reported as success.
+
 :: 1. Task Scheduler - the tidiest, and visible in a place administrators look.
 schtasks /create /tn "%TASKNAME%" /tr "wscript.exe \"!DEST!\start-hidden.vbs\"" /sc ONLOGON /f >nul 2>&1
-if not errorlevel 1 set "AUTOSTART=Task Scheduler"
+if errorlevel 1 goto try_startup
+call :stopAgent
+schtasks /run /tn "%TASKNAME%" >nul 2>&1
+call :waitHealth
+if errorlevel 1 (
+  schtasks /delete /tn "%TASKNAME%" /f >nul 2>&1
+  goto try_startup
+)
+set "AUTOSTART=Task Scheduler"
+goto autostart_done
 
+:try_startup
 :: 2. Startup folder - the oldest and most permissive mechanism Windows has.
-::    A copy of start-hidden.vbs would not work here: it locates run-agent.cmd relative
-::    to itself, and from the Startup folder that resolves to the wrong place. This one
-::    carries the absolute path instead.
-if not defined AUTOSTART (
-  if not exist "!STARTUPDIR!" mkdir "!STARTUPDIR!" >nul 2>&1
-  > "!STARTUPFILE!" echo Set sh = CreateObject("WScript.Shell")
-  >>"!STARTUPFILE!" echo sh.Run """!DEST!\run-agent.cmd""", 0, False
-  if exist "!STARTUPFILE!" set "AUTOSTART=Startup folder"
+if not exist "!STARTUPDIR!" mkdir "!STARTUPDIR!" >nul 2>&1
+copy /y "!DEST!\start-hidden-abs.vbs" "!STARTUPFILE!" >nul 2>&1
+if not exist "!STARTUPFILE!" goto try_runkey
+call :stopAgent
+wscript.exe "!STARTUPFILE!"
+call :waitHealth
+if errorlevel 1 (
+  del /f /q "!STARTUPFILE!" >nul 2>&1
+  goto try_runkey
 )
+set "AUTOSTART=Startup folder"
+goto autostart_done
 
+:try_runkey
 :: 3. The current user's Run key - no folder to be tidied away by anyone.
-if not defined AUTOSTART (
-  reg add "!RUNKEY!" /v "%TASKNAME%" /t REG_SZ /d "wscript.exe \"!DEST!\start-hidden.vbs\"" /f >nul 2>&1
-  if not errorlevel 1 set "AUTOSTART=Run key"
+reg add "!RUNKEY!" /v "%TASKNAME%" /t REG_SZ /d "wscript.exe \"!DEST!\start-hidden.vbs\"" /f >nul 2>&1
+if errorlevel 1 goto autostart_done
+call :stopAgent
+wscript.exe "!DEST!\start-hidden.vbs"
+call :waitHealth
+if errorlevel 1 (
+  reg delete "!RUNKEY!" /v "%TASKNAME%" /f >nul 2>&1
+  goto autostart_done
 )
+set "AUTOSTART=Run key"
 
+:autostart_done
 if defined AUTOSTART (
-  echo        OK - via !AUTOSTART!
+  echo        OK - via !AUTOSTART! ^(started and answered, not just registered^)
 ) else (
-  echo  WARNING: None of the three startup methods could be registered on this PC,
-  echo           which is unusual and suggests a policy or security product is
+  echo  WARNING: None of the three startup methods could be made to start the agent on
+  echo           this PC, which is unusual and suggests a policy or security product is
   echo           blocking all of them. Until that is lifted, someone must run this
   echo           after each reboot:
   echo           !DEST!\start-hidden.vbs
 )
 
-:: --- 6. Start now and verify ---------------------------------------------
+:: --- 6. Confirm it is up --------------------------------------------------
 echo.
-echo  [5/5] Starting the agent...
-start "" wscript.exe "!DEST!\start-hidden.vbs"
+echo  [5/5] Checking the agent...
 
-:: Give it a moment to bind the port before asking whether it did.
-powershell -NoProfile -Command "Start-Sleep -Milliseconds 1500" >nul 2>&1
-
-powershell -NoProfile -Command "try { $r = Invoke-RestMethod http://127.0.0.1:9100/health -TimeoutSec 5; if ($r.ok) { exit 0 } else { exit 1 } } catch { exit 1 }"
+:: Registering above already started it through the real logon entry, so normally it is
+:: answering by now. Only start it by hand if every mechanism was refused.
+call :waitHealth
+if errorlevel 1 (
+  start "" wscript.exe "!DEST!\start-hidden.vbs"
+  call :waitHealth
+)
 if errorlevel 1 (
   echo.
   echo  The agent did not answer on port 9100.
@@ -219,3 +261,28 @@ echo  ---------------------------------------------
 echo.
 pause
 endlocal
+exit /b 0
+
+:: ===========================================================================
+::  Subroutines
+:: ===========================================================================
+
+:: Stop whatever is holding port 9100, plus the raw-print helper it keeps alive, so the
+:: next health check can only be answered by the agent we just started - never by one
+:: left running from a moment ago.
+:stopAgent
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":9100" ^| findstr "LISTENING"') do (
+  taskkill /F /PID %%P >nul 2>&1
+)
+taskkill /F /IM danbaiwa-rawprint.exe >nul 2>&1
+for /f "delims=" %%E in ('dir /b "!DEST!\danbaiwa-rawprint-v*.exe" 2^>nul') do (
+  taskkill /F /IM "%%E" >nul 2>&1
+)
+exit /b 0
+
+:: Wait for the agent to answer on 9100. Returns 0 if it did, 1 if it never came up.
+:: Polls rather than sleeping a fixed time: a cold till compiling the helper on first run
+:: needs several seconds, a warm one answers immediately.
+:waitHealth
+powershell -NoProfile -Command "for ($i=0; $i -lt 20; $i++) { try { $r = Invoke-RestMethod http://127.0.0.1:9100/health -TimeoutSec 2; if ($r.ok) { exit 0 } } catch {}; Start-Sleep -Milliseconds 500 }; exit 1"
+exit /b !errorlevel!

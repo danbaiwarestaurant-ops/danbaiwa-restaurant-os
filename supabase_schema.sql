@@ -184,6 +184,22 @@ ON CONFLICT (id) DO NOTHING;
 -- sale, so the default backfills them correctly and no data migration is needed.
 ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS tender TEXT NOT NULL DEFAULT 'cash';
 
+-- Staff meals. `tender` gained a third value, 'staff', for a plate the kitchen served
+-- and nobody paid for. Deliberately not a CHECK constraint: a till running an older
+-- build must keep writing 'cash' and 'transfer' without a schema that argues with it,
+-- and a constraint added here would reject a value some future build introduces before
+-- the migration reaches every device.
+--
+-- APPLY THIS BEFORE the build that issues staff meals reaches a till. PostgREST refuses
+-- an insert naming a column the table does not have, and refuses the WHOLE batch — so
+-- an unmigrated project would not merely drop the staff meals, it would wedge the queue
+-- behind them and stop that till syncing anything at all.
+--
+-- staff_name is stored alongside the id on purpose (see Ticket.staffName): the report has
+-- to keep naming people correctly after they are renamed or leave.
+ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS staff_id   TEXT;
+ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS staff_name TEXT;
+
 ALTER TABLE users    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE shifts   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
@@ -912,3 +928,76 @@ UPDATE users u
 -- weight and can be deleted from the Storage browser in the dashboard. Live tills write
 -- a fresh, correctly-scoped snapshot within seconds of their next write; nothing is lost
 -- that the account's own tables do not already hold.
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- server_sales — how many tickets each server turned over on a trading day.
+--
+-- APPLY THIS BEFORE THE BUILD THAT WRITES IT REACHES A TILL. PostgREST refuses a
+-- whole batch when it names a table or column the schema does not have, so a till
+-- running ahead of this migration would stall its entire outbox — not just these
+-- rows — behind a request that can never succeed.
+--
+-- This is the only table in the system whose contents are asserted rather than
+-- observed. Servers take orders on the floor and never touch a till; the cashier
+-- rings everything up, so a server's individual figure exists nowhere in the data
+-- until a manager counts the tickets at the end of service and types the number in.
+-- That is why every row records who entered it and when.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS server_sales (
+  -- '<business_day>_<server_id>', minted on the client (see serverSalesId). Derived
+  -- rather than random so that one server's count for one day is one row: a manager
+  -- correcting Tuesday's number from the office laptop collides with the row the till
+  -- wrote and last-write-wins settles it, instead of the day silently reading double.
+  id            TEXT PRIMARY KEY,
+  server_id     TEXT NOT NULL,
+  -- Denormalised at entry, like shifts.cashier_name, so a season's figures still name
+  -- people after they have left the roster and their users row is gone.
+  server_name   TEXT NOT NULL,
+  -- The 6am-to-6am trading day as 'YYYY-MM-DD', not a calendar date — a count entered at
+  -- 1am after a late service belongs to the night that was worked. Stored as TEXT because
+  -- that is what it is: a day key the client computes, never a timestamp to be re-zoned.
+  business_day  TEXT NOT NULL,
+  ticket_count  INTEGER NOT NULL DEFAULT 0 CHECK (ticket_count >= 0),
+  note          TEXT,
+  recorded_by   TEXT,
+  recorded_by_name TEXT,
+  recorded_at   TIMESTAMPTZ,
+  location_id   TEXT,
+  account_id    UUID,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+-- One count per server per trading day, enforced by the database as well as by the
+-- derived primary key — belt and braces, because a client that ever mints an id
+-- differently would otherwise be able to double-count a service.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_server_sales_day_server
+  ON server_sales(account_id, business_day, server_id);
+
+-- The shape every reconciliation pull reads: this account's rows since a watermark.
+CREATE INDEX IF NOT EXISTS idx_server_sales_sync ON server_sales(account_id, updated_at);
+
+DROP TRIGGER IF EXISTS trg_server_sales_updated_at ON server_sales;
+CREATE TRIGGER trg_server_sales_updated_at BEFORE INSERT OR UPDATE ON server_sales
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE server_sales ENABLE ROW LEVEL SECURITY;
+
+-- Same tenant boundary as every other table. Not restricted to admins here: RLS scopes
+-- by account, and who inside an account may reach this screen is the console's question
+-- (it is behind Manager Mode), not the database's.
+DROP POLICY IF EXISTS "Scope server_sales by account" ON server_sales;
+CREATE POLICY "Scope server_sales by account" ON server_sales
+FOR ALL TO authenticated
+USING (account_id = current_account_id()) WITH CHECK (account_id = current_account_id());
+
+-- Realtime, so a count entered on the till appears in the office without a reload.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'server_sales'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE server_sales;
+  END IF;
+END $$;

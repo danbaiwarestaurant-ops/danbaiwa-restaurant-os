@@ -18,6 +18,7 @@ import {
   bytesToBase64,
   composeTicket,
   encodeText,
+  fitLine,
   fitWidth,
   paperSpec,
 } from '../services/print/escpos';
@@ -290,5 +291,97 @@ describe('roll consumed per ticket', () => {
     expect(indexOfSeq(bytes, [0x1d, 0x21, 0x33])).toBeGreaterThan(
       indexOfSeq(bytes, [0x1d, 0x21, 0x11])
     );
+  });
+});
+
+describe('a staff meal is a different document, not a sale with a note on it', () => {
+  const spec = {
+    businessName: 'Danbaiwa Restaurant',
+    amountText: '₦1,500',
+    ticketId: 'LOC01-DEV01-K3F9QZ-000042',
+    timestampText: '02 Sep 2026, 14:05',
+  };
+
+  const meal = {
+    ...spec,
+    staffMeal: { forName: 'Bola Adeyemi', roleText: 'Kitchen Staff', issuedBy: 'Ada' },
+  };
+
+  /** Where this text starts in the byte stream, encoded the way the receipt encodes it. */
+  const find = (bytes: Uint8Array, text: string) =>
+    indexOfSeq(bytes, Array.from(encodeText(text)));
+
+  it('says what it is before anything else on the ticket', async () => {
+    // If the marking is not the first thing off the roll it can be missed at the pass,
+    // or the ticket passed off as a paid one.
+    const bytes = await buildTicketReceipt(meal);
+
+    const staffAt = find(bytes, 'STAFF MEAL');
+    const notForSaleAt = find(bytes, 'NOT FOR SALE');
+    const nameAt = find(bytes, spec.businessName);
+
+    expect(staffAt).toBeGreaterThan(0);
+    expect(notForSaleAt).toBeGreaterThan(staffAt);
+    expect(nameAt).toBeGreaterThan(notForSaleAt);
+  });
+
+  it('makes the employee the largest thing on it, not the amount', async () => {
+    // This is the whole point of the separate layout. On a sale the amount is 4x tall
+    // because it is read across a counter by someone paying; nobody pays for this, and
+    // an amount that size reads as money taken at a glance across a busy pass.
+    const bytes = await buildTicketReceipt(meal);
+
+    // No 4x-tall run anywhere on a staff meal — GS ! with height nibble 3.
+    for (let w = 0; w < 8; w++) {
+      expect(indexOfSeq(bytes, [0x1d, 0x21, (w << 4) | 3])).toBe(-1);
+    }
+
+    // And the name is set at 2x tall, which nothing else on the ticket exceeds.
+    const nameAt = find(bytes, 'Bola Adeyemi');
+    expect(nameAt).toBeGreaterThan(0);
+    expect(indexOfSeq(bytes, [0x1d, 0x21, (1 << 4) | 1])).toBeGreaterThan(0);
+  });
+
+  it('carries the role and who authorised it', async () => {
+    const bytes = await buildTicketReceipt(meal);
+    expect(find(bytes, 'Kitchen Staff')).toBeGreaterThan(0);
+    // A plate leaving unpaid needs a name against it, or there is nobody to ask.
+    expect(find(bytes, 'Issued by')).toBeGreaterThan(0);
+    expect(find(bytes, 'Ada')).toBeGreaterThan(0);
+  });
+
+  it('keeps the value on the ticket, as a record line rather than a headline', async () => {
+    const bytes = await buildTicketReceipt(meal);
+    expect(find(bytes, 'Meal value')).toBeGreaterThan(0);
+    expect(find(bytes, '1,500')).toBeGreaterThan(find(bytes, 'Meal value'));
+  });
+
+  it('drops the role line rather than printing an empty one', async () => {
+    const bytes = await buildTicketReceipt({
+      ...spec,
+      staffMeal: { forName: 'Bola' },
+    });
+    expect(find(bytes, 'Bola')).toBeGreaterThan(0);
+    expect(find(bytes, 'Issued by')).toBe(-1);
+  });
+
+  it('leaves an ordinary sale exactly as it was', async () => {
+    // Every line costs roll, and the sale layout is tuned to the millimetre. A cash
+    // ticket must not pay for anything the staff-meal work added.
+    const bytes = await buildTicketReceipt(spec);
+    expect(find(bytes, 'STAFF MEAL')).toBe(-1);
+    expect(find(bytes, 'NOT FOR SALE')).toBe(-1);
+    expect(find(bytes, 'Meal value')).toBe(-1);
+    // The amount is still the tallest thing on it.
+    expect(indexOfSeq(bytes, [0x1d, 0x21, 0x33])).toBeGreaterThan(0);
+  });
+
+  it('trims a name too long for the roll instead of wrapping it', () => {
+    // A wrapped name reads as a printer fault, and the body font is already the smallest
+    // this prints — so there is no shrinking it the way an amount is shrunk.
+    const long = 'Oluwaseun Abimbola Oyelaran-Adewale';
+    expect(fitLine(long, 32)).toHaveLength(32);
+    expect(fitLine(long, 32).endsWith('...')).toBe(true);
+    expect(fitLine('Bola', 32)).toBe('Bola');
   });
 });

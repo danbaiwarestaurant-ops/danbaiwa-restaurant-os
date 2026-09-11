@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAuthStore, StaffRecordCounts } from '../../store/useAuthStore';
-import { UserAccount } from '../../types/user';
+import { UserAccount, UserRole } from '../../types/user';
+import { STAFF_ROLES, roleLabel, roleDescription, canSignIn } from '../../utils/roles';
 import {
   UserPlus, Users, KeyRound, CheckCircle2, Pencil, Trash2,
   UserMinus, UserCheck, AlertTriangle,
@@ -29,13 +30,16 @@ const RowAction: React.FC<{
 
 export const StaffManagement: React.FC = () => {
   const {
-    users, activeUser, createStaffCashier, resetCashierPin,
+    users, activeUser, createStaffMember, resetCashierPin,
     updateStaffMember, setStaffStatus, countStaffRecords, deleteStaffMember,
   } = useAuthStore();
 
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [pin, setPin] = useState('');
+  // Cashier is the default because it is still the commonest hire, not because it is the
+  // only one — which is exactly the assumption this form used to bake in.
+  const [role, setRole] = useState<UserRole>('cashier');
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +49,7 @@ export const StaffManagement: React.FC = () => {
   const [editUser, setEditUser] = useState<UserAccount | null>(null);
   const [editName, setEditName] = useState('');
   const [editUsername, setEditUsername] = useState('');
+  const [editRole, setEditRole] = useState<UserRole>('cashier');
 
   // Delete is a two-part dialog: it first counts what the account owns, then either
   // refuses with the reason or asks the admin to type the name to confirm.
@@ -62,15 +67,21 @@ export const StaffManagement: React.FC = () => {
     setError(m);
   };
 
-  const handleCreateCashier = async (e: React.FormEvent) => {
+  const handleCreateStaff = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !username.trim() || pin.length < 4) return;
 
-    await createStaffCashier(name, username, pin);
-    flash(`Cashier account "${name}" created successfully`);
+    try {
+      await createStaffMember(name, username, pin, role);
+    } catch (err: any) {
+      fail(err?.message || 'Could not create that account.');
+      return;
+    }
+    flash(`${roleLabel(role)} account "${name}" created`);
     setName('');
     setUsername('');
     setPin('');
+    setRole('cashier');
   };
 
   const handleResetCashierPin = async (e: React.FormEvent) => {
@@ -88,12 +99,13 @@ export const StaffManagement: React.FC = () => {
     setEditUser(u);
     setEditName(u.name);
     setEditUsername(u.username || '');
+    setEditRole(u.role);
   };
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editUser) return;
-    const res = await updateStaffMember(editUser.id, editName, editUsername);
+    const res = await updateStaffMember(editUser.id, editName, editUsername, editRole);
     if (!res.ok) {
       fail(res.message || 'Could not update that account.');
       return;
@@ -148,7 +160,7 @@ export const StaffManagement: React.FC = () => {
       <div className="flex items-center justify-between border-b-2 border-slate-200 pb-3">
         <h3 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-2">
           <Users className="w-4 h-4 text-amber-500" />
-          <span>Staff Cashier Management (Admin Only)</span>
+          <span>Staff Management (Admin Only)</span>
         </h3>
         <span className="text-[11px] font-mono text-slate-500">
           Salted Local Auth • Supabase Outbox Synced
@@ -169,17 +181,17 @@ export const StaffManagement: React.FC = () => {
         </div>
       )}
 
-      {/* Create New Staff Cashier Form */}
-      <form onSubmit={handleCreateCashier} className="bg-slate-50 border-2 border-slate-200 p-4 space-y-3 rounded-none">
+      {/* Create New Staff Member Form */}
+      <form onSubmit={handleCreateStaff} className="bg-slate-50 border-2 border-slate-200 p-4 space-y-3 rounded-none">
         <div className="text-xs font-bold uppercase text-slate-800 flex items-center gap-1.5">
           <UserPlus className="w-4 h-4 text-amber-600" />
-          <span>Add New Staff Cashier Account</span>
+          <span>Add Staff Member</span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
           <div>
             <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-              Cashier Name
+              Full Name
             </label>
             <input
               type="text"
@@ -199,7 +211,7 @@ export const StaffManagement: React.FC = () => {
               type="text"
               value={username}
               onChange={e => setUsername(e.target.value)}
-              placeholder="e.g. cashier-02"
+              placeholder="e.g. amina"
               className="w-full p-2.5 border-2 border-slate-300 rounded-none text-xs font-mono font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
               required
             />
@@ -207,7 +219,24 @@ export const StaffManagement: React.FC = () => {
 
           <div>
             <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-              Staff Cashier PIN (4-8 Digits)
+              Role
+            </label>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value as UserRole)}
+              className="w-full p-2.5 border-2 border-slate-300 rounded-none text-xs font-bold text-slate-900 bg-white focus:border-amber-500 focus:outline-none"
+            >
+              {STAFF_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {roleLabel(r)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+              PIN (4-8 Digits)
             </label>
             <input
               type="password"
@@ -221,13 +250,22 @@ export const StaffManagement: React.FC = () => {
           </div>
         </div>
 
+        {/* What the chosen role actually means, said at the moment of choosing rather
+            than left for someone to discover when a storekeeper cannot sign in. */}
+        <p className="text-[11px] text-slate-600 font-medium leading-snug">
+          {roleDescription(role)}
+          {!canSignIn(role) && (
+            <span className="font-bold text-amber-800"> A PIN is still set, but this role cannot sign in at the till.</span>
+          )}
+        </p>
+
         <div className="flex justify-end pt-1">
           <button
             type="submit"
             disabled={!name || !username || !pin}
             className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-xs tracking-wider border border-amber-600 rounded-none shadow-xs"
           >
-            Create Cashier Account
+            Create Account
           </button>
         </div>
       </form>
@@ -265,8 +303,15 @@ export const StaffManagement: React.FC = () => {
                           ? 'bg-amber-100 border-amber-300 text-amber-900'
                           : 'bg-slate-100 border-slate-300 text-slate-800'
                       }`}>
-                        {u.role}
+                        {roleLabel(u.role)}
                       </span>
+                      {/* Said on the row, because "why can't Musa log in?" is otherwise a
+                          question the roster gives no answer to. */}
+                      {!canSignIn(u.role) && (
+                        <span className="block mt-0.5 text-[10px] font-bold uppercase text-slate-400">
+                          No till access
+                        </span>
+                      )}
                     </td>
                     <td className={`py-2.5 font-bold uppercase ${isActive ? 'text-emerald-600' : 'text-slate-400'}`}>
                       {u.status}
@@ -274,7 +319,7 @@ export const StaffManagement: React.FC = () => {
                     <td className="py-2.5">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         <RowAction onClick={() => openEdit(u)} icon={Pencil} label="Edit" />
-                        {u.role === 'cashier' && (
+                        {u.role !== 'admin' && (
                           <>
                             <RowAction
                               onClick={() => setResetModalUser({ id: u.id, name: u.name })}
@@ -309,7 +354,7 @@ export const StaffManagement: React.FC = () => {
           <div className="bg-white border-2 border-slate-900 w-full max-w-sm p-5 rounded-none shadow-2xl space-y-4">
             <h4 className="font-black text-sm uppercase text-slate-900 flex items-center gap-2">
               <Pencil className="w-4 h-4 text-amber-600" />
-              <span>Edit {editUser.role === 'admin' ? 'Admin' : 'Cashier'} Details</span>
+              <span>Edit {roleLabel(editUser.role)} Details</span>
             </h4>
 
             <form onSubmit={handleEditSubmit} className="space-y-4">
@@ -337,9 +382,41 @@ export const StaffManagement: React.FC = () => {
                 <p className="text-[11px] text-slate-500 font-semibold mt-1 normal-case">
                   {editUser.role === 'admin'
                     ? 'The admin signs in with their email address, changed under Settings — this is their display ID.'
-                    : 'This is what the cashier signs in with. Their PIN is unchanged.'}
+                    : canSignIn(editRole)
+                      ? 'This is what they sign in with. Their PIN is unchanged.'
+                      : 'Kept for the record. This role does not sign in at the till.'}
                 </p>
               </div>
+
+              {/* The admin's own role is not editable: it is the account's cloud identity,
+                  and there is no second owner to hand it to. */}
+              {editUser.role !== 'admin' && (
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-700 mb-1">Role</label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value as UserRole)}
+                    className="w-full p-2.5 border-2 border-slate-300 text-xs font-bold text-slate-900 bg-white rounded-none focus:border-amber-500 focus:outline-none"
+                  >
+                    {STAFF_ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {roleLabel(r)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500 font-semibold mt-1 normal-case">
+                    {roleDescription(editRole)}
+                  </p>
+                  {/* Moving someone off the sales floor does not erase what they sold —
+                      past tickets stay attributed to them. Said here so it is not a
+                      surprise when the figure stays put. */}
+                  {editRole !== editUser.role && (
+                    <p className="text-[11px] text-amber-800 font-bold mt-1 normal-case">
+                      Their existing tickets, shifts and records stay exactly as they are.
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 border-t pt-3">
                 <button
@@ -374,7 +451,7 @@ export const StaffManagement: React.FC = () => {
             <form onSubmit={handleResetCashierPin} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-                  Enter New Cashier PIN
+                  Enter New PIN
                 </label>
                 <input
                   type="password"

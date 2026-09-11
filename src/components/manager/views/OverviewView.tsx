@@ -9,7 +9,7 @@ import { useConsolePeriodStore } from '../../../store/useConsolePeriodStore';
 import { formatCurrency, formatTimestamp } from '../../../utils/currency';
 import {
   summariseTickets, sumApprovedExpenses, bucketRevenue,
-  cashierRollups, reconcileShift, splitByTender,
+  staffSalesRollups, reconcileShift, splitByTender,
 } from '../../../utils/analytics';
 import { bucketNoun, filterByPeriod, periodBuckets, periodContains, shiftPeriod } from '../../../utils/period';
 import { Panel, KpiCard, KpiTrend, DataTable, EmptyState, StatusBadge } from '../ConsoleUI';
@@ -70,7 +70,7 @@ export const OverviewView: React.FC = () => {
       split,
       approved,
       series: bucketRevenue(inPeriod, periodBuckets(period)),
-      topCashiers: cashierRollups(inPeriod, users).slice(0, 5),
+      topSellers: staffSalesRollups(inPeriod, users).slice(0, 5),
       lastClosed: closedInPeriod[0] ?? null,
       varianceCount: varianceInPeriod.length,
       varianceOlder,
@@ -90,7 +90,7 @@ export const OverviewView: React.FC = () => {
     higherIsBetter,
   });
 
-  const maxCashierRevenue = Math.max(1, ...view.topCashiers.map((c) => c.revenue));
+  const maxSellerRevenue = Math.max(1, ...view.topSellers.map((c) => c.revenue));
 
   const recon = view.lastClosed ? reconcileShift(view.lastClosed, tickets, expenses) : null;
 
@@ -202,14 +202,15 @@ export const OverviewView: React.FC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-[1.4fr_1fr] gap-4">
         {/* The mockup's "Best Selling Items" needs ticket line items, which don't exist.
-            Per-cashier revenue is the equivalent insight this data can actually support. */}
-        <Panel title={`Top Cashiers — ${period.label}`} icon={Users}>
-          {view.topCashiers.length === 0 ? (
+            Revenue per staff member is the equivalent insight this data can actually
+            support — cashiers and servers together, since both ring up sales. */}
+        <Panel title={`Top Sellers — ${period.label}`} icon={Users}>
+          {view.topSellers.length === 0 ? (
             <EmptyState>No tickets in {period.label}</EmptyState>
           ) : (
             <div className="space-y-3.5">
-              {view.topCashiers.map((c, i) => (
-                <div key={c.cashierId}>
+              {view.topSellers.map((c, i) => (
+                <div key={c.staffId}>
                   <div className="flex justify-between text-xs font-bold mb-1.5">
                     <div className="truncate">
                       <span className="text-amber-600 font-black">#{i + 1}</span> {c.name}
@@ -220,7 +221,7 @@ export const OverviewView: React.FC = () => {
                   <div className="h-2 bg-slate-100 rounded-none overflow-hidden">
                     <div
                       className="h-full bg-amber-500"
-                      style={{ width: `${((c.revenue / maxCashierRevenue) * 100).toFixed(0)}%` }}
+                      style={{ width: `${((c.revenue / maxSellerRevenue) * 100).toFixed(0)}%` }}
                     />
                   </div>
                 </div>

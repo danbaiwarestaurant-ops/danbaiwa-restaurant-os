@@ -125,6 +125,7 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
             const isVoid = t.status === 'void';
             const isCollected = t.status === 'collected';
             const isTransfer = (t.tender ?? 'cash') === 'transfer';
+            const isStaff = t.tender === 'staff';
 
             return (
               <div
@@ -168,6 +169,11 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
                         Transfer / POS
                       </div>
                     )}
+                    {isStaff && !isVoid && (
+                      <div className="text-[10px] font-black uppercase tracking-wide text-amber-700">
+                        Staff meal{t.staffName ? ` · ${t.staffName}` : ''}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -176,19 +182,26 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
                   <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100 flex-wrap">
                     {/* Retag rather than void-and-reprint. A mis-tagged payment type is a
                         clerical slip, and voiding to fix one destroys a ticket the customer
-                        is holding and buries the real voids in noise at close-out. */}
-                    <button
-                      onClick={() => changeTender(t.id, isTransfer ? 'cash' : 'transfer', activeUser?.id ?? 'UNKNOWN')}
-                      title={isTransfer ? 'Recorded as transfer — change to cash' : 'Recorded as cash — change to transfer/POS'}
-                      className="text-[11px] font-bold text-slate-700 hover:text-sky-900 bg-slate-100 hover:bg-sky-50 px-2 py-0.5 border border-slate-300 rounded-none flex items-center gap-1"
-                    >
-                      {isTransfer ? (
-                        <Banknote className="w-3 h-3 text-emerald-600" />
-                      ) : (
-                        <Smartphone className="w-3 h-3 text-sky-600" />
-                      )}
-                      <span>{isTransfer ? 'Mark Cash' : 'Mark Transfer'}</span>
-                    </button>
+                        is holding and buries the real voids in noise at close-out.
+                        
+                        Not offered on a staff meal: cash and transfer are two ways of
+                        describing the same money, and a one-tap slide between them is
+                        harmless — but sliding a giveaway into a sale invents revenue that
+                        was never taken, and does it silently. Correcting one is a void. */}
+                    {!isStaff && (
+                      <button
+                        onClick={() => changeTender(t.id, isTransfer ? 'cash' : 'transfer', activeUser?.id ?? 'UNKNOWN')}
+                        title={isTransfer ? 'Recorded as transfer — change to cash' : 'Recorded as cash — change to transfer/POS'}
+                        className="text-[11px] font-bold text-slate-700 hover:text-sky-900 bg-slate-100 hover:bg-sky-50 px-2 py-0.5 border border-slate-300 rounded-none flex items-center gap-1"
+                      >
+                        {isTransfer ? (
+                          <Banknote className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <Smartphone className="w-3 h-3 text-sky-600" />
+                        )}
+                        <span>{isTransfer ? 'Mark Cash' : 'Mark Transfer'}</span>
+                      </button>
+                    )}
                     {!isCollected && (
                       <button
                         onClick={() => markCollected(t.id)}

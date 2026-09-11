@@ -17,6 +17,7 @@ import { IDbService } from './IDbService';
 import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
+import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
@@ -407,6 +408,44 @@ export class IndexedDbService implements IDbService {
         await db.auditLogs.add(entry);
         await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', entry));
       }
+    });
+  }
+
+  // ─── Server ticket counts ────────────────────────────────────────────────
+
+  async getServerSales(from?: string, to?: string): Promise<ServerSalesEntry[]> {
+    // businessDay is a zero-padded YYYY-MM-DD, so a string range is a date range and the
+    // index can answer it without reading rows outside the period.
+    const rows =
+      from && to
+        ? await db.serverSales.where('businessDay').between(from, to, true, true).toArray()
+        : await db.serverSales.toArray();
+    // Newest day first, then by name, so a period reads as a diary rather than as
+    // whatever order IndexedDB happened to return.
+    return rows.sort(
+      (a, b) =>
+        (a.businessDay < b.businessDay ? 1 : a.businessDay > b.businessDay ? -1 : 0) ||
+        a.serverName.localeCompare(b.serverName)
+    );
+  }
+
+  async saveServerSales(entry: ServerSalesEntry): Promise<void> {
+    const stamped = { ...entry, updatedAt: new Date().toISOString() };
+    await db.transaction('rw', db.serverSales, db.outbox, async () => {
+      // put, not add: the id is `<day>_<server>`, so a manager correcting a number is
+      // writing the same row again and must overwrite it rather than fail on the key.
+      await db.serverSales.put(stamped);
+      await db.outbox.add(queueOutboxRow('server_sales', 'INSERT', stamped));
+    });
+  }
+
+  async deleteServerSales(entryId: string): Promise<void> {
+    await db.transaction('rw', db.serverSales, db.outbox, async () => {
+      const existing = await db.serverSales.get(entryId);
+      if (!existing) return;
+      await db.serverSales.delete(entryId);
+      // The cloud copy has to go too, or the next reconciliation pull puts it straight back.
+      await db.outbox.add(queueOutboxRow('server_sales', 'DELETE', { id: entryId }));
     });
   }
 

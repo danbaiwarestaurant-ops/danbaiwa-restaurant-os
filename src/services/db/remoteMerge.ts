@@ -17,13 +17,23 @@ import { db, computeLoginKeys, UserRow } from './dexieSchema';
 
 /** Postgres/outbox table names — the only tables realtime/reconciliation sync touches.
  *  sequences/config/outbox stay device-local and must never be written here. */
-export type SyncablePgTable = 'users' | 'tickets' | 'shifts' | 'expenses' | 'audit_logs';
+export type SyncablePgTable =
+  | 'users'
+  | 'tickets'
+  | 'shifts'
+  | 'expenses'
+  | 'server_sales'
+  | 'audit_logs';
 
-const DEXIE_TABLE: Record<SyncablePgTable, 'users' | 'tickets' | 'shifts' | 'expenses' | 'auditLogs'> = {
+/** The Dexie table each Postgres table lands in. */
+export type SyncableDexieTable = 'users' | 'tickets' | 'shifts' | 'expenses' | 'serverSales' | 'auditLogs';
+
+const DEXIE_TABLE: Record<SyncablePgTable, SyncableDexieTable> = {
   users: 'users',
   tickets: 'tickets',
   shifts: 'shifts',
   expenses: 'expenses',
+  server_sales: 'serverSales',
   audit_logs: 'auditLogs',
 };
 

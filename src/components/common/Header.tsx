@@ -2,11 +2,12 @@ import React from 'react';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { useShiftStore } from '../../store/useShiftStore';
 import { SyncIndicator } from './SyncIndicator';
-import { Settings, LayoutDashboard, DollarSign, Lock } from 'lucide-react';
+import { Settings, LayoutDashboard, DollarSign, Lock, UtensilsCrossed } from 'lucide-react';
 
 interface HeaderProps {
   onOpenConfig: () => void;
   onOpenExpenseModal: () => void;
+  onOpenStaffMealModal: () => void;
   onToggleManagerView: () => void;
   onLockTill: () => void;
   /** Closes the open shift first — see App's handleLogout. */
@@ -17,6 +18,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   onOpenConfig,
   onOpenExpenseModal,
+  onOpenStaffMealModal,
   onToggleManagerView,
   onLockTill,
   onLogout,
@@ -86,6 +88,18 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <DollarSign className="w-3.5 h-3.5 text-amber-600" />
           <span>Expense</span>
+        </button>
+
+        {/* Staff Meal. Beside Expense rather than among the amount keys: both are money
+            leaving the business rather than arriving, and neither belongs on the fast path
+            a cashier uses with a queue in front of them. */}
+        <button
+          onClick={onOpenStaffMealModal}
+          title="Issue a meal to an employee — not a sale"
+          className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-900 text-xs font-black uppercase transition rounded-none"
+        >
+          <UtensilsCrossed className="w-3.5 h-3.5 text-amber-600" />
+          <span>Staff Meal</span>
         </button>
 
         {/* Manager Mode Toggle */}

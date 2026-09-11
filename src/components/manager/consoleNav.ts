@@ -1,6 +1,6 @@
 import {
   LayoutGrid, BookOpen, UtensilsCrossed, Boxes, Users,
-  Wallet, ScrollText, BarChart3, ShieldCheck, Settings, Printer, LucideIcon,
+  Wallet, ScrollText, BarChart3, ShieldCheck, Settings, Printer, ClipboardList, LucideIcon,
 } from 'lucide-react';
 
 /**
@@ -12,6 +12,7 @@ import {
 export type ConsoleViewId =
   | 'overview'
   | 'salesHistory'
+  | 'serverSales'
   | 'menu'
   | 'inventory'
   | 'staff'
@@ -45,6 +46,10 @@ export const CONSOLE_NAV: ConsoleNavItem[] = [
   // person who can act on it, and a second live view in the back office only invited
   // reading today's takings off a screen that was never the record.
   { id: 'salesHistory', label: 'Sales Record Book', group: 'Sales', icon: BookOpen, periodScoped: true },
+
+  // Under Sales rather than Operations: this is a record of what was sold, and it belongs
+  // beside the till's own record even though it is the one figure a human types in.
+  { id: 'serverSales', label: 'Server Tickets', group: 'Sales', icon: ClipboardList, periodScoped: true },
 
   { id: 'menu', label: 'Menu Management', group: 'Operations', icon: UtensilsCrossed, placeholder: true },
   { id: 'inventory', label: 'Inventory', group: 'Operations', icon: Boxes, placeholder: true },

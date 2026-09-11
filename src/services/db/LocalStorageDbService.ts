@@ -2,6 +2,7 @@ import { IDbService } from './IDbService';
 import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
+import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
@@ -12,6 +13,7 @@ const STORAGE_KEYS = {
   TICKETS: 'ticket_pos_tickets',
   SHIFTS: 'ticket_pos_shifts',
   EXPENSES: 'ticket_pos_expenses',
+  SERVER_SALES: 'ticket_pos_server_sales',
   OUTBOX: 'ticket_pos_outbox',
   AUDIT: 'ticket_pos_audit_logs',
   SEQ: 'ticket_pos_sequences',
@@ -282,6 +284,34 @@ export class LocalStorageDbService implements IDbService {
         timestamp: new Date().toISOString(),
       });
     }
+  }
+
+  // Server ticket counts, entered by a manager. Same shape as the Dexie service, minus
+  // the indexes localStorage has no way to offer.
+  async getServerSales(from?: string, to?: string): Promise<ServerSalesEntry[]> {
+    const raw = getItem(STORAGE_KEYS.SERVER_SALES);
+    const rows: ServerSalesEntry[] = raw ? JSON.parse(raw) : [];
+    if (!from || !to) return rows;
+    return rows.filter(r => r.businessDay >= from && r.businessDay <= to);
+  }
+
+  async saveServerSales(entry: ServerSalesEntry): Promise<void> {
+    const rows = await this.getServerSales();
+    const index = rows.findIndex(r => r.id === entry.id);
+    // Replace in place — the id is derived from the day and the server, so writing one
+    // again is a correction to that day's number, not an additional count.
+    if (index === -1) rows.unshift(entry);
+    else rows[index] = entry;
+    setItem(STORAGE_KEYS.SERVER_SALES, JSON.stringify(rows));
+    await this.queueOutbox('server_sales', 'INSERT', entry);
+  }
+
+  async deleteServerSales(entryId: string): Promise<void> {
+    const rows = await this.getServerSales();
+    const remaining = rows.filter(r => r.id !== entryId);
+    if (remaining.length === rows.length) return;
+    setItem(STORAGE_KEYS.SERVER_SALES, JSON.stringify(remaining));
+    await this.queueOutbox('server_sales', 'DELETE', { id: entryId });
   }
 
   async getAuditLogs(entityId?: string, actorId?: string): Promise<any[]> {

@@ -29,7 +29,7 @@ import { resolveAccountId } from '../supabase/deviceIdentity';
 import { db } from './dexieSchema';
 
 /** Dexie tables whose rows belong to an account and must carry accountId. */
-const SCOPED_DEXIE_TABLES = ['users', 'tickets', 'shifts', 'expenses', 'auditLogs'] as const;
+const SCOPED_DEXIE_TABLES = ['users', 'tickets', 'shifts', 'expenses', 'serverSales', 'auditLogs'] as const;
 
 /**
  * The current tenant id, or null when this browser holds no cloud session.

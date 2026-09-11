@@ -25,6 +25,19 @@ export interface PrintResult {
 const PRINT_SERVER_URL = 'http://127.0.0.1:9100';
 
 /**
+ * A staff name and a business name are operator-entered and end up in innerHTML on the
+ * dialog route. Nothing here is hostile in practice, but an apostrophe or an ampersand
+ * in a name is ordinary and should print as itself rather than as markup.
+ */
+function escapeHtml(text: string): string {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
  * Check once per session if the local silent-print server is reachable.
  * Cached so we don't /health-check on every single ticket.
  */
@@ -71,7 +84,15 @@ export class PrintAdapter {
   static async printTicket(
     ticket: Ticket,
     businessName: string = 'Danbaiwa Restraunt',
-    paperWidthMm?: number
+    paperWidthMm?: number,
+    /**
+     * Facts the ticket row does not carry, resolved by the caller who has the roster.
+     *
+     * Kept off the stored ticket on purpose: the employee's role can change and the
+     * issuer is already recorded as `cashierId`, so neither is worth a column that would
+     * have to migrate, sync and then disagree with the roster later.
+     */
+    context?: { staffRoleText?: string; issuedByName?: string }
   ): Promise<PrintResult> {
     const formattedAmount = formatCurrency(ticket.amount, ticket.currency || '₦');
 
@@ -85,6 +106,16 @@ export class PrintAdapter {
         timestampText: formattedTime,
         // Cash prints nothing — see ReceiptSpec.tenderText.
         tenderText: ticket.tender === 'transfer' ? 'PAID BY TRANSFER / POS' : undefined,
+        // Selects the staff-meal layout entirely — see composeStaffMeal. Driven off the
+        // stored tender, so a reprint is the same document as the original.
+        staffMeal:
+          ticket.tender === 'staff'
+            ? {
+                forName: ticket.staffName || 'Staff',
+                roleText: context?.staffRoleText,
+                issuedBy: context?.issuedByName,
+              }
+            : undefined,
         paperWidthMm,
       });
 
@@ -133,7 +164,7 @@ export class PrintAdapter {
       }
 
       // ── Route 3: the browser's own print path ─────────────────────────────
-      await PrintAdapter.printViaDialog(ticket, businessName, paperWidthMm);
+      await PrintAdapter.printViaDialog(ticket, businessName, paperWidthMm, context);
 
       return {
         success: true,
@@ -156,36 +187,80 @@ export class PrintAdapter {
 
   /**
    * The window.print() fallback, still driven off HTML because that is the only thing
-   * the browser's own print path can render. Kept in step with the ESC/POS layout above
-   * so a till on this route produces a recognisably identical ticket.
+   * the browser's own print path can render.
+   *
+   * This is the route a till without a paired printer lands on, which makes it the most
+   * visible one, not the least — and it has to render BOTH documents. It previously
+   * rendered only the sale layout, so a till on this route printed staff meals as
+   * ordinary tickets with the amount four times the body height: exactly the misreading
+   * the separate layout exists to prevent, on the route most likely to be in use.
    */
   private static async printViaDialog(
     ticket: Ticket,
     businessName: string,
-    paperWidthMm?: number
+    paperWidthMm?: number,
+    context?: { staffRoleText?: string; issuedByName?: string }
   ): Promise<void> {
     const paper = paperSpec(paperWidthMm);
     const formattedAmount = formatCurrency(ticket.amount, ticket.currency || '₦');
     const formattedTime = formatTimestamp(ticket.createdAt);
+    const wrap = (inner: string) =>
+      `<div style="width: ${paper.widthMm}mm; margin: 0 auto; font-family: 'Courier New', monospace;">${inner}</div>`;
 
-    const receiptHtml = `
-      <div style="width: ${paper.widthMm}mm; margin: 0 auto; font-family: 'Courier New', monospace;">
+    const receiptHtml =
+      ticket.tender === 'staff'
+        ? // The same inverted hierarchy as composeStaffMeal: the person is the headline,
+          // the amount is a record line. Kept in step with it by eye — the two renderers
+          // have no shared representation, so any change to one belongs in both.
+          wrap(`
+        <div style="text-align: center; font-weight: 900; font-size: 22px; line-height: 1.1;">
+          STAFF MEAL
+        </div>
+        <div style="text-align: center; font-weight: 900; font-size: 13px; letter-spacing: 1px;">
+          NOT FOR SALE
+        </div>
+        <div style="text-align: center; font-size: 12px; margin-top: 2px;">
+          ${escapeHtml(businessName)}
+        </div>
+        <div style="border-top: 1px dashed #000; margin: 5px 0;"></div>
+        <div style="text-align: center; font-size: 26px; font-weight: 900; line-height: 1.1;">
+          ${escapeHtml(ticket.staffName || 'Staff')}
+        </div>
+        ${
+          context?.staffRoleText
+            ? `<div style="text-align: center; font-size: 12px;">${escapeHtml(context.staffRoleText)}</div>`
+            : ''
+        }
+        <div style="border-top: 1px dashed #000; margin: 5px 0;"></div>
+        <div style="font-size: 12px; display: flex; justify-content: space-between;">
+          <span>Meal value</span><span>${escapeHtml(formattedAmount)}</span>
+        </div>
+        ${
+          context?.issuedByName
+            ? `<div style="font-size: 12px; display: flex; justify-content: space-between;"><span>Issued by</span><span>${escapeHtml(
+                context.issuedByName
+              )}</span></div>`
+            : ''
+        }
+        <div style="font-size: 11px; word-break: break-all;">${escapeHtml(ticket.id)}</div>
+        <div style="font-size: 11px; color: #333;">${escapeHtml(formattedTime)}</div>
+      `)
+        : wrap(`
         <div style="text-align: center; font-weight: 900; font-size: 22px; line-height: 1.1; margin-bottom: 4px;">
-          ${businessName}
+          ${escapeHtml(businessName)}
         </div>
         <div style="border-top: 1px dashed #000; margin: 4px 0;"></div>
         <div style="text-align: center; font-size: 52px; font-weight: 900; line-height: 1; margin: 6px 0;">
-          ${formattedAmount}
+          ${escapeHtml(formattedAmount)}
         </div>
         <div style="border-bottom: 1px dashed #000; margin: 4px 0;"></div>
         <div style="text-align: center; font-size: 12px; font-weight: bold; word-break: break-all;">
-          ${ticket.id}
+          ${escapeHtml(ticket.id)}
         </div>
         <div style="text-align: center; font-size: 11px; color: #333;">
-          ${formattedTime}
+          ${escapeHtml(formattedTime)}
         </div>
-      </div>
-    `;
+      `);
 
     const printContainer = document.getElementById('thermalPrintArea');
     if (printContainer) printContainer.innerHTML = receiptHtml;

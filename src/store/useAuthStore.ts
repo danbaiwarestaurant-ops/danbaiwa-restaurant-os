@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { UserAccount, UserRole, UserStatus } from '../types/user';
+import { canSignIn } from '../utils/roles';
 import { generateSalt, hashSecretWithSalt, verifySecret } from '../services/auth/pinAuth';
 import { dbService } from '../services/db/IndexedDbService';
 import {
@@ -298,11 +299,18 @@ interface AuthState {
 
   updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
   updatePasswordAfterRecovery: (email: string, newPassword: string, newPin: string) => Promise<boolean>;
-  createStaffCashier: (name: string, username: string, pin: string) => Promise<UserAccount>;
+  /**
+   * Add someone to the roster.
+   *
+   * Was createStaffCashier, and made everyone a cashier — which is why a kitchen hand and
+   * a storekeeper both turned up in the sales figures. The role is now the caller's to
+   * state, and it decides whether this person can sign in at all (see utils/roles.ts).
+   */
+  createStaffMember: (name: string, username: string, pin: string, role?: UserRole) => Promise<UserAccount>;
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
 
-  /** Rename a staff account or change its login username. */
-  updateStaffMember: (userId: string, name: string, username: string) => Promise<StaffActionResult>;
+  /** Rename a staff account, change its login username, or move it to another role. */
+  updateStaffMember: (userId: string, name: string, username: string, role?: UserRole) => Promise<StaffActionResult>;
   /**
    * Switch a staff account between active and deactivated. Deactivating blocks sign-in
    * while keeping every record they created intact — the reversible counterpart to
@@ -668,6 +676,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return buildLoginFailure('account_disabled', { email: cleanEmail });
       }
 
+      // Checked after the credential, never before: answering "that role cannot sign in"
+      // to an unproven secret would let anyone enumerate the roster by staff ID alone.
+      if (!canSignIn(adopted.user.role)) {
+        return buildLoginFailure('role_has_no_till_access', { email: cleanEmail });
+      }
+
       // The cloud already authenticated this exact identity, so no second local check is
       // needed when the restored profile is that same account. If the ids differ, the
       // snapshot's record is a different person — fall back to verifying the secret.
@@ -711,6 +725,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const isPinValid = await verifySecret(passwordOrPin, user.pinHash, user.pinSalt);
 
     if (isPasswordValid || isPinValid) {
+      // Same gate as the cloud path above, and for the same reason it sits after the
+      // credential rather than before it: a refusal that arrives without a correct
+      // secret would turn the sign-in box into a way of reading the roster.
+      if (!canSignIn(user.role)) {
+        return buildLoginFailure('role_has_no_till_access', { email: cleanEmail });
+      }
+
       localStorage.setItem('ticket_pos_session_user_id', user.id);
       set({
         activeUser: user,
@@ -1060,9 +1081,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return true;
   },
 
-  createStaffCashier: async (name: string, username: string, pin: string) => {
+  createStaffMember: async (name: string, username: string, pin: string, role: UserRole = 'cashier') => {
     get().assertAdminRole();
-    // Cashiers hold no cloud identity of their own — they belong to the admin's account,
+    // Staff hold no cloud identity of their own — they belong to the admin's account,
     // which is what makes them appear on every device that admin signs in on.
     const accountId = await getAccountId();
 
@@ -1079,12 +1100,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (clash) {
       throw new Error(`The staff ID "${cleanUsername}" is already used by ${clash.name}.`);
     }
+
+    // The roster cannot mint owners. An admin is the account's cloud identity — it is
+    // created by signing up, not by being typed into a staff form — and one made here
+    // would have an admin's authority over the books with no cloud account behind it.
+    if (role === 'admin') {
+      throw new Error('An admin account is created by signing up, not from the staff roster.');
+    }
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
     const passwordSalt = generateSalt();
     const passwordHash = await hashSecretWithSalt(pin, passwordSalt);
 
-    const cashierUser: UserAccount = {
+    const staffUser: UserAccount = {
       id: crypto.randomUUID(),
       name: name.trim(),
       email: cleanUsername,
@@ -1093,21 +1121,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       passwordSalt,
       pinHash,
       pinSalt,
-      role: 'cashier',
+      role,
       createdAt: new Date().toISOString(),
       status: 'active',
       accountId: accountId ?? undefined,
     };
 
-    await dbService.saveUser(cashierUser);
+    await dbService.saveUser(staffUser);
     await get().loadUsers();
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
-    return cashierUser;
+    return staffUser;
   },
 
-  updateStaffMember: async (userId: string, name: string, username: string) => {
+  updateStaffMember: async (userId: string, name: string, username: string, role?: UserRole) => {
     get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
     if (!user) return { ok: false, message: 'That staff account no longer exists.' };
@@ -1129,10 +1157,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return { ok: false, message: `The staff ID "${cleanUsername}" is already used by ${clash.name}.` };
     }
 
+    // An admin's role is not the roster's to change: it is the account's cloud identity,
+    // and demoting it here would leave the books with an owner who cannot sign in to
+    // them. Equally, nobody is promoted into an admin from this form.
+    const nextRole: UserRole =
+      user.role === 'admin' || !role || role === 'admin' ? user.role : role;
+
     await dbService.updateUser({
       ...user,
       name: cleanName,
       username: cleanUsername,
+      role: nextRole,
       // An admin's email is their cloud identity and is changed through the profile
       // screen, which also updates Supabase. Only a cashier's email tracks the username.
       email: user.role === 'admin' ? user.email : cleanUsername,

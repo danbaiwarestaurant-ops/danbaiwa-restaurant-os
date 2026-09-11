@@ -1,6 +1,7 @@
 import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
+import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
@@ -66,6 +67,18 @@ export interface IDbService {
   getExpenses(shiftId?: string, userId?: string): Promise<Expense[]>;
   saveExpense(expense: Expense): Promise<void>;
   updateExpenseStatus(expenseId: string, status: 'approved' | 'rejected', reviewer: string, reason?: string): Promise<void>;
+
+  // Server ticket counts, entered by a manager rather than accumulated from tickets.
+  /** Every entry, or only those on trading days within [from, to] inclusive. */
+  getServerSales(from?: string, to?: string): Promise<ServerSalesEntry[]>;
+  /**
+   * Writes one server's count for one trading day, replacing any existing entry for that
+   * pair. Upsert rather than insert because the id is derived from the day and the server
+   * (see serverSalesId) — re-entering a number is a correction, not a second count.
+   */
+  saveServerSales(entry: ServerSalesEntry): Promise<void>;
+  /** Removes a count entered by mistake. */
+  deleteServerSales(entryId: string): Promise<void>;
 
   // Audit Logs (data-layer only — no UI reads this yet)
   getAuditLogs(entityId?: string, actorId?: string): Promise<AuditLogRow[]>;

@@ -12,13 +12,28 @@
 import { Ticket } from '../types/ticket';
 import { Expense } from '../types/expense';
 import { Shift, ShiftReconciliationResult } from '../types/shift';
-import { UserAccount } from '../types/user';
+import { UserAccount, UserRole } from '../types/user';
 import { Bucket } from './period';
 import { calculateShiftReconciliation } from './reconciliation';
 
-/** A voided ticket is not revenue. Every money figure here goes through this. */
+/**
+ * A staff meal is a plate the business gave away. Real food, real cost, but nobody paid
+ * for it — so it is not a sale, and it is the one thing on the till that must never reach
+ * a revenue figure. Kept as its own predicate so the reason is stated once.
+ */
+export function isStaffMeal(t: Ticket): boolean {
+  return t.tender === 'staff';
+}
+
+/**
+ * A voided ticket is not revenue, and neither is a staff meal. Every money figure here
+ * goes through this — which is the point of it being one function: a new kind of
+ * non-revenue ticket is excluded from sales, tender splits, day series, per-cashier
+ * rollups and shift reconciliation by this line alone, rather than by remembering to
+ * filter it in six places.
+ */
 export function isRevenueTicket(t: Ticket): boolean {
-  return t.status !== 'void';
+  return t.status !== 'void' && !isStaffMeal(t);
 }
 
 /** Local (not UTC) YYYY-MM-DD — the day boundary a restaurant actually works to. */
@@ -34,17 +49,31 @@ export interface SalesTotals {
   voidCount: number;
   revenue: number;
   averageTicket: number;
+  /** Staff meals issued — plates served, not sales. */
+  staffMealCount: number;
+  /** What those plates were worth at menu price: a cost line, never revenue. */
+  staffMealValue: number;
 }
 
 export function summariseTickets(tickets: Ticket[]): SalesTotals {
   const valid = tickets.filter(isRevenueTicket);
   const revenue = valid.reduce((sum, t) => sum + (t.amount || 0), 0);
+
+  // Voided staff meals count once, as voids: a cancelled staff meal is a plate that never
+  // left the kitchen, and counting it in both would overstate what the business gave away.
+  const voids = tickets.filter((t) => t.status === 'void');
+  const staffMeals = tickets.filter((t) => isStaffMeal(t) && t.status !== 'void');
+
   return {
     ticketCount: valid.length,
-    voidCount: tickets.length - valid.length,
+    // Was `tickets.length - valid.length`, which is now wrong: with staff meals excluded
+    // from `valid`, that subtraction would report every staff meal as a voided sale.
+    voidCount: voids.length,
     revenue,
     // Guard the empty case rather than reporting NaN in a KPI card.
     averageTicket: valid.length ? revenue / valid.length : 0,
+    staffMealCount: staffMeals.length,
+    staffMealValue: staffMeals.reduce((sum, t) => sum + (t.amount || 0), 0),
   };
 }
 
@@ -60,12 +89,17 @@ export function isCashTicket(t: Ticket): boolean {
 }
 
 export interface TenderSplit {
-  /** All non-void revenue, however it was paid. */
+  /** All non-void revenue, however it was paid. Staff meals are not in here. */
   total: number;
   /** The part that went into the drawer — the only part a cash count can be checked against. */
   cash: number;
   /** Card and bank transfer. Real revenue, but never in the drawer. */
   transfer: number;
+  /**
+   * Staff meals at menu value. Reported alongside the split rather than inside it, so a
+   * cashier can see what the kitchen gave away without it being added to what they owe.
+   */
+  staff: number;
 }
 
 /** Splits a set of tickets into what hit the drawer and what did not. Voids are excluded. */
@@ -75,7 +109,15 @@ export function splitByTender(tickets: Ticket[]): TenderSplit {
   const cash = valid
     .filter(isCashTicket)
     .reduce((sum, t) => sum + (t.amount || 0), 0);
-  return { total, cash, transfer: total - cash };
+
+  // Note that `transfer` stays `total - cash` and stays correct: staff meals never
+  // entered `valid`, so they cannot fall through into it the way they would if this
+  // subtracted from an all-tickets total.
+  const staff = tickets
+    .filter((t) => isStaffMeal(t) && t.status !== 'void')
+    .reduce((sum, t) => sum + (t.amount || 0), 0);
+
+  return { total, cash, transfer: total - cash, staff };
 }
 
 export function sumApprovedExpenses(expenses: Expense[]): number {
@@ -240,28 +282,59 @@ export function reconcileShift(
   );
 }
 
-export interface CashierRollup {
-  cashierId: string;
+export interface StaffSalesRollup {
+  /**
+   * The staff member who issued these tickets.
+   *
+   * Named `cashierId` on the stored record and staying that way — it is a Postgres
+   * column, a Dexie index and a sync key on every ticket ever written. It has always
+   * meant "who rang this up", which is now a cashier or a server. See utils/roles.ts.
+   */
+  staffId: string;
   name: string;
+  /** What they do, so the console can report the sales floor by role. */
+  role: UserRole;
   ticketCount: number;
   revenue: number;
   voidCount: number;
 }
 
 /**
- * Per-cashier performance. Driven by the ticket list, not the staff list, so a cashier
- * whose account was removed still shows against the tickets they took rather than having
- * their revenue quietly disappear from the totals.
+ * Sales per staff member. Driven by the ticket list, not the staff list, so someone whose
+ * account was removed still shows against the tickets they took rather than having their
+ * revenue quietly disappear from the totals.
+ *
+ * Was cashierRollups, back when every person on the roster was a cashier. It now carries
+ * the role, which is what lets the console answer "how did the servers do this week"
+ * separately from "how did the till do" — the same tickets, asked a different way.
  */
-export function cashierRollups(tickets: Ticket[], users: UserAccount[]): CashierRollup[] {
-  const byId = new Map<string, CashierRollup>();
-  const nameFor = (id: string) => users.find((u) => u.id === id)?.name ?? 'Unknown cashier';
+export function staffSalesRollups(tickets: Ticket[], users: UserAccount[]): StaffSalesRollup[] {
+  const byId = new Map<string, StaffSalesRollup>();
+  const userFor = (id: string) => users.find((u) => u.id === id);
 
   for (const t of tickets) {
+    // Staff meals belong to the person who ate, not the cashier who rang them up — see
+    // staffMealRollups. Skipped entirely rather than falling into the else below, which
+    // would have recorded a void against a cashier for feeding a colleague: this rollup
+    // splits on isRevenueTicket, and a staff meal is now on the same side of it as a
+    // void without being one.
+    if (isStaffMeal(t)) continue;
+
     const id = t.cashierId || 'unassigned';
     let row = byId.get(id);
     if (!row) {
-      row = { cashierId: id, name: nameFor(id), ticketCount: 0, revenue: 0, voidCount: 0 };
+      const who = userFor(id);
+      row = {
+        staffId: id,
+        name: who?.name ?? 'Former staff',
+        // A ticket from someone no longer on the roster is still a sale, and it was rung
+        // up on the floor by definition — filing it as 'cashier' keeps it in the sales
+        // reporting it belongs to rather than dropping it into an 'other' bucket.
+        role: who?.role ?? 'cashier',
+        ticketCount: 0,
+        revenue: 0,
+        voidCount: 0,
+      };
       byId.set(id, row);
     }
     if (isRevenueTicket(t)) {
@@ -275,6 +348,47 @@ export function cashierRollups(tickets: Ticket[], users: UserAccount[]): Cashier
   return [...byId.values()].sort((a, b) => b.revenue - a.revenue);
 }
 
+export interface StaffMealRollup {
+  staffId: string;
+  name: string;
+  mealCount: number;
+  /** Menu value of those meals. */
+  value: number;
+}
+
+/**
+ * Staff meals per employee, for the period the console is showing.
+ *
+ * The name is taken from the ticket rather than looked up, so the report keeps reading
+ * correctly after someone is renamed or leaves — see Ticket.staffName. The roster is only
+ * consulted for the older tickets that predate that field.
+ *
+ * Voided staff meals are excluded: a cancelled meal is one the kitchen never served, and
+ * counting it against an employee would be an accusation the record does not support.
+ */
+export function staffMealRollups(tickets: Ticket[], users: UserAccount[]): StaffMealRollup[] {
+  const byId = new Map<string, StaffMealRollup>();
+
+  for (const t of tickets) {
+    if (!isStaffMeal(t) || t.status === 'void') continue;
+
+    const id = t.staffId || 'unattributed';
+    let row = byId.get(id);
+    if (!row) {
+      const name =
+        t.staffName ||
+        users.find((u) => u.id === id)?.name ||
+        (id === 'unattributed' ? 'Not recorded' : 'Former staff');
+      row = { staffId: id, name, mealCount: 0, value: 0 };
+      byId.set(id, row);
+    }
+    row.mealCount++;
+    row.value += t.amount || 0;
+  }
+
+  return [...byId.values()].sort((a, b) => b.value - a.value);
+}
+
 export interface BucketRollup {
   key: string;
   label: string;
@@ -286,6 +400,9 @@ export interface BucketRollup {
   expenses: number;
   net: number;
   ticketCount: number;
+  /** Staff meals at menu value — outside `revenue`, and outside `net`. */
+  staffMeals: number;
+  staffMealCount: number;
 }
 
 /**
@@ -309,9 +426,11 @@ export function bucketBreakdown(
       return !Number.isNaN(t) && t >= from && t < to;
     };
 
-    const soldIn = tickets.filter((t) => isRevenueTicket(t) && within(t.createdAt));
+    const inBucket = tickets.filter((t) => within(t.createdAt));
+    const soldIn = inBucket.filter(isRevenueTicket);
     const { total: revenue, cash, transfer } = splitByTender(soldIn);
     const spent = sumApprovedExpenses(expenses.filter((e) => within(e.loggedAt)));
+    const staff = summariseTickets(inBucket);
 
     return {
       key: b.key,
@@ -320,8 +439,14 @@ export function bucketBreakdown(
       cash,
       transfer,
       expenses: spent,
+      // Staff meals are deliberately NOT subtracted here. `net` is cash performance —
+      // money in less money out — and no money left the business for a staff meal; the
+      // food was already bought and already counted as stock. Netting it off would
+      // charge the same plate twice. It is reported beside net, not inside it.
       net: revenue - spent,
       ticketCount: soldIn.length,
+      staffMeals: staff.staffMealValue,
+      staffMealCount: staff.staffMealCount,
     };
   });
 }

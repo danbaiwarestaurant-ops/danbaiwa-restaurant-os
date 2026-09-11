@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   summariseTickets, sumApprovedExpenses, bucketRevenue, bucketBreakdown,
-  cashierRollups, shiftTickets, shiftExpenses, reconcileShift, dayKey,
+  staffSalesRollups, shiftTickets, shiftExpenses, reconcileShift, dayKey,
 } from '../utils/analytics';
 import { periodFor, periodBuckets } from '../utils/period';
 import { Ticket } from '../types/ticket';
@@ -159,9 +159,9 @@ describe('bucketBreakdown', () => {
   });
 });
 
-describe('cashierRollups', () => {
-  it('splits revenue and voids per cashier, ranked by revenue', () => {
-    const rows = cashierRollups(
+describe('staffSalesRollups', () => {
+  it('splits revenue and voids per staff member, ranked by revenue', () => {
+    const rows = staffSalesRollups(
       [
         ticket({ cashierId: 'c1', amount: 1000 }),
         ticket({ cashierId: 'c1', amount: 500 }),
@@ -170,15 +170,15 @@ describe('cashierRollups', () => {
       ],
       users
     );
-    expect(rows[0]).toMatchObject({ cashierId: 'c2', revenue: 2000, ticketCount: 1, voidCount: 0 });
-    expect(rows[1]).toMatchObject({ cashierId: 'c1', revenue: 1500, ticketCount: 2, voidCount: 1 });
+    expect(rows[0]).toMatchObject({ staffId: 'c2', revenue: 2000, ticketCount: 1, voidCount: 0 });
+    expect(rows[1]).toMatchObject({ staffId: 'c1', revenue: 1500, ticketCount: 2, voidCount: 1 });
   });
 
-  it('still reports tickets whose cashier account no longer exists', () => {
+  it('still reports tickets whose staff account no longer exists', () => {
     // Deleting a staff account must not make their revenue vanish from the totals.
-    const rows = cashierRollups([ticket({ cashierId: 'ghost', amount: 700 })], users);
+    const rows = staffSalesRollups([ticket({ cashierId: 'ghost', amount: 700 })], users);
     expect(rows[0].revenue).toBe(700);
-    expect(rows[0].name).toBe('Unknown cashier');
+    expect(rows[0].name).toBe('Former staff');
   });
 });
 

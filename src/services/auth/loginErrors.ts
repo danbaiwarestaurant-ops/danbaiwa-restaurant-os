@@ -32,6 +32,7 @@ export type LoginFailureCode =
   | 'wrong_pin'
   | 'wrong_password'
   | 'account_disabled'
+  | 'role_has_no_till_access'
   | 'ambiguous_login_key';
 
 export interface LoginFailure {
@@ -139,6 +140,13 @@ export function buildLoginFailure(code: LoginFailureCode, ctx: LoginFailureConte
     account_disabled: {
       message: `The account for ${who} is deactivated.`,
       hint: 'An admin has to reactivate it from the Manager dashboard before it can sign in.',
+    },
+    role_has_no_till_access: {
+      // Separated from account_disabled deliberately. Nothing is wrong with this account
+      // and nothing needs reactivating — the role simply has no business at a till, and
+      // saying "deactivated" would send an admin to fix something that is not broken.
+      message: `${who} is on the staff roster but their role does not use the till.`,
+      hint: 'Kitchen, store and other staff hold an account for records and staff meals, not for signing in. An admin can change their role from Manager Mode → Staff if they do need till access.',
     },
     ambiguous_login_key: {
       message: `More than one business on this device uses the staff ID ${who}.`,

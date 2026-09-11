@@ -31,6 +31,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useShiftStore } from '../../store/useShiftStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
+import { useServerSalesStore } from '../../store/useServerSalesStore';
 import { useAuditStore } from '../../store/useAuditStore';
 
 const DEVICE_CONFIG_KEY = 'device_config';
@@ -66,7 +67,14 @@ const DEEP_SWEEP_LOOKBACK_MS = 24 * 60 * 60_000;
 
 let lastDeepSweep = 0;
 
-const SYNCABLE_TABLES: SyncablePgTable[] = ['users', 'tickets', 'shifts', 'expenses', 'audit_logs'];
+const SYNCABLE_TABLES: SyncablePgTable[] = [
+  'users',
+  'tickets',
+  'shifts',
+  'expenses',
+  'server_sales',
+  'audit_logs',
+];
 
 let channel: ReturnType<typeof supabase.channel> | null = null;
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
@@ -96,6 +104,12 @@ function scheduleStoreReload(pgTable: SyncablePgTable): void {
         break;
       case 'expenses':
         useExpenseStore.getState().loadExpenses(undefined, scopedUserId());
+        break;
+      case 'server_sales':
+        // Account-wide, never scoped to the signed-in user: these are entered by a manager
+        // about somebody else, so "my own" would show an empty screen to the only person
+        // who ever looks at it.
+        useServerSalesStore.getState().loadServerSales();
         break;
       case 'users':
         useAuthStore.getState().loadUsers();
@@ -325,6 +339,7 @@ export function startRealtimeSync(): void {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: scope }, (p) => handleRealtimeChange('users', p))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs', filter: scope }, (p) => handleRealtimeChange('audit_logs', p))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses', filter: scope }, (p) => handleRealtimeChange('expenses', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'server_sales', filter: scope }, (p) => handleRealtimeChange('server_sales', p))
       .subscribe();
 
     await runCloudCatchUp({ revive: true });
