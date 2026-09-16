@@ -16,6 +16,8 @@ interface StaffMealModalProps {
   onError: (msg: string) => void;
 }
 
+const MEAL_DESCRIPTION_PRESETS = ['Meat', 'Fish', 'Egg'] as const;
+
 /**
  * Issuing a meal to an employee.
  *
@@ -33,6 +35,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
   const { users, activeUser } = useAuthStore();
 
   const [staffId, setStaffId] = useState('');
+  const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
   const [isIssuing, setIsIssuing] = useState(false);
 
@@ -72,10 +75,12 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
 
   const selected = roster.find((u) => u.id === staffId);
   const amountNum = parseFloat(amount) || 0;
+  const cleanDescription = description.trim();
   const alreadyHad = staffId ? mealsToday[staffId] || 0 : 0;
 
   const reset = () => {
     setStaffId('');
+    setDescription('');
     setAmount('');
   };
 
@@ -86,7 +91,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selected || amountNum <= 0 || isIssuing) return;
+    if (!selected || !cleanDescription || amountNum <= 0 || isIssuing) return;
 
     if (!activeUser) {
       onError('Sign in before issuing a staff meal.');
@@ -103,6 +108,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
     const res = await createAndPrintTicket(amountNum, activeUser.id, 'staff', {
       staffId: selected.id,
       staffName: selected.name,
+      description: cleanDescription,
     });
     setIsIssuing(false);
 
@@ -173,6 +179,40 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
 
           <div>
             <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+              Meal description
+            </label>
+            <div className="grid grid-cols-3 gap-2 mb-2">
+              {MEAL_DESCRIPTION_PRESETS.map((meal) => (
+                <button
+                  key={meal}
+                  type="button"
+                  onClick={() => setDescription(meal)}
+                  className={`px-2 py-2 text-xs font-black uppercase border-2 rounded-none transition ${
+                    cleanDescription.toLowerCase() === meal.toLowerCase()
+                      ? 'bg-amber-500 border-amber-600 text-white'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-amber-50'
+                  }`}
+                >
+                  {meal}
+                </button>
+              ))}
+            </div>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="e.g. Jollof rice, chicken and salad"
+              rows={2}
+              maxLength={160}
+              required
+              className="w-full p-3 border-2 border-slate-300 rounded-none text-sm font-semibold text-slate-900 resize-none focus:border-amber-500 focus:outline-none"
+            />
+            <div className="mt-1 text-right text-[10px] font-medium text-slate-500">
+              {description.length}/160
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
               Menu value
             </label>
             {/* The real price, not zero. What the kitchen gave away is the number an owner
@@ -216,7 +256,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
             </button>
             <button
               type="submit"
-              disabled={!selected || amountNum <= 0 || isIssuing}
+              disabled={!selected || !cleanDescription || amountNum <= 0 || isIssuing}
               className="px-4 py-2 text-xs font-black uppercase bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-none border border-amber-600 shadow-xs"
             >
               {isIssuing ? 'Printing…' : 'Print Staff Meal'}

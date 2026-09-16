@@ -199,6 +199,9 @@ ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS tender TEXT NOT NULL DEFAULT 'cash
 -- to keep naming people correctly after they are renamed or leave.
 ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS staff_id   TEXT;
 ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS staff_name TEXT;
+-- Kept on the ticket so the kitchen copy, reprints and synced devices all retain what
+-- was served. Nullable for staff meals issued before the field existed and for sales.
+ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS meal_description TEXT;
 
 ALTER TABLE users    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE tickets  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());

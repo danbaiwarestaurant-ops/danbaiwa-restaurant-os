@@ -304,7 +304,12 @@ describe('a staff meal is a different document, not a sale with a note on it', (
 
   const meal = {
     ...spec,
-    staffMeal: { forName: 'Bola Adeyemi', roleText: 'Kitchen Staff', issuedBy: 'Ada' },
+    staffMeal: {
+      forName: 'Bola Adeyemi',
+      roleText: 'Kitchen Staff',
+      description: 'Fish',
+      issuedBy: 'Ada',
+    },
   };
 
   /** Where this text starts in the byte stream, encoded the way the receipt encodes it. */
@@ -325,7 +330,7 @@ describe('a staff meal is a different document, not a sale with a note on it', (
     expect(nameAt).toBeGreaterThan(notForSaleAt);
   });
 
-  it('makes the employee the largest thing on it, not the amount', async () => {
+  it('keeps the amount from dominating the staff meal ticket', async () => {
     // This is the whole point of the separate layout. On a sale the amount is 4x tall
     // because it is read across a counter by someone paying; nobody pays for this, and
     // an amount that size reads as money taken at a glance across a busy pass.
@@ -336,7 +341,8 @@ describe('a staff meal is a different document, not a sale with a note on it', (
       expect(indexOfSeq(bytes, [0x1d, 0x21, (w << 4) | 3])).toBe(-1);
     }
 
-    // And the name is set at 2x tall, which nothing else on the ticket exceeds.
+    // The name remains a prominent 2x-tall identifier. The meal description is larger
+    // still by design, so the kitchen can identify the food at a glance.
     const nameAt = find(bytes, 'Bola Adeyemi');
     expect(nameAt).toBeGreaterThan(0);
     expect(indexOfSeq(bytes, [0x1d, 0x21, (1 << 4) | 1])).toBeGreaterThan(0);
@@ -348,6 +354,17 @@ describe('a staff meal is a different document, not a sale with a note on it', (
     // A plate leaving unpaid needs a name against it, or there is nobody to ask.
     expect(find(bytes, 'Issued by')).toBeGreaterThan(0);
     expect(find(bytes, 'Ada')).toBeGreaterThan(0);
+  });
+
+  it('prints the meal description on the kitchen ticket', async () => {
+    const bytes = await buildTicketReceipt(meal);
+    const labelAt = find(bytes, 'Meal');
+    const descriptionAt = find(bytes, 'Fish');
+    const tripleSizeAt = indexOfSeq(bytes, [0x1d, 0x21, 0x22]);
+    expect(labelAt).toBeGreaterThan(0);
+    expect(descriptionAt).toBeGreaterThan(labelAt);
+    expect(tripleSizeAt).toBeGreaterThan(labelAt);
+    expect(tripleSizeAt).toBeLessThan(descriptionAt);
   });
 
   it('keeps the value on the ticket, as a record line rather than a headline', async () => {

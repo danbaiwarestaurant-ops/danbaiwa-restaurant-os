@@ -113,6 +113,7 @@ export class PrintAdapter {
             ? {
                 forName: ticket.staffName || 'Staff',
                 roleText: context?.staffRoleText,
+                description: ticket.mealDescription,
                 issuedBy: context?.issuedByName,
               }
             : undefined,
@@ -232,6 +233,13 @@ export class PrintAdapter {
             : ''
         }
         <div style="border-top: 1px dashed #000; margin: 5px 0;"></div>
+        ${
+          ticket.mealDescription
+            ? `<div style="font-size: 12px; font-weight: 900;">Meal</div><div style="font-size: 36px; line-height: 1.05; text-align: center; font-weight: 900; overflow-wrap: anywhere; margin: 3px 0 6px;">${escapeHtml(
+                ticket.mealDescription
+              )}</div>`
+            : ''
+        }
         <div style="font-size: 12px; display: flex; justify-content: space-between;">
           <span>Meal value</span><span>${escapeHtml(formattedAmount)}</span>
         </div>

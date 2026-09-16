@@ -8,12 +8,14 @@ describe('caseMapping', () => {
       locationId: 'LOC01',
       localSeq: 1,
       cashierId: 'cashier-1',
+      mealDescription: 'Jollof rice and chicken',
       qrPayload: 'qr-text',
     };
     const row = toSnakeCase(ticket);
     expect(row.location_id).toBe('LOC01');
     expect(row.local_seq).toBe(1);
     expect(row.cashier_id).toBe('cashier-1');
+    expect(row.meal_description).toBe('Jollof rice and chicken');
     expect(row.qr_payload).toBe('qr-text');
     expect(row.locationId).toBeUndefined();
   });
@@ -24,6 +26,7 @@ describe('caseMapping', () => {
       location_id: 'LOC01',
       local_seq: 1,
       cashier_id: 'cashier-1',
+      meal_description: 'Jollof rice and chicken',
       qr_payload: 'qr-text',
       updated_at: '2026-08-29T12:00:00.000Z',
     };
@@ -31,6 +34,7 @@ describe('caseMapping', () => {
     expect(obj.locationId).toBe('LOC01');
     expect(obj.localSeq).toBe(1);
     expect(obj.cashierId).toBe('cashier-1');
+    expect(obj.mealDescription).toBe('Jollof rice and chicken');
     expect(obj.qrPayload).toBe('qr-text');
     expect(obj.updatedAt).toBe('2026-08-29T12:00:00.000Z');
     expect(obj.location_id).toBeUndefined();

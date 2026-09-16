@@ -50,6 +50,13 @@ export interface Ticket {
    * turns into a column of "Unknown" the moment someone leaves is no record at all.
    */
   staffName?: string;
+  /**
+   * What was served for a staff meal, as entered when it was issued.
+   *
+   * Stored on the ticket (rather than supplied only to the printer) so reprints and
+   * tickets synced to another device still describe the same plate.
+   */
+  mealDescription?: string;
   /** Owning account: the admin's Supabase auth user id, and the tenant key the
    *  whole sync layer scopes by. */
   accountId?: string;

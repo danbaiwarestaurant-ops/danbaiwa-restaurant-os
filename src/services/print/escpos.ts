@@ -120,6 +120,38 @@ export function fitLine(text: string, columns: number): string {
   return `${clean.slice(0, Math.max(1, columns - 3))}...`;
 }
 
+/** Word-wrap ordinary body copy without dropping any part of it. */
+function wrapLines(text: string, columns: number): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    // Break a single unusually long token (rather than letting the printer wrap it at
+    // an unpredictable byte boundary), then continue wrapping the remaining words.
+    if (word.length > columns) {
+      if (current) {
+        lines.push(current);
+        current = '';
+      }
+      for (let offset = 0; offset < word.length; offset += columns) {
+        lines.push(word.slice(offset, offset + columns));
+      }
+      continue;
+    }
+
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= columns) current = candidate;
+    else {
+      lines.push(current);
+      current = word;
+    }
+  }
+
+  if (current) lines.push(current);
+  return lines;
+}
+
 /**
  * Accumulates a command stream.
  *
@@ -317,6 +349,8 @@ export interface ReceiptSpec {
     forName: string;
     /** Their role, e.g. 'Kitchen Staff'. Omitted when it is not known. */
     roleText?: string;
+    /** What was served. Omitted for older tickets and when no description was entered. */
+    description?: string;
     /**
      * Who issued it. Not decoration: a plate leaving the kitchen unpaid needs a name
      * against it, and the only reason to print that name is so it can be asked about.
@@ -416,6 +450,15 @@ export async function composeStaffMeal(spec: ReceiptSpec): Promise<EscPosBuilder
   // Left-aligned for the record block: these are label/value pairs, and centring them
   // makes a column of values nobody can scan down.
   b.align(ALIGN_LEFT);
+  if (meal.description) {
+    b.bold(true).line('Meal').bold(false);
+    // The kitchen needs to identify the food at a glance, so the description prints at
+    // three times the normal width and height. Wrap against the magnified character
+    // width ourselves; relying on the printer to wrap would split words unpredictably.
+    b.align(ALIGN_CENTER).size(3, 3).bold(true);
+    for (const line of wrapLines(meal.description, Math.floor(paper.columns / 3))) b.line(line);
+    b.bold(false).size(1, 1).align(ALIGN_LEFT);
+  }
   b.columns('Meal value', spec.amountText);
   if (meal.issuedBy) b.columns('Issued by', fitLine(meal.issuedBy, paper.columns - 11));
   b.line(spec.ticketId);

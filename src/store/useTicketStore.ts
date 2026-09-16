@@ -43,7 +43,7 @@ interface TicketState {
     amount: number,
     cashierId?: string,
     tender?: TicketTender,
-    staffMeal?: { staffId: string; staffName: string }
+    staffMeal?: { staffId: string; staffName: string; description?: string }
   ) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
   voidTicket: (ticketId: string, reason: string, voidedBy: string) => Promise<void>;
@@ -76,7 +76,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     amount: number,
     cashierId: string = '',
     tender: TicketTender = 'cash',
-    staffMeal?: { staffId: string; staffName: string }
+    staffMeal?: { staffId: string; staffName: string; description?: string }
   ) => {
     // Refused rather than defaulted. A staff meal with no employee on it cannot be
     // reported, cannot be questioned, and is indistinguishable from food walking out of
@@ -121,7 +121,13 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       createdAt: nowIso,
       cashierId,
       ...(tender === 'staff' && staffMeal
-        ? { staffId: staffMeal.staffId, staffName: staffMeal.staffName }
+        ? {
+            staffId: staffMeal.staffId,
+            staffName: staffMeal.staffName,
+            ...(staffMeal.description?.trim()
+              ? { mealDescription: staffMeal.description.trim() }
+              : {}),
+          }
         : {}),
       // The one definition of this text. A ticket arriving from another till has it
       // rebuilt from the same function (see ticketQrPayload), because the cloud no longer

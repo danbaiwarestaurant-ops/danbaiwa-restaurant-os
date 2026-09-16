@@ -76,6 +76,10 @@ describe('IndexedDbService — Atomic Sequence & Persistence', () => {
       amount: 500,
       currency: '₦',
       status: 'paid',
+      tender: 'staff',
+      staffId: 'staff-meal-recipient',
+      staffName: 'Bola',
+      mealDescription: 'Jollof rice and chicken',
       cashierId: 'user_idb_test',
       createdAt: new Date().toISOString(),
       qrPayload: 'TICKET|LOC01-DEV01-SEQ001|500',
@@ -88,6 +92,7 @@ describe('IndexedDbService — Atomic Sequence & Persistence', () => {
     expect(retrieved[0].id).toBe('LOC01-DEV01-SEQ001');
     expect(retrieved[0].amount).toBe(500);
     expect(retrieved[0].cashierId).toBe('user_idb_test');
+    expect(retrieved[0].mealDescription).toBe('Jollof rice and chicken');
   });
 
   it('should isolate tickets per user (multi-tenant enforcement)', async () => {
