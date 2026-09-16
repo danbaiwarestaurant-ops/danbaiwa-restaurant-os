@@ -39,7 +39,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
   const [amount, setAmount] = useState('');
   const [isIssuing, setIsIssuing] = useState(false);
 
-  const presets = config.presetAmounts || [200, 300, 400, 500, 1000];
+  const presets = [500];
   const currency = config.currencySymbol || '₦';
 
   // Everyone on the roster, whatever they do — kitchen, store and floor alike. This is
@@ -218,7 +218,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
             {/* The real price, not zero. What the kitchen gave away is the number an owner
                 needs; a ₦0 staff meal records that something happened and nothing about
                 what it cost. */}
-            <div className="grid grid-cols-3 gap-2 mb-2">
+            <div className="grid grid-cols-1 gap-2 mb-2">
               {presets.map((amt) => (
                 <button
                   key={amt}
