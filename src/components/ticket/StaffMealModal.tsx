@@ -123,8 +123,8 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-      <div className="bg-white border-2 border-slate-900 w-full max-w-md overflow-hidden shadow-2xl rounded-none">
-        <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+      <div className="bg-white border-2 border-slate-900 w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-hidden shadow-2xl rounded-none flex flex-col">
+        <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2 font-bold uppercase tracking-wider text-sm text-amber-400">
             <UtensilsCrossed className="w-4 h-4" />
             <span>Staff Meal</span>
@@ -134,7 +134,7 @@ export const StaffMealModal: React.FC<StaffMealModalProps> = ({ isOpen, onClose,
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 min-h-0 overflow-y-auto">
           <p className="text-[11px] text-slate-600 leading-snug font-medium">
             Prints a ticket the kitchen can honour, marked <span className="font-black">NOT FOR SALE</span>.
             It is not counted as a sale and never enters the drawer count — it is reported
