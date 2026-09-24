@@ -26,6 +26,8 @@ export interface Period {
   end: Date;
   /** Human label, e.g. "18 – 24 Aug 2026", "August 2026", "2026". */
   label: string;
+  /** JavaScript weekday number used to build weekly boundaries. */
+  weekStartsOn?: number;
 }
 
 /** Local midnight of the given date, without mutating it. */
@@ -40,9 +42,10 @@ function startOfDay(d: Date): Date {
  * puts Monday's trading at the end of the *previous* week — the exact off-by-one that makes
  * a Monday's takings disappear from the week a manager is looking at.
  */
-function startOfWeek(d: Date): Date {
+function startOfWeek(d: Date, weekStartsOn = 1): Date {
   const day = startOfDay(d);
-  const dow = (day.getDay() + 6) % 7; // Mon = 0 … Sun = 6
+  const cleanStart = Number.isInteger(weekStartsOn) && weekStartsOn >= 0 && weekStartsOn <= 6 ? weekStartsOn : 1;
+  const dow = (day.getDay() - cleanStart + 7) % 7;
   day.setDate(day.getDate() - dow);
   return day;
 }
@@ -58,7 +61,7 @@ function shortDate(d: Date): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}`;
 }
 
-function build(unit: PeriodUnit, start: Date, end: Date): Period {
+function build(unit: PeriodUnit, start: Date, end: Date, weekStartsOn = 1): Period {
   let label: string;
   if (unit === 'year') {
     label = String(start.getFullYear());
@@ -74,29 +77,29 @@ function build(unit: PeriodUnit, start: Date, end: Date): Period {
     last.setDate(last.getDate() - 1);
     label = `${shortDate(start)} – ${shortDate(last)} ${last.getFullYear()}`;
   }
-  return { unit, start, end, label };
+  return { unit, start, end, label, weekStartsOn };
 }
 
 /** The period of `unit` that contains `anchor`. */
-export function periodFor(unit: PeriodUnit, anchor: Date = new Date()): Period {
+export function periodFor(unit: PeriodUnit, anchor: Date = new Date(), weekStartsOn = 1): Period {
   if (unit === 'year') {
     const start = new Date(anchor.getFullYear(), 0, 1);
-    return build(unit, start, new Date(anchor.getFullYear() + 1, 0, 1));
+    return build(unit, start, new Date(anchor.getFullYear() + 1, 0, 1), weekStartsOn);
   }
   if (unit === 'month') {
     const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
-    return build(unit, start, new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1));
+    return build(unit, start, new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1), weekStartsOn);
   }
   if (unit === 'day') {
     const start = startOfDay(anchor);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
-    return build(unit, start, end);
+    return build(unit, start, end, weekStartsOn);
   }
-  const start = startOfWeek(anchor);
+  const start = startOfWeek(anchor, weekStartsOn);
   const end = new Date(start);
   end.setDate(end.getDate() + 7);
-  return build(unit, start, end);
+  return build(unit, start, end, weekStartsOn);
 }
 
 /** Move `delta` periods forward (positive) or back (negative), keeping the same unit. */
@@ -106,7 +109,7 @@ export function shiftPeriod(p: Period, delta: number): Period {
   else if (p.unit === 'month') a.setMonth(a.getMonth() + delta);
   else if (p.unit === 'day') a.setDate(a.getDate() + delta);
   else a.setDate(a.getDate() + delta * 7);
-  return periodFor(p.unit, a);
+  return periodFor(p.unit, a, p.weekStartsOn ?? 1);
 }
 
 /**
@@ -120,7 +123,7 @@ export function shiftPeriod(p: Period, delta: number): Period {
  * current period holds `now`, the new one is anchored on `now` too.
  */
 export function withUnit(p: Period, unit: PeriodUnit, now: Date = new Date()): Period {
-  return periodFor(unit, isCurrentPeriod(p, now) ? now : p.start);
+  return periodFor(unit, isCurrentPeriod(p, now) ? now : p.start, p.weekStartsOn ?? 1);
 }
 
 export function periodContains(p: Period, when: string | Date): boolean {

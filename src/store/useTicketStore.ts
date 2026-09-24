@@ -8,6 +8,8 @@ import { useDeviceStore } from './useDeviceStore';
 import { useSyncStore } from './useSyncStore';
 import { useAuthStore } from './useAuthStore';
 import { roleLabel } from '../utils/roles';
+import { WageLedgerEntry } from '../types/workforce';
+import { businessDayKey } from '../utils/shiftDay';
 
 interface TicketState {
   tickets: Ticket[];
@@ -43,7 +45,7 @@ interface TicketState {
     amount: number,
     cashierId?: string,
     tender?: TicketTender,
-    staffMeal?: { staffId: string; staffName: string; description?: string }
+    staffMeal?: { staffId: string; staffName: string; description?: string; options?: Array<{ id: string; name: string; wageCharge: number; isFree: boolean }>; wageDeduction?: number }
   ) => Promise<{ success: boolean; ticket?: Ticket; message: string }>;
   markCollected: (ticketId: string) => Promise<void>;
   voidTicket: (ticketId: string, reason: string, voidedBy: string) => Promise<void>;
@@ -76,7 +78,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     amount: number,
     cashierId: string = '',
     tender: TicketTender = 'cash',
-    staffMeal?: { staffId: string; staffName: string; description?: string }
+    staffMeal?: { staffId: string; staffName: string; description?: string; options?: Array<{ id: string; name: string; wageCharge: number; isFree: boolean }>; wageDeduction?: number }
   ) => {
     // Refused rather than defaulted. A staff meal with no employee on it cannot be
     // reported, cannot be questioned, and is indistinguishable from food walking out of
@@ -124,6 +126,8 @@ export const useTicketStore = create<TicketState>((set, get) => ({
         ? {
             staffId: staffMeal.staffId,
             staffName: staffMeal.staffName,
+            mealOptions: staffMeal.options,
+            staffMealWageDeduction: Math.max(0, staffMeal.wageDeduction || 0),
             ...(staffMeal.description?.trim()
               ? { mealDescription: staffMeal.description.trim() }
               : {}),
@@ -136,7 +140,23 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     };
 
     // Commit to DB (synchronous — ticket row is durable before print fires)
-    await dbService.saveTicket(newTicket);
+    const mealDeduction = Math.max(0, staffMeal?.wageDeduction || 0);
+    const mealWageEntry: WageLedgerEntry | undefined = tender === 'staff' && staffMeal && mealDeduction > 0
+      ? {
+          id: crypto.randomUUID(),
+          staffId: staffMeal.staffId,
+          staffName: staffMeal.staffName,
+          businessDay: businessDayKey(nowIso),
+          kind: 'manual_adjustment',
+          amount: -mealDeduction,
+          note: `Staff meal deduction: ${(staffMeal.options || []).filter((o) => o.wageCharge > 0).map((o) => o.name).join(', ') || 'extra meal'}`,
+          recordedBy: cashierId,
+          recordedByName: useAuthStore.getState().activeUser?.name,
+          recordedAt: nowIso,
+        }
+      : undefined;
+    if (tender === 'staff') await dbService.saveStaffMealTicket(newTicket, mealWageEntry);
+    else await dbService.saveTicket(newTicket);
 
     // STEP 2: Update UI state with committed ticket. Filter out any existing entry
     // for this id first — a concurrent reload (reconciliation pull, realtime echo)

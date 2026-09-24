@@ -27,7 +27,7 @@
 import { UserRole } from '../types/user';
 
 /** Every role, in the order they are offered when adding someone. */
-export const STAFF_ROLES: UserRole[] = ['cashier', 'server', 'kitchen', 'storekeeper', 'other'];
+export const STAFF_ROLES: UserRole[] = ['cashier', 'server', 'kitchen', 'cleaner', 'storekeeper', 'other'];
 
 /** Every role including the account owner's, which is never assignable from the roster. */
 export const ALL_ROLES: UserRole[] = ['admin', ...STAFF_ROLES];
@@ -92,6 +92,13 @@ const SPEC: Record<UserRole, RoleSpec> = {
   kitchen: {
     label: 'Kitchen Staff',
     description: 'Cooks and prepares orders. No till access.',
+    signsIn: false,
+    takesSales: false,
+    countedManually: false,
+  },
+  cleaner: {
+    label: 'Cleaning Staff',
+    description: 'Completes cleaning tasks and hygiene checks. No till access.',
     signsIn: false,
     takesSales: false,
     countedManually: false,

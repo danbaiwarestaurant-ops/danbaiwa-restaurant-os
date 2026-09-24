@@ -1,316 +1,95 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ClipboardList, Trophy, Save, Trash2 } from 'lucide-react';
+import { ClipboardList, Save, Trophy } from 'lucide-react';
 import { useAuthStore } from '../../../store/useAuthStore';
 import { useServerSalesStore } from '../../../store/useServerSalesStore';
+import { useInventoryStore } from '../../../store/useInventoryStore';
 import { useConsolePeriodStore } from '../../../store/useConsolePeriodStore';
-import { businessDayKey, BUSINESS_DAY_START_HOUR } from '../../../utils/shiftDay';
-import { countedManually, roleLabel } from '../../../utils/roles';
-import { Panel, DataTable, EmptyState, ConsoleButton, StatStrip } from '../ConsoleUI';
+import { useDeviceStore } from '../../../store/useDeviceStore';
+import { businessDayKey } from '../../../utils/shiftDay';
+import { countedManually } from '../../../utils/roles';
+import { calculateServerItemSales, serverCollectionVariance, serverProfitContribution, totalServerPerformance } from '../../../utils/serverPerformance';
+import { formatCurrency } from '../../../utils/currency';
+import { ConsoleButton, DataTable, EmptyState, Panel, StatStrip } from '../ConsoleUI';
 
-/** Local `YYYY-MM-DD`, matching the shape businessDayKey produces. */
-function ymd(d: Date): string {
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${m}-${day}`;
-}
+const localDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
-/** A trading-day key rendered for a person, e.g. "Thu 10 Sep 2026". */
-function readableDay(key: string): string {
-  const [y, m, d] = key.split('-').map(Number);
-  if (!y || !m || !d) return key;
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
-}
-
-/**
- * Server ticket counts.
- *
- * Every other figure in this console is a by-product of the till: a sale was rung up, so
- * there is a ticket, so there is a number. Servers sit outside that entirely — they take
- * orders on the floor, the cashier handles all the money, and nothing about who sold what
- * reaches the system on its own. So this screen has two halves that no other view needs
- * both of: somewhere to type the counts in, and somewhere to read them back.
- *
- * The entry form is deliberately one day at a time. Counts are tallied at the end of a
- * service and entered for that service, and a form that let a manager edit a fortnight at
- * once would make a mistyped row very hard to notice and harder still to attribute.
- */
 export const ServerSalesView: React.FC = () => {
-  const { users } = useAuthStore();
-  const { entries, loadServerSales, recordCount, removeCount } = useServerSalesStore();
-  const { period } = useConsolePeriodStore();
-
+  const users = useAuthStore((s) => s.users);
+  const { entries, loadServerSales, recordPerformance } = useServerSalesStore();
+  const { items, load: loadInventory } = useInventoryStore();
+  const period = useConsolePeriodStore((s) => s.period);
+  const currency = useDeviceStore((s) => s.config.currencySymbol || '₦');
   const [day, setDay] = useState(() => businessDayKey(new Date()));
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  const [isSaving, setIsSaving] = useState(false);
-  const [saved, setSaved] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>({});
+  const [moneyDrafts, setMoneyDrafts] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
 
-  // The whole table, not the visible period: the entry form's day can sit outside the
-  // reporting window (entering last night's counts while reading last month's figures),
-  // and the volume here is a handful of rows per service — small enough that a scoped
-  // read would cost more in reload complexity than it saves.
+  useEffect(() => { void loadServerSales(); void loadInventory(); }, [loadServerSales, loadInventory]);
+  const servers = useMemo(() => users.filter((u) => countedManually(u.role) && u.status === 'active').sort((a, b) => a.name.localeCompare(b.name)), [users]);
+  const foods = useMemo(() => items.filter((item) => item.active && item.trackServerSales).sort((a, b) => a.name.localeCompare(b.name)), [items]);
+  const existing = useMemo(() => Object.fromEntries(entries.filter((e) => e.businessDay === day).map((e) => [e.serverId, e])), [entries, day]);
+
   useEffect(() => {
-    void loadServerSales();
-  }, [loadServerSales]);
-
-  const servers = useMemo(
-    () =>
-      users
-        .filter((u) => countedManually(u.role) && u.status === 'active')
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    [users]
-  );
-
-  /** What is already recorded for the day on screen, so the form opens showing it. */
-  const existing = useMemo(() => {
-    const map: Record<string, (typeof entries)[number]> = {};
-    for (const e of entries) if (e.businessDay === day) map[e.serverId] = e;
-    return map;
-  }, [entries, day]);
-
-  // Re-seed the inputs whenever the day changes, so switching to a day that already has
-  // counts shows them rather than an empty form the manager would fill in a second time.
-  useEffect(() => {
-    const nextDrafts: Record<string, string> = {};
-    const nextNotes: Record<string, string> = {};
-    for (const s of servers) {
-      const e = existing[s.id];
-      nextDrafts[s.id] = e ? String(e.ticketCount) : '';
-      nextNotes[s.id] = e?.note ?? '';
+    const next: Record<string, Record<string, string>> = {};
+    const nextMoney: Record<string, string> = {};
+    for (const server of servers) {
+      next[server.id] = Object.fromEntries(foods.map((food) => [food.id, String(existing[server.id]?.itemVolumes?.find((v) => v.itemId === food.id)?.quantity ?? '')]));
+      nextMoney[server.id] = existing[server.id]?.moneyGathered === undefined ? '' : String(existing[server.id].moneyGathered);
     }
-    setDrafts(nextDrafts);
-    setNotes(nextNotes);
-    setSaved(null);
-    // `existing` is derived from the day, so keying on both would re-seed the form under
-    // the manager's cursor every time a sync pulled an unrelated row down.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day, servers]);
+    setDrafts(next);
+    setMoneyDrafts(nextMoney);
+  }, [day, servers, foods, existing]);
 
-  /** Rows the manager has actually touched — a blank input is "not counted", not zero. */
-  const pending = servers.filter((s) => {
-    const raw = (drafts[s.id] ?? '').trim();
-    const e = existing[s.id];
-    if (raw === '') return false;
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return false;
-    return !e || e.ticketCount !== Math.round(n) || (e.note ?? '') !== (notes[s.id] ?? '').trim();
-  });
-
-  const handleSave = async () => {
-    if (!pending.length || isSaving) return;
-    setIsSaving(true);
-    try {
-      for (const s of pending) {
-        await recordCount({
-          serverId: s.id,
-          serverName: s.name,
-          businessDay: day,
-          ticketCount: Number(drafts[s.id]),
-          note: notes[s.id],
-        });
-      }
-      setSaved(`Saved ${pending.length} ${pending.length === 1 ? 'count' : 'counts'} for ${readableDay(day)}`);
-    } finally {
-      setIsSaving(false);
-    }
+  const preview = (serverId: string) => {
+    const rows = foods.map((food) => calculateServerItemSales(food, Number(drafts[serverId]?.[food.id] || 0)));
+    const totals = totalServerPerformance(rows);
+    const moneyGathered = Math.max(0, Number(moneyDrafts[serverId]) || 0);
+    return { rows, ...totals, moneyGathered, variance: serverCollectionVariance(totals.expectedSalesValue, moneyGathered), actualProfitContribution: serverProfitContribution(totals.totalCost, moneyGathered) };
   };
 
-  // ── The report half ───────────────────────────────────────────────────────
-  // Trading days are compared as keys rather than parsed into dates: the day already IS
-  // the unit here, and turning '2026-09-10' back into a Date only to re-derive the day
-  // introduces a timezone question that has no business in this comparison.
-  const fromKey = ymd(period.start);
-  const toKey = ymd(new Date(period.end.getTime() - 1));
+  const save = async () => {
+    setSaving(true); setError('');
+    try {
+      for (const server of servers) {
+        const performance = preview(server.id);
+        await recordPerformance({ serverId: server.id, serverName: server.name, businessDay: day, itemVolumes: performance.rows, moneyGathered: performance.moneyGathered });
+      }
+      setMessage(`Saved ${servers.length} server records for ${day}`);
+      setTimeout(() => setMessage(''), 3500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setTimeout(() => setError(''), 6000);
+    } finally { setSaving(false); }
+  };
 
-  const inPeriod = useMemo(
-    () => entries.filter((e) => e.businessDay >= fromKey && e.businessDay <= toKey),
-    [entries, fromKey, toKey]
-  );
+  const from = localDay(period.start);
+  const to = localDay(new Date(period.end.getTime() - 1));
+  const inPeriod = entries.filter((e) => e.businessDay >= from && e.businessDay <= to);
+  type Rollup = { id: string; name: string; items: Record<string, number>; units: number; cost: number; expectedProfit: number; actualProfit: number; expected: number; gathered: number; variance: number };
+  const ranked = Object.values(inPeriod.reduce<Record<string, Rollup>>((map, entry) => {
+    const row = map[entry.serverId] || { id: entry.serverId, name: entry.serverName, items: {}, units: 0, cost: 0, expectedProfit: 0, actualProfit: 0, expected: 0, gathered: 0, variance: 0 };
+    for (const item of entry.itemVolumes || []) row.items[item.itemId] = (row.items[item.itemId] || 0) + item.quantity;
+    row.units += entry.totalSalesUnits || 0;
+    row.cost += entry.totalCost || 0;
+    row.expectedProfit += entry.totalProfit || 0;
+    row.expected += entry.expectedSalesValue || 0;
+    row.gathered += entry.moneyGathered || 0;
+    row.variance += entry.variance ?? serverCollectionVariance(entry.expectedSalesValue || 0, entry.moneyGathered || 0);
+    row.actualProfit += entry.actualProfitContribution ?? serverProfitContribution(entry.totalCost || 0, entry.moneyGathered || 0);
+    map[entry.serverId] = row;
+    return map;
+  }, {})).sort((a, b) => b.variance - a.variance);
+  const totals = ranked.reduce((sum, row) => ({ units: sum.units + row.units, cost: sum.cost + row.cost, expectedProfit: sum.expectedProfit + row.expectedProfit, actualProfit: sum.actualProfit + row.actualProfit, expected: sum.expected + row.expected, gathered: sum.gathered + row.gathered, variance: sum.variance + row.variance }), { units: 0, cost: 0, expectedProfit: 0, actualProfit: 0, expected: 0, gathered: 0, variance: 0 });
 
-  const ranked = useMemo(() => {
-    const rows: Record<string, { serverId: string; name: string; tickets: number; days: number }> = {};
-    for (const e of inPeriod) {
-      // Named off the entry, not the roster, so a season's figures still name people who
-      // have since left and whose user row is gone.
-      const row = rows[e.serverId] || { serverId: e.serverId, name: e.serverName, tickets: 0, days: 0 };
-      row.tickets += e.ticketCount;
-      row.days += 1;
-      rows[e.serverId] = row;
-    }
-    return Object.values(rows).sort((a, b) => b.tickets - a.tickets);
-  }, [inPeriod]);
-
-  const totalTickets = ranked.reduce((sum, r) => sum + r.tickets, 0);
-  const daysCovered = new Set(inPeriod.map((e) => e.businessDay)).size;
-
-  const recent = useMemo(
-    () => [...inPeriod].sort((a, b) => (a.businessDay < b.businessDay ? 1 : -1)).slice(0, 40),
-    [inPeriod]
-  );
-
-  return (
-    <div className="space-y-4">
-      <Panel
-        title="Enter Ticket Counts"
-        subtitle={`Tallied on the floor and typed in here — servers do not use the till. Trading days run from ${BUSINESS_DAY_START_HOUR}am.`}
-        icon={ClipboardList}
-        actions={
-          <>
-            <input
-              type="date"
-              value={day}
-              max={businessDayKey(new Date())}
-              onChange={(e) => setDay(e.target.value)}
-              className="px-2 py-1.5 text-[11px] font-bold border-2 border-slate-300 rounded-none text-slate-900 focus:border-amber-500 focus:outline-none"
-            />
-            <ConsoleButton variant="primary" onClick={handleSave} disabled={!pending.length || isSaving}>
-              <span className="flex items-center gap-1.5">
-                <Save className="w-3 h-3" />
-                {isSaving ? 'Saving…' : `Save${pending.length ? ` (${pending.length})` : ''}`}
-              </span>
-            </ConsoleButton>
-          </>
-        }
-      >
-        {servers.length === 0 ? (
-          <EmptyState>
-            No servers on the roster — add them under Staff Management with the role “Server / Waiter”
-          </EmptyState>
-        ) : (
-          <>
-            <p className="text-[11px] text-slate-500 font-semibold mb-3">
-              Showing <span className="text-slate-800 font-black">{readableDay(day)}</span>. Leave a
-              box empty for anyone who did not work — an empty box is “not counted”, a 0 is “worked
-              and sold nothing”.
-            </p>
-            <DataTable headers={['Server', 'Tickets', 'Note', '']} alignRight={[1, 3]}>
-              {servers.map((s) => {
-                const e = existing[s.id];
-                return (
-                  <tr key={s.id} className="hover:bg-slate-50">
-                    <td className="py-2 pr-3">
-                      <div className="font-bold text-slate-900">{s.name}</div>
-                      <div className="text-[10px] uppercase font-bold text-slate-400">
-                        {roleLabel(s.role)}
-                        {e && <span className="text-emerald-600"> · recorded by {e.recordedByName || '—'}</span>}
-                      </div>
-                    </td>
-                    <td className="py-2 pr-3 text-right">
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        inputMode="numeric"
-                        value={drafts[s.id] ?? ''}
-                        onChange={(ev) => setDrafts((d) => ({ ...d, [s.id]: ev.target.value }))}
-                        placeholder="—"
-                        className="w-20 px-2 py-1.5 text-right font-mono font-black tabular-nums text-sm border-2 border-slate-300 rounded-none text-slate-900 focus:border-amber-500 focus:outline-none"
-                      />
-                    </td>
-                    <td className="py-2 pr-3">
-                      <input
-                        type="text"
-                        value={notes[s.id] ?? ''}
-                        onChange={(ev) => setNotes((n) => ({ ...n, [s.id]: ev.target.value }))}
-                        placeholder="Optional"
-                        className="w-full min-w-[8rem] px-2 py-1.5 text-[11px] font-semibold border-2 border-slate-200 rounded-none text-slate-700 focus:border-amber-500 focus:outline-none"
-                      />
-                    </td>
-                    <td className="py-2 text-right">
-                      {e && (
-                        <button
-                          onClick={() => void removeCount(e.id)}
-                          title="Remove this count"
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-none"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </DataTable>
-            {saved && (
-              <p className="mt-3 text-[11px] font-black uppercase tracking-wide text-emerald-700">{saved}</p>
-            )}
-          </>
-        )}
-      </Panel>
-
-      <Panel
-        title="Server Performance"
-        subtitle={`Tickets turned over in ${period.label}`}
-        icon={Trophy}
-      >
-        {ranked.length === 0 ? (
-          <EmptyState>No counts entered for this period</EmptyState>
-        ) : (
-          <>
-            <div className="mb-4">
-              <StatStrip
-                stats={[
-                  { label: 'Tickets', value: String(totalTickets) },
-                  { label: 'Servers counted', value: String(ranked.length) },
-                  { label: 'Days recorded', value: String(daysCovered) },
-                  {
-                    label: 'Avg per server / day',
-                    // Per server-day rather than per calendar day: a server who worked
-                    // three of the month's thirty days should not have their average
-                    // diluted by the twenty-seven they were not there.
-                    value: inPeriod.length ? (totalTickets / inPeriod.length).toFixed(1) : '0',
-                  },
-                ]}
-              />
-            </div>
-            <DataTable headers={['#', 'Server', 'Days worked', 'Tickets', 'Share']} alignRight={[2, 3, 4]}>
-              {ranked.map((r, i) => (
-                <tr key={r.serverId} className="hover:bg-slate-50">
-                  <td className="py-2.5 pr-3 font-black text-slate-400 tabular-nums">{i + 1}</td>
-                  <td className="py-2.5 pr-3 font-bold text-slate-900">{r.name}</td>
-                  <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-slate-600">{r.days}</td>
-                  <td className="py-2.5 pr-3 text-right font-mono font-black tabular-nums text-slate-900">
-                    {r.tickets}
-                  </td>
-                  <td className="py-2.5 text-right font-mono tabular-nums text-slate-500">
-                    {totalTickets ? `${Math.round((r.tickets / totalTickets) * 100)}%` : '—'}
-                  </td>
-                </tr>
-              ))}
-              <tr className="border-t-2 border-slate-300 bg-slate-50">
-                <td className="py-2.5 pr-3" />
-                <td className="py-2.5 pr-3 font-black uppercase text-[11px] tracking-wider text-slate-700">
-                  Total
-                </td>
-                <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-slate-500">{daysCovered}</td>
-                <td className="py-2.5 pr-3 text-right font-mono font-black tabular-nums">{totalTickets}</td>
-                <td className="py-2.5" />
-              </tr>
-            </DataTable>
-          </>
-        )}
-      </Panel>
-
-      {recent.length > 0 && (
-        <Panel title="Entries" subtitle={`Every count recorded in ${period.label}`} icon={ClipboardList}>
-          <DataTable headers={['Trading day', 'Server', 'Tickets', 'Note', 'Entered by']} alignRight={[2]}>
-            {recent.map((e) => (
-              <tr key={e.id} className="hover:bg-slate-50">
-                <td className="py-2 pr-3 font-bold text-slate-700">{readableDay(e.businessDay)}</td>
-                <td className="py-2 pr-3 font-bold text-slate-900">{e.serverName}</td>
-                <td className="py-2 pr-3 text-right font-mono font-black tabular-nums">{e.ticketCount}</td>
-                <td className="py-2 pr-3 text-slate-500">{e.note || '—'}</td>
-                <td className="py-2 text-slate-500">{e.recordedByName || '—'}</td>
-              </tr>
-            ))}
-          </DataTable>
-        </Panel>
-      )}
-    </div>
-  );
+  return <div className="space-y-4">
+    {(message || error) && <div role="status" className={`fixed top-4 left-1/2 -translate-x-1/2 z-[100] border-2 p-3 shadow-2xl text-xs font-bold ${error ? 'bg-rose-50 border-rose-500 text-rose-900' : 'bg-emerald-50 border-emerald-500 text-emerald-900'}`}>{error || message}</div>}
+    <Panel title="Daily Server Item Sales" subtitle="Enter each item sold and the money returned. Expected collection = preparation cost + configured profit." icon={ClipboardList} actions={<><input type="date" value={day} max={businessDayKey(new Date())} onChange={(e) => setDay(e.target.value)} className="border-2 border-slate-300 px-2 py-1.5 text-xs font-bold" /><ConsoleButton variant="primary" onClick={() => void save()} disabled={saving || !servers.length || !foods.length}><Save className="w-3 h-3 inline mr-1" />{saving ? 'Saving…' : 'Save all'}</ConsoleButton></>}>
+      {!foods.length ? <EmptyState>Configure food items under Inventory → Ingredient setup, set preparation cost and profit, then enable “Server sales”.</EmptyState> : !servers.length ? <EmptyState>Add active servers under Staff → Team & access.</EmptyState> : <DataTable headers={['Server Name', ...foods.map((f) => `${f.name} (${f.salesUnit || f.baseUnit})`), 'Preparation', 'Expected profit', 'Expected', 'Money gathered', 'Actual profit / loss', 'Surplus / shortage']} alignRight={Array.from({ length: foods.length + 6 }, (_, i) => i + 1)}>{servers.map((server) => { const p = preview(server.id); return <tr key={server.id} className="align-top"><td className="py-2 pr-3 font-bold">{server.name}</td>{foods.map((food) => <td key={food.id} className="py-2 pr-2"><input aria-label={`${server.name} ${food.name}`} type="number" min="0" step="any" value={drafts[server.id]?.[food.id] || ''} onChange={(e) => setDrafts((all) => ({ ...all, [server.id]: { ...all[server.id], [food.id]: e.target.value } }))} className="w-20 border-2 border-slate-300 p-2 text-right font-mono" /></td>)}<td className="py-2 pr-3 text-right font-mono">{formatCurrency(p.totalCost, currency)}</td><td className="py-2 pr-3 text-right font-mono text-emerald-700">{formatCurrency(p.totalProfit, currency)}</td><td className="py-2 pr-3 text-right font-mono font-black">{formatCurrency(p.expectedSalesValue, currency)}</td><td className="py-2 pr-3"><input aria-label={`${server.name} money gathered`} type="number" min="0" step="any" value={moneyDrafts[server.id] || ''} onChange={(e) => setMoneyDrafts((all) => ({ ...all, [server.id]: e.target.value }))} className="w-32 border-2 border-slate-300 p-2 text-right font-mono font-black" /></td><td className={`py-2 pr-3 text-right font-mono font-black ${p.actualProfitContribution < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{p.actualProfitContribution > 0 ? '+' : ''}{formatCurrency(p.actualProfitContribution, currency)}</td><td className={`py-2 text-right font-mono font-black ${p.variance < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{p.variance > 0 ? '+' : ''}{formatCurrency(p.variance, currency)}<div className="text-[9px] uppercase">{p.variance < 0 ? 'Shortage' : p.variance > 0 ? 'Surplus' : 'Balanced'}</div></td></tr>; })}</DataTable>}
+    </Panel>
+    <Panel title="Server Performance" subtitle={`Item volumes, collections, and variance for ${period.label}`} icon={Trophy}>
+      {!ranked.length ? <EmptyState>No server item sales recorded in this period.</EmptyState> : <><StatStrip stats={[{ label: 'Sales units', value: totals.units.toLocaleString() }, { label: 'Expected', value: formatCurrency(totals.expected, currency) }, { label: 'Money gathered', value: formatCurrency(totals.gathered, currency) }, { label: totals.actualProfit < 0 ? 'Actual loss' : 'Actual profit', value: formatCurrency(Math.abs(totals.actualProfit), currency) }, { label: totals.variance < 0 ? 'Net shortage' : 'Net surplus', value: formatCurrency(Math.abs(totals.variance), currency) }]} /><DataTable headers={['Server Name', ...foods.map((f) => f.name), 'Preparation', 'Expected profit', 'Expected', 'Gathered', 'Actual profit / loss', 'Surplus / shortage']} alignRight={Array.from({ length: foods.length + 6 }, (_, i) => i + 1)}>{ranked.map((row) => <tr key={row.id}><td className="py-2.5 pr-3 font-bold">{row.name}</td>{foods.map((food) => <td key={food.id} className="py-2.5 pr-3 text-right font-mono">{(row.items[food.id] || 0).toLocaleString()}</td>)}<td className="py-2.5 pr-3 text-right font-mono">{formatCurrency(row.cost, currency)}</td><td className="py-2.5 pr-3 text-right font-mono text-emerald-700">{formatCurrency(row.expectedProfit, currency)}</td><td className="py-2.5 pr-3 text-right font-mono font-bold">{formatCurrency(row.expected, currency)}</td><td className="py-2.5 pr-3 text-right font-mono font-bold">{formatCurrency(row.gathered, currency)}</td><td className={`py-2.5 pr-3 text-right font-mono font-black ${row.actualProfit < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{row.actualProfit > 0 ? '+' : ''}{formatCurrency(row.actualProfit, currency)}</td><td className={`py-2.5 text-right font-mono font-black ${row.variance < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{row.variance > 0 ? '+' : ''}{formatCurrency(row.variance, currency)}</td></tr>)}</DataTable></>}
+    </Panel>
+  </div>;
 };

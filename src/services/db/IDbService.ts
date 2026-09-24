@@ -6,6 +6,8 @@ import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
 import { AuditLogRow } from './dexieSchema';
+import { RolePayConfig, StaffAssessment, WageLedgerEntry } from '../../types/workforce';
+import { InventoryBatch, InventoryItem, InventoryMovement } from '../../types/inventory';
 
 export interface IDbService {
   init(): Promise<void>;
@@ -45,6 +47,7 @@ export interface IDbService {
   // User-Scoped Tickets
   getTickets(userId?: string): Promise<Ticket[]>;
   saveTicket(ticket: Ticket): Promise<void>;
+  saveStaffMealTicket(ticket: Ticket, wageEntry?: WageLedgerEntry): Promise<void>;
   updateTicketStatus(ticketId: string, status: 'paid' | 'collected' | 'void', reason?: string, voidedBy?: string): Promise<void>;
   /**
    * Corrects how a ticket was paid.
@@ -61,7 +64,8 @@ export interface IDbService {
   getCurrentShift(userId?: string): Promise<Shift | null>;
   getShifts(userId?: string): Promise<Shift[]>;
   saveShift(shift: Shift): Promise<void>;
-  closeShift(shiftId: string, countedCash: number, expectedCash: number, variance: number, notes?: string): Promise<void>;
+  closeShift(shiftId: string, countedCash: number, expectedCash: number, variance: number, notes?: string, reconciliationPending?: boolean): Promise<void>;
+  updateShiftReconciliation(shiftId: string, countedCash: number, expectedCash: number, variance: number, actorId: string): Promise<void>;
 
   // User-Scoped Expenses
   getExpenses(shiftId?: string, userId?: string): Promise<Expense[]>;
@@ -79,6 +83,22 @@ export interface IDbService {
   saveServerSales(entry: ServerSalesEntry): Promise<void>;
   /** Removes a count entered by mistake. */
   deleteServerSales(entryId: string): Promise<void>;
+
+  // Workforce performance and wage ledger
+  getRolePayConfigs(): Promise<RolePayConfig[]>;
+  saveRolePayConfig(config: RolePayConfig, actorId: string): Promise<void>;
+  getStaffAssessments(from?: string, to?: string): Promise<StaffAssessment[]>;
+  saveStaffAssessment(assessment: StaffAssessment, actorId: string, reason: string): Promise<void>;
+  getWageLedger(from?: string, to?: string): Promise<WageLedgerEntry[]>;
+  saveWageLedgerEntry(entry: WageLedgerEntry, actorId: string): Promise<void>;
+
+  // FIFO ingredient inventory
+  getInventoryItems(): Promise<InventoryItem[]>;
+  saveInventoryItem(item: InventoryItem, actorId: string): Promise<void>;
+  getInventoryBatches(itemId?: string): Promise<InventoryBatch[]>;
+  getInventoryMovements(from?: string, to?: string): Promise<InventoryMovement[]>;
+  receiveInventory(batch: InventoryBatch, movement: InventoryMovement, actorId: string): Promise<void>;
+  issueInventory(movement: InventoryMovement, updatedBatches: InventoryBatch[], actorId: string): Promise<void>;
 
   // Audit Logs (data-layer only — no UI reads this yet)
   getAuditLogs(entityId?: string, actorId?: string): Promise<AuditLogRow[]>;

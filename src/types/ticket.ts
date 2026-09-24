@@ -57,6 +57,8 @@ export interface Ticket {
    * tickets synced to another device still describe the same plate.
    */
   mealDescription?: string;
+  mealOptions?: Array<{ id: string; name: string; wageCharge: number; isFree: boolean }>;
+  staffMealWageDeduction?: number;
   /** Owning account: the admin's Supabase auth user id, and the tenant key the
    *  whole sync layer scopes by. */
   accountId?: string;

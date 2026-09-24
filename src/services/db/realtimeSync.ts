@@ -33,6 +33,8 @@ import { useShiftStore } from '../../store/useShiftStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
 import { useServerSalesStore } from '../../store/useServerSalesStore';
 import { useAuditStore } from '../../store/useAuditStore';
+import { useWorkforceStore } from '../../store/useWorkforceStore';
+import { useInventoryStore } from '../../store/useInventoryStore';
 
 const DEVICE_CONFIG_KEY = 'device_config';
 /**
@@ -73,6 +75,12 @@ const SYNCABLE_TABLES: SyncablePgTable[] = [
   'shifts',
   'expenses',
   'server_sales',
+  'role_pay_configs',
+  'staff_assessments',
+  'wage_ledger',
+  'inventory_items',
+  'inventory_batches',
+  'inventory_movements',
   'audit_logs',
 ];
 
@@ -110,6 +118,16 @@ function scheduleStoreReload(pgTable: SyncablePgTable): void {
         // about somebody else, so "my own" would show an empty screen to the only person
         // who ever looks at it.
         useServerSalesStore.getState().loadServerSales();
+        break;
+      case 'role_pay_configs':
+      case 'staff_assessments':
+      case 'wage_ledger':
+        useWorkforceStore.getState().load();
+        break;
+      case 'inventory_items':
+      case 'inventory_batches':
+      case 'inventory_movements':
+        useInventoryStore.getState().load();
         break;
       case 'users':
         useAuthStore.getState().loadUsers();
@@ -340,6 +358,12 @@ export function startRealtimeSync(): void {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs', filter: scope }, (p) => handleRealtimeChange('audit_logs', p))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses', filter: scope }, (p) => handleRealtimeChange('expenses', p))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'server_sales', filter: scope }, (p) => handleRealtimeChange('server_sales', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'role_pay_configs', filter: scope }, (p) => handleRealtimeChange('role_pay_configs', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_assessments', filter: scope }, (p) => handleRealtimeChange('staff_assessments', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wage_ledger', filter: scope }, (p) => handleRealtimeChange('wage_ledger', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_items', filter: scope }, (p) => handleRealtimeChange('inventory_items', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_batches', filter: scope }, (p) => handleRealtimeChange('inventory_batches', p))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_movements', filter: scope }, (p) => handleRealtimeChange('inventory_movements', p))
       .subscribe();
 
     await runCloudCatchUp({ revive: true });

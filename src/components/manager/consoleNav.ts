@@ -49,10 +49,10 @@ export const CONSOLE_NAV: ConsoleNavItem[] = [
 
   // Under Sales rather than Operations: this is a record of what was sold, and it belongs
   // beside the till's own record even though it is the one figure a human types in.
-  { id: 'serverSales', label: 'Server Tickets', group: 'Sales', icon: ClipboardList, periodScoped: true },
+  { id: 'serverSales', label: 'Server Performance', group: 'Sales', icon: ClipboardList, periodScoped: true },
 
   { id: 'menu', label: 'Menu Management', group: 'Operations', icon: UtensilsCrossed, placeholder: true },
-  { id: 'inventory', label: 'Inventory', group: 'Operations', icon: Boxes, placeholder: true },
+  { id: 'inventory', label: 'Inventory', group: 'Operations', icon: Boxes },
   { id: 'staff', label: 'Staff Management', group: 'Operations', icon: Users, periodScoped: true },
 
   { id: 'expenses', label: 'Expenses', group: 'Finance', icon: Wallet, periodScoped: true },

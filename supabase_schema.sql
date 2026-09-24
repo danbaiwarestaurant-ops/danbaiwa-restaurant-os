@@ -286,6 +286,77 @@ BEGIN
 END $$;
 
 -- =============================================================================
+-- Workforce performance wages and FIFO ingredient inventory
+-- Apply before deploying the build that writes these tables.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS role_pay_configs (
+  id TEXT PRIMARY KEY, role TEXT NOT NULL, metric_label TEXT NOT NULL,
+  target_per_day NUMERIC NOT NULL DEFAULT 0 CHECK (target_per_day >= 0),
+  naira_per_unit NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (naira_per_unit >= 0),
+  updated_by TEXT, account_id UUID,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE TABLE IF NOT EXISTS staff_assessments (
+  id TEXT PRIMARY KEY, business_day TEXT NOT NULL, staff_id TEXT NOT NULL,
+  staff_name TEXT NOT NULL, role TEXT NOT NULL, metric_label TEXT NOT NULL,
+  output NUMERIC NOT NULL DEFAULT 0 CHECK (output >= 0), target NUMERIC NOT NULL DEFAULT 0,
+  performance_percent NUMERIC NOT NULL DEFAULT 0, naira_per_unit NUMERIC(14,2) NOT NULL DEFAULT 0,
+  gross_pay NUMERIC(14,2) NOT NULL DEFAULT 0, penalties JSONB NOT NULL DEFAULT '[]'::jsonb,
+  fixed_penalty_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+  rewards JSONB NOT NULL DEFAULT '[]'::jsonb, reward_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+  percentage_penalty_total NUMERIC NOT NULL DEFAULT 0, net_pay NUMERIC(14,2) NOT NULL DEFAULT 0,
+  note TEXT, status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','finalized')),
+  finalized_at TIMESTAMPTZ, reopened_at TIMESTAMPTZ, reopen_reason TEXT,
+  recorded_by TEXT, recorded_by_name TEXT, recorded_at TIMESTAMPTZ NOT NULL,
+  account_id UUID, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE TABLE IF NOT EXISTS wage_ledger (
+  id UUID PRIMARY KEY, staff_id TEXT NOT NULL, staff_name TEXT NOT NULL, business_day TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('payment','debt_forgiveness','manual_adjustment')),
+  amount NUMERIC(14,2) NOT NULL, note TEXT NOT NULL, recorded_by TEXT,
+  recorded_by_name TEXT, recorded_at TIMESTAMPTZ NOT NULL,
+  account_id UUID, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE TABLE IF NOT EXISTS inventory_items (
+  id UUID PRIMARY KEY, name TEXT NOT NULL, base_unit TEXT NOT NULL, purchase_unit TEXT NOT NULL,
+  base_units_per_purchase_unit NUMERIC NOT NULL CHECK (base_units_per_purchase_unit > 0),
+  reorder_level NUMERIC NOT NULL DEFAULT 0 CHECK (reorder_level >= 0), active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL, account_id UUID,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE TABLE IF NOT EXISTS inventory_batches (
+  id UUID PRIMARY KEY, item_id UUID NOT NULL, received_at TIMESTAMPTZ NOT NULL,
+  expiry_date DATE, supplier TEXT, original_quantity_base NUMERIC NOT NULL CHECK (original_quantity_base >= 0),
+  remaining_quantity_base NUMERIC NOT NULL CHECK (remaining_quantity_base >= 0),
+  unit_cost_base NUMERIC(16,4) NOT NULL DEFAULT 0 CHECK (unit_cost_base >= 0),
+  account_id UUID, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE TABLE IF NOT EXISTS inventory_movements (
+  id UUID PRIMARY KEY, item_id UUID NOT NULL, item_name TEXT NOT NULL, business_day TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('receipt','usage','waste','count_adjustment')),
+  quantity_base NUMERIC NOT NULL, value NUMERIC(16,2) NOT NULL DEFAULT 0,
+  allocations JSONB NOT NULL DEFAULT '[]'::jsonb, expected_quantity_before NUMERIC,
+  counted_quantity NUMERIC, variance_quantity NUMERIC, supplier TEXT, note TEXT,
+  recorded_by TEXT, recorded_by_name TEXT, recorded_at TIMESTAMPTZ NOT NULL,
+  account_id UUID, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_assessment_day_staff ON staff_assessments(account_id, business_day, staff_id);
+CREATE INDEX IF NOT EXISTS idx_role_pay_configs_sync ON role_pay_configs(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_staff_assessments_sync ON staff_assessments(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_wage_ledger_sync ON wage_ledger(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_sync ON inventory_items(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_batches_sync ON inventory_batches(account_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_batches_fifo ON inventory_batches(account_id, item_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_movements_sync ON inventory_movements(account_id, updated_at);
+
+-- =============================================================================
 -- ACCOUNT-SCOPED TENANCY  (supersedes the location_id scoping above)
 -- =============================================================================
 --
@@ -1004,3 +1075,43 @@ BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE server_sales;
   END IF;
 END $$;
+
+-- Finish workforce/inventory tenancy only after current_account_id() and account_devices
+-- have been defined above. Keeping this at the end makes the complete schema safe to run.
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['role_pay_configs','staff_assessments','wage_ledger','inventory_items','inventory_batches','inventory_movements'] LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', 'trg_' || t || '_updated_at', t);
+    EXECUTE format('CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION set_updated_at()', 'trg_' || t || '_updated_at', t);
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I', 'Scope ' || t || ' by account', t);
+    EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO authenticated USING (account_id = current_account_id()) WITH CHECK (account_id = current_account_id())', 'Scope ' || t || ' by account', t);
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND tablename = t) THEN
+      EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I', t);
+    END IF;
+  END LOOP;
+END $$;
+-- 2026-09 stakeholder update: itemized server food performance and staff-meal payroll.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_food_count_limit INTEGER NOT NULL DEFAULT 1 CHECK (daily_food_count_limit >= 0);
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS meal_options JSONB;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS staff_meal_wage_deduction NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (staff_meal_wage_deduction >= 0);
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS reconciliation_pending BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS sales_unit TEXT;
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS base_units_per_sales_unit NUMERIC CHECK (base_units_per_sales_unit > 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS standard_purchase_cost NUMERIC(16,2) NOT NULL DEFAULT 0 CHECK (standard_purchase_cost >= 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expected_sales_per_sales_unit NUMERIC(16,2) NOT NULL DEFAULT 0 CHECK (expected_sales_per_sales_unit >= 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS preparation_cost_per_sales_unit NUMERIC(16,2) CHECK (preparation_cost_per_sales_unit >= 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS profit_per_sales_unit NUMERIC(16,2) NOT NULL DEFAULT 0 CHECK (profit_per_sales_unit >= 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS track_server_sales BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS item_volumes JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS total_sales_units NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS total_cost NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS total_sales NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS total_profit NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS expected_sales_value NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS money_gathered NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS variance NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS actual_profit_contribution NUMERIC(16,2) NOT NULL DEFAULT 0;
+ALTER TABLE staff_assessments ADD COLUMN IF NOT EXISTS rewards JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE staff_assessments ADD COLUMN IF NOT EXISTS reward_total NUMERIC(14,2) NOT NULL DEFAULT 0;

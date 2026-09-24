@@ -9,7 +9,7 @@
  * 'other' is the catch-all for everyone on the payroll who is none of the above, so a
  * restaurant is never forced to file a cleaner as a cashier to get them on the roster.
  */
-export type UserRole = 'admin' | 'cashier' | 'server' | 'kitchen' | 'storekeeper' | 'other';
+export type UserRole = 'admin' | 'cashier' | 'server' | 'kitchen' | 'cleaner' | 'storekeeper' | 'other';
 export type UserStatus = 'active' | 'deactivated';
 
 export interface UserAccount {
@@ -33,6 +33,8 @@ export interface UserAccount {
   role: UserRole;          // See utils/roles.ts for what each one may do
   createdAt: string;       // ISO 8601 string
   status: UserStatus;
+  /** Number of free base-food selections allowed per trading day. */
+  dailyFoodCountLimit?: number;
   /** Owning account: the admin's Supabase auth user id, and the tenant key the
    *  whole sync layer scopes by. */
   accountId?: string;

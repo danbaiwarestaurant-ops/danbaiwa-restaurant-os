@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Lock, X, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import React from 'react';
+import { Lock, X, AlertTriangle } from 'lucide-react';
 import { useShiftStore } from '../../store/useShiftStore';
 import { useTicketStore } from '../../store/useTicketStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
@@ -31,8 +31,6 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
   const { currentShift, closeShift } = useShiftStore();
   const { tickets } = useTicketStore();
   const { expenses } = useExpenseStore();
-  const [countedCash, setCountedCash] = useState('');
-  const [notes, setNotes] = useState('');
 
   if (!isOpen || !currentShift) return null;
 
@@ -59,20 +57,17 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
     minute: '2-digit',
   });
 
-  const countedNum = parseFloat(countedCash) || 0;
   const recon = calculateShiftReconciliation(
     currentShift.openingFloat,
     sales.cash,
     approvedExpenses,
-    countedNum
+    0
   );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await closeShift(countedNum, notes);
-    onSuccess(
-      `Shift closed! Expected: ${formatCurrency(recon.expectedCash)}, Counted: ${formatCurrency(recon.countedCash)}, Variance: ${formatCurrency(recon.variance)}`
-    );
+    await closeShift();
+    onSuccess(`Shift closed. Expected cash is ${formatCurrency(recon.expectedCash)}; a manager can enter the physical count later in Shift History.`);
     onClose();
   };
 
@@ -87,7 +82,7 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
                 ? "Close Previous Day's Shift"
                 : endsSession
                   ? 'Close Shift & Log Out'
-                  : 'Close Shift & Reconcile Cash'}
+                  : 'Close Shift'}
             </span>
           </div>
           {/* No way out of a forced count — see the `mandatory` prop. */}
@@ -165,57 +160,10 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
             )}
           </div>
 
-          <div>
-            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-              Physical Cash Count (Physical Drawer Count)
-            </label>
-            <input
-              type="number"
-              value={countedCash}
-              onChange={e => setCountedCash(e.target.value)}
-              placeholder="Enter physical cash counted"
-              min="0"
-              step="1"
-              className="w-full p-3 border-2 border-slate-300 rounded-none font-mono font-black text-xl text-slate-900 focus:border-amber-500 focus:outline-none"
-              required
-            />
-          </div>
-
-          {/* Variance Flag Alert */}
-          {countedCash && (
-            <div className={`p-3 border-2 flex items-center justify-between font-bold text-xs rounded-none ${
-              recon.isVarianceFlagged
-                ? recon.variance < 0
-                  ? 'bg-rose-50 border-rose-400 text-rose-900'
-                  : 'bg-amber-50 border-amber-400 text-amber-900'
-                : 'bg-emerald-50 border-emerald-400 text-emerald-950'
-            }`}>
-              <div className="flex items-center gap-2">
-                {recon.isVarianceFlagged ? (
-                  <AlertTriangle className="w-4 h-4 text-amber-600" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                )}
-                <span>Variance:</span>
-              </div>
-              <span className="font-mono font-black text-sm">
-                {recon.variance > 0 ? `+${formatCurrency(recon.variance)}` : formatCurrency(recon.variance)}
-              </span>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-              Closing Shift Notes (Optional)
-            </label>
-            <input
-              type="text"
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              placeholder="e.g. Variance reason, cash bag number"
-              className="w-full p-2.5 border-2 border-slate-300 rounded-none text-xs text-slate-800 focus:border-amber-500 focus:outline-none"
-            />
-          </div>
+          <p className="p-3 border-2 border-sky-300 bg-sky-50 text-[11px] font-bold text-sky-900">
+            No handover form is required. Closing locks the shift totals now; a manager records
+            the physical cash and any variance later in Shift History.
+          </p>
 
           <div className="flex justify-end gap-2 pt-2 border-t">
             {!mandatory && (
@@ -229,10 +177,9 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
             )}
             <button
               type="submit"
-              disabled={!countedCash}
               className="px-4 py-2 text-xs font-black uppercase bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-none border border-amber-600 shadow-xs"
             >
-              {mandatory ? 'Close It & Start Today' : endsSession ? 'Close Shift & Log Out' : 'Finalize Shift Close'}
+              {mandatory ? 'Close It & Start Today' : endsSession ? 'Close Shift & Log Out' : 'Close Shift'}
             </button>
           </div>
         </form>

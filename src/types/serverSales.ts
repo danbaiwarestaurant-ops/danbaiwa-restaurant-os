@@ -33,7 +33,21 @@ export interface ServerSalesEntry {
   /** Trading day as `YYYY-MM-DD`, from businessDayKey — the 6am-to-6am day, not the calendar one. */
   businessDay: string;
   /** Tickets turned over. A whole number; zero is a real answer and is stored as one. */
+  /** Legacy manual ticket count. New entries record itemized sales volumes below. */
   ticketCount: number;
+  itemVolumes?: ServerItemSales[];
+  totalSalesUnits?: number;
+  totalCost?: number;
+  totalSales?: number;
+  totalProfit?: number;
+  /** Preparation cost plus configured profit for every item recorded. */
+  expectedSalesValue?: number;
+  /** Cash the manager confirms this server returned for the day. */
+  moneyGathered?: number;
+  /** moneyGathered - expectedSalesValue. Negative is shortage; positive is surplus. */
+  variance?: number;
+  /** moneyGathered - totalCost. Negative means the collection did not cover preparation cost. */
+  actualProfitContribution?: number;
   /** Optional free text — "left after lunch", "covering two sections". */
   note?: string;
   /** The manager who typed it in, and when. Kept because this figure is asserted, not observed. */
@@ -45,6 +59,21 @@ export interface ServerSalesEntry {
   accountId?: string;
   /** Server-authoritative, set by the Postgres trigger — drives last-write-wins merges. */
   updatedAt?: string;
+}
+
+export interface ServerItemSales {
+  itemId: string;
+  itemName: string;
+  quantity: number;
+  salesUnit: string;
+  unitCost: number;
+  /** Legacy alias of the item's expected collection per unit. */
+  unitSales: number;
+  unitProfit: number;
+  cost: number;
+  sales: number;
+  profit: number;
+  expected: number;
 }
 
 /** The one place the composite key is built. See ServerSalesEntry.id. */

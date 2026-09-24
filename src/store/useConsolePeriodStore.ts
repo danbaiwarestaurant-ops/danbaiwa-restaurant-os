@@ -15,10 +15,12 @@ function savedUnit(): PeriodUnit {
 
 interface ConsolePeriodState {
   period: Period;
+  weekStartsOn: number;
   setUnit: (unit: PeriodUnit) => void;
   step: (delta: number) => void;
   goToCurrent: () => void;
   isCurrent: () => boolean;
+  setWeekStartsOn: (day: number) => void;
 }
 
 /**
@@ -34,6 +36,7 @@ interface ConsolePeriodState {
  */
 export const useConsolePeriodStore = create<ConsolePeriodState>((set, get) => ({
   period: periodFor(savedUnit()),
+  weekStartsOn: 1,
 
   setUnit: (unit) => {
     try {
@@ -46,7 +49,14 @@ export const useConsolePeriodStore = create<ConsolePeriodState>((set, get) => ({
 
   step: (delta) => set({ period: shiftPeriod(get().period, delta) }),
 
-  goToCurrent: () => set({ period: periodFor(get().period.unit) }),
+  goToCurrent: () => set({ period: periodFor(get().period.unit, new Date(), get().weekStartsOn) }),
 
   isCurrent: () => isCurrentPeriod(get().period),
+
+  setWeekStartsOn: (day) => {
+    const weekStartsOn = Number.isInteger(day) && day >= 0 && day <= 6 ? day : 1;
+    const current = get().period;
+    const anchor = isCurrentPeriod(current) ? new Date() : current.start;
+    set({ weekStartsOn, period: periodFor(current.unit, anchor, weekStartsOn) });
+  },
 }));

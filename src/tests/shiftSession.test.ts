@@ -73,6 +73,21 @@ describe('A shift is the cashier session', () => {
     expect(second.id).not.toBe(first.id);
     expect(useShiftStore.getState().currentShift?.cashierId).toBe('u-bola');
   });
+
+  it('closes without a handover form and lets a manager record variance later', async () => {
+    const shift = await useShiftStore.getState().openShift(0, ada.name, ada.id);
+    await useTicketStore.getState().createAndPrintTicket(2000, ada.id);
+    await useShiftStore.getState().closeShift();
+    let saved = (await dbService.getShifts()).find((row) => row.id === shift.id)!;
+    expect(saved.reconciliationPending).toBe(true);
+    expect(saved.expectedCash).toBe(2000);
+
+    useAuthStore.setState({ activeUser: { ...ada, id: 'admin-1', role: 'admin' }, hasAdminAuthority: true });
+    await useShiftStore.getState().reconcileClosedShift(shift.id, 1750);
+    saved = (await dbService.getShifts()).find((row) => row.id === shift.id)!;
+    expect(saved.reconciliationPending).toBe(false);
+    expect(saved.variance).toBe(-250);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

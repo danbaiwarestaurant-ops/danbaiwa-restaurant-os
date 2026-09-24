@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { DollarSign, X, Droplet, Flame, SprayCan, ShoppingBasket, MoreHorizontal } from 'lucide-react';
+import { DollarSign, X } from 'lucide-react';
 import { useExpenseStore } from '../../store/useExpenseStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useDeviceStore } from '../../store/useDeviceStore';
@@ -14,11 +14,17 @@ import { formatCurrency } from '../../utils/currency';
  * the escape hatch, not a default.
  */
 const CATEGORIES = [
-  { value: 'Water', label: 'Water', Icon: Droplet },
-  { value: 'Gas', label: 'Gas', Icon: Flame },
-  { value: 'Detergent', label: 'Detergent', Icon: SprayCan },
-  { value: 'Groceries', label: 'Groceries', Icon: ShoppingBasket },
-  { value: 'Other', label: 'Other', Icon: MoreHorizontal },
+  { value: 'Ruwa', label: 'Ruwa (Water)' },
+  { value: 'Gas', label: 'Gas' },
+  { value: 'Groceries', label: 'Groceries' },
+  { value: 'Kayan miya', label: 'Kayan miya' },
+  { value: 'Dan Dako', label: 'Dan Dako' },
+  { value: 'Butter', label: 'Butter' },
+  { value: 'Macaroni', label: 'Macaroni' },
+  { value: 'Baking powder', label: 'Baking powder' },
+  { value: 'Egg', label: 'Egg' },
+  { value: 'Manager', label: 'Manager' },
+  { value: 'Kitchen', label: 'Kitchen' },
 ] as const;
 
 interface ExpenseLoggerModalProps {
@@ -32,7 +38,6 @@ export const ExpenseLoggerModal: React.FC<ExpenseLoggerModalProps> = ({ isOpen, 
   // Nothing preselected. The dropdown defaulted to "Supplies", so anything submitted
   // without touching it was filed under a category nobody had actually chosen.
   const [category, setCategory] = useState('');
-  const [description, setDescription] = useState('');
   const { logExpense } = useExpenseStore();
   const { openPinModal } = useAuthStore();
   const { config } = useDeviceStore();
@@ -42,7 +47,7 @@ export const ExpenseLoggerModal: React.FC<ExpenseLoggerModalProps> = ({ isOpen, 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const amt = parseFloat(amount);
-    if (!amt || amt <= 0 || !category || !description.trim()) return;
+    if (!amt || amt <= 0 || !category) return;
 
     // The payout is recorded as approved the moment it is entered, so the PIN is what
     // stands in for a manager's signature: the cashier is putting their own name to money
@@ -52,13 +57,12 @@ export const ExpenseLoggerModal: React.FC<ExpenseLoggerModalProps> = ({ isOpen, 
       async (verified) => {
         if (!verified) return;
 
-        await logExpense(amt, category, description.trim());
+        await logExpense(amt, category, category);
         onSuccess(
           `Expense ${formatCurrency(amt, config.currencySymbol || '₦')} recorded against your shift — deducted from expected cash`
         );
         setAmount('');
         setCategory('');
-        setDescription('');
         onClose();
       },
       'cashier'
@@ -103,7 +107,7 @@ export const ExpenseLoggerModal: React.FC<ExpenseLoggerModalProps> = ({ isOpen, 
                 scroll and a pick for what is nearly always one of four things. These are
                 one tap, and the chosen one is readable across the counter. */}
             <div className="grid grid-cols-3 gap-2">
-              {CATEGORIES.map(({ value, label, Icon }) => {
+              {CATEGORIES.map(({ value, label }) => {
                 const active = category === value;
                 return (
                   <button
@@ -116,26 +120,11 @@ export const ExpenseLoggerModal: React.FC<ExpenseLoggerModalProps> = ({ isOpen, 
                         : 'bg-white border-slate-300 text-slate-600 hover:border-amber-400 hover:bg-amber-50'
                     }`}
                   >
-                    <Icon className="w-5 h-5" />
                     <span className="text-[11px] font-black uppercase tracking-wide">{label}</span>
                   </button>
                 );
               })}
             </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
-              Description / Notes
-            </label>
-            <textarea
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              placeholder="Detail reason for cash payout"
-              className="w-full p-2.5 border-2 border-slate-300 rounded-none text-sm text-slate-800 focus:border-amber-500 focus:outline-none"
-              rows={3}
-              required
-            />
           </div>
 
           {/* Says what confirming actually does. The payout counts against the drawer from
@@ -155,7 +144,7 @@ export const ExpenseLoggerModal: React.FC<ExpenseLoggerModalProps> = ({ isOpen, 
             </button>
             <button
               type="submit"
-              disabled={!amount || !category || !description.trim()}
+              disabled={!amount || !category}
               className="px-4 py-2 text-xs font-black uppercase bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-none border border-amber-600 shadow-xs"
             >
               Confirm With PIN

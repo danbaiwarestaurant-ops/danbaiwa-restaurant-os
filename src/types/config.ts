@@ -6,6 +6,13 @@ export interface DeviceConfig {
   businessName: string;
   currencySymbol: string;
   presetAmounts: number[];
+  /** Weekly staff-meal checklist. Base food may be free; extras carry wage charges. */
+  staffMealOptions?: Array<{ id: string; name: string; wageCharge: number; isFree: boolean }>;
+  penaltyRules?: Array<{ id: string; label: string; fixedFee: number }>;
+  /** Manager-configured fixed bonuses selected during a staff assessment. */
+  performanceRewardRules?: Array<{ id: string; label: string; fixedAmount: number }>;
+  /** JavaScript weekday number: Sunday 0 through Saturday 6. */
+  weekStartsOn?: number;
   /**
    * Thermal roll width in millimetres — 58 or 80.
    *

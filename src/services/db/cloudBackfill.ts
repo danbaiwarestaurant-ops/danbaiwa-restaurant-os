@@ -34,6 +34,12 @@ const BACKFILL_TABLES: { pg: SyncablePgTable; dexie: SyncableDexieTable }[] = [
   // No foreign key of its own — a server's count references a user row, not a shift — so
   // its position here only has to be after users.
   { pg: 'server_sales', dexie: 'serverSales' },
+  { pg: 'role_pay_configs', dexie: 'rolePayConfigs' },
+  { pg: 'staff_assessments', dexie: 'staffAssessments' },
+  { pg: 'wage_ledger', dexie: 'wageLedger' },
+  { pg: 'inventory_items', dexie: 'inventoryItems' },
+  { pg: 'inventory_batches', dexie: 'inventoryBatches' },
+  { pg: 'inventory_movements', dexie: 'inventoryMovements' },
   { pg: 'audit_logs', dexie: 'auditLogs' },
 ];
 

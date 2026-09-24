@@ -21,6 +21,8 @@ import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
+import { RolePayConfig, StaffAssessment, WageLedgerEntry } from '../../types/workforce';
+import { InventoryBatch, InventoryItem, InventoryMovement } from '../../types/inventory';
 import { db, UserRow, AuditLogRow, computeLoginKeys, stripUserRow } from './dexieSchema';
 import { isLocalDataEmpty, restoreFromCloud } from './cloudBackup';
 
@@ -82,6 +84,18 @@ export class IndexedDbService implements IDbService {
           businessName: 'Danbaiwa Restraunt',
           currencySymbol: '₦',
           presetAmounts: [200, 300, 400, 500, 1000],
+          staffMealOptions: [
+            { id: 'food', name: 'Food', wageCharge: 500, isFree: true },
+            { id: 'meat', name: 'Meat', wageCharge: 500, isFree: false },
+            { id: 'fish', name: 'Fish', wageCharge: 500, isFree: false },
+            { id: 'egg', name: 'Egg', wageCharge: 200, isFree: false },
+          ],
+          penaltyRules: [
+            { id: 'son-zuciya', label: 'Son zuciya', fixedFee: 0 },
+            { id: 'punctuality', label: 'Punctuality', fixedFee: 0 },
+            { id: 'cleanliness', label: 'Cleanliness', fixedFee: 0 },
+            { id: 'customer-engagement', label: 'Customer Engagement', fixedFee: 0 },
+          ],
           isConfigured: true,
         };
         await db.config.put({ key: DEFAULT_CONFIG_KEY, value: defaultConfig });
@@ -232,14 +246,16 @@ export class IndexedDbService implements IDbService {
   }
 
   /** How much history a staff account owns, per table. All zero means nothing is lost by deleting it. */
-  async countRecordsForUser(userId: string): Promise<{ tickets: number; shifts: number; expenses: number; auditLogs: number }> {
-    const [tickets, shifts, expenses, auditLogs] = await Promise.all([
-      db.tickets.where('cashierId').equals(userId).count(),
+  async countRecordsForUser(userId: string): Promise<{ tickets: number; shifts: number; expenses: number; assessments: number; wageLedger: number; auditLogs: number }> {
+    const [tickets, shifts, expenses, assessments, wageLedger, auditLogs] = await Promise.all([
+      db.tickets.filter((ticket) => ticket.cashierId === userId || ticket.staffId === userId).count(),
       db.shifts.where('cashierId').equals(userId).count(),
       db.expenses.where('cashierId').equals(userId).count(),
+      db.staffAssessments.where('staffId').equals(userId).count(),
+      db.wageLedger.where('staffId').equals(userId).count(),
       db.auditLogs.where('actorId').equals(userId).count(),
     ]);
-    return { tickets, shifts, expenses, auditLogs };
+    return { tickets, shifts, expenses, assessments, wageLedger, auditLogs };
   }
 
   // ─── Tickets ─────────────────────────────────────────────────────────────
@@ -258,6 +274,23 @@ export class IndexedDbService implements IDbService {
       const existing = await db.tickets.get(ticket.id);
       if (!existing) await db.tickets.add(stamped);
       await db.outbox.add(queueOutboxRow('tickets', 'INSERT', stamped));
+    });
+  }
+
+  async saveStaffMealTicket(ticket: Ticket, wageEntry?: WageLedgerEntry): Promise<void> {
+    const now = new Date().toISOString();
+    const stampedTicket = { ...ticket, updatedAt: now };
+    await db.transaction('rw', db.tickets, db.wageLedger, db.outbox, db.auditLogs, async () => {
+      if (!(await db.tickets.get(ticket.id))) await db.tickets.add(stampedTicket);
+      await db.outbox.add(queueOutboxRow('tickets', 'INSERT', stampedTicket));
+      if (wageEntry) {
+        const stampedEntry = { ...wageEntry, updatedAt: now };
+        await db.wageLedger.add(stampedEntry);
+        await db.outbox.add(queueOutboxRow('wage_ledger', 'INSERT', stampedEntry));
+        const audit = auditLogRow({ entity: 'staff_meal', entityId: ticket.id, action: 'MEAL_WAGE_DEDUCTION', actorId: wageEntry.recordedBy, reason: `${wageEntry.staffName}: ${wageEntry.amount}. ${wageEntry.note}`, timestamp: now });
+        await db.auditLogs.add(audit);
+        await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
+      }
     });
   }
 
@@ -356,12 +389,24 @@ export class IndexedDbService implements IDbService {
     });
   }
 
-  async closeShift(shiftId: string, countedCash: number, expectedCash: number, variance: number, notes?: string): Promise<void> {
+  async closeShift(shiftId: string, countedCash: number, expectedCash: number, variance: number, notes?: string, reconciliationPending = false): Promise<void> {
     const now = new Date().toISOString();
     await db.transaction('rw', db.shifts, db.outbox, async () => {
-      await db.shifts.update(shiftId, { status: 'closed', closedAt: now, countedCash, expectedCash, variance, notes, updatedAt: now });
+      await db.shifts.update(shiftId, { status: 'closed', closedAt: now, countedCash, expectedCash, variance, notes, reconciliationPending, updatedAt: now });
       const updated = await db.shifts.get(shiftId);
       if (updated) await db.outbox.add(queueOutboxRow('shifts', 'UPDATE', updated));
+    });
+  }
+
+  async updateShiftReconciliation(shiftId: string, countedCash: number, expectedCash: number, variance: number, actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await db.transaction('rw', db.shifts, db.outbox, db.auditLogs, async () => {
+      await db.shifts.update(shiftId, { countedCash, expectedCash, variance, reconciliationPending: false, acknowledgedByManager: actorId, updatedAt: now });
+      const updated = await db.shifts.get(shiftId);
+      if (updated) await db.outbox.add(queueOutboxRow('shifts', 'UPDATE', updated));
+      const audit = auditLogRow({ entity: 'shift', entityId: shiftId, action: 'RECONCILE_SHIFT', actorId, reason: `Counted ${countedCash}; variance ${variance}`, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
     });
   }
 
@@ -446,6 +491,129 @@ export class IndexedDbService implements IDbService {
       await db.serverSales.delete(entryId);
       // The cloud copy has to go too, or the next reconciliation pull puts it straight back.
       await db.outbox.add(queueOutboxRow('server_sales', 'DELETE', { id: entryId }));
+    });
+  }
+
+  // Workforce performance and wage ledger
+  async getRolePayConfigs(): Promise<RolePayConfig[]> {
+    return db.rolePayConfigs.toArray();
+  }
+
+  async saveRolePayConfig(config: RolePayConfig, actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    const stamped = { ...config, updatedAt: now };
+    await db.transaction('rw', db.rolePayConfigs, db.outbox, db.auditLogs, async () => {
+      await db.rolePayConfigs.put(stamped);
+      await db.outbox.add(queueOutboxRow('role_pay_configs', 'UPDATE', stamped));
+      const audit = auditLogRow({ entity: 'pay_config', entityId: config.id, action: 'UPDATE_PAY_CONFIG', actorId, reason: `${config.metricLabel}: ${config.nairaPerUnit}/unit reward`, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
+    });
+  }
+
+  async getStaffAssessments(from?: string, to?: string): Promise<StaffAssessment[]> {
+    const rows = from && to
+      ? await db.staffAssessments.where('businessDay').between(from, to, true, true).toArray()
+      : await db.staffAssessments.toArray();
+    return rows.sort((a, b) => b.businessDay.localeCompare(a.businessDay) || a.staffName.localeCompare(b.staffName));
+  }
+
+  async saveStaffAssessment(assessment: StaffAssessment, actorId: string, reason: string): Promise<void> {
+    const now = new Date().toISOString();
+    const stamped = { ...assessment, updatedAt: now };
+    await db.transaction('rw', db.staffAssessments, db.outbox, db.auditLogs, async () => {
+      const previous = await db.staffAssessments.get(assessment.id);
+      await db.staffAssessments.put(stamped);
+      await db.outbox.add(queueOutboxRow('staff_assessments', previous ? 'UPDATE' : 'INSERT', stamped));
+      const action = assessment.status === 'finalized' && previous?.status !== 'finalized'
+        ? 'FINALIZE_ASSESSMENT'
+        : previous?.status === 'finalized' && assessment.status === 'draft'
+          ? 'REOPEN_ASSESSMENT'
+          : previous ? 'UPDATE_ASSESSMENT' : 'CREATE_ASSESSMENT';
+      const audit = auditLogRow({ entity: 'staff_assessment', entityId: assessment.id, action, actorId, reason, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
+    });
+  }
+
+  async getWageLedger(from?: string, to?: string): Promise<WageLedgerEntry[]> {
+    const rows = from && to
+      ? await db.wageLedger.where('businessDay').between(from, to, true, true).toArray()
+      : await db.wageLedger.toArray();
+    return rows.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+  }
+
+  async saveWageLedgerEntry(entry: WageLedgerEntry, actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    const stamped = { ...entry, updatedAt: now };
+    await db.transaction('rw', db.wageLedger, db.outbox, db.auditLogs, async () => {
+      await db.wageLedger.add(stamped);
+      await db.outbox.add(queueOutboxRow('wage_ledger', 'INSERT', stamped));
+      const audit = auditLogRow({ entity: 'wage_ledger', entityId: entry.id, action: entry.kind.toUpperCase(), actorId, reason: `${entry.staffName}: ${entry.amount}. ${entry.note}`, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
+    });
+  }
+
+  // FIFO ingredient inventory
+  async getInventoryItems(): Promise<InventoryItem[]> {
+    return (await db.inventoryItems.toArray()).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async saveInventoryItem(item: InventoryItem, actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    const stamped = { ...item, updatedAt: now };
+    await db.transaction('rw', db.inventoryItems, db.outbox, db.auditLogs, async () => {
+      const previous = await db.inventoryItems.get(item.id);
+      await db.inventoryItems.put(stamped);
+      await db.outbox.add(queueOutboxRow('inventory_items', previous ? 'UPDATE' : 'INSERT', stamped));
+      const audit = auditLogRow({ entity: 'inventory_item', entityId: item.id, action: previous ? 'UPDATE_ITEM' : 'CREATE_ITEM', actorId, reason: `${item.name}; reorder at ${item.reorderLevel} ${item.baseUnit}`, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
+    });
+  }
+
+  async getInventoryBatches(itemId?: string): Promise<InventoryBatch[]> {
+    const rows = itemId ? await db.inventoryBatches.where('itemId').equals(itemId).toArray() : await db.inventoryBatches.toArray();
+    return rows.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+  }
+
+  async getInventoryMovements(from?: string, to?: string): Promise<InventoryMovement[]> {
+    const rows = from && to
+      ? await db.inventoryMovements.where('businessDay').between(from, to, true, true).toArray()
+      : await db.inventoryMovements.toArray();
+    return rows.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+  }
+
+  async receiveInventory(batch: InventoryBatch, movement: InventoryMovement, actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    const stampedBatch = { ...batch, updatedAt: now };
+    const stampedMovement = { ...movement, updatedAt: now };
+    await db.transaction('rw', db.inventoryBatches, db.inventoryMovements, db.outbox, db.auditLogs, async () => {
+      await db.inventoryBatches.add(stampedBatch);
+      await db.inventoryMovements.add(stampedMovement);
+      await db.outbox.add(queueOutboxRow('inventory_batches', 'INSERT', stampedBatch));
+      await db.outbox.add(queueOutboxRow('inventory_movements', 'INSERT', stampedMovement));
+      const audit = auditLogRow({ entity: 'inventory', entityId: movement.id, action: movement.type === 'count_adjustment' ? 'COUNT_ADJUSTMENT' : 'RECEIVE_STOCK', actorId, reason: `${movement.itemName}: +${movement.quantityBase}`, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
+    });
+  }
+
+  async issueInventory(movement: InventoryMovement, updatedBatches: InventoryBatch[], actorId: string): Promise<void> {
+    const now = new Date().toISOString();
+    const stampedMovement = { ...movement, updatedAt: now };
+    await db.transaction('rw', db.inventoryBatches, db.inventoryMovements, db.outbox, db.auditLogs, async () => {
+      for (const batch of updatedBatches) {
+        const stamped = { ...batch, updatedAt: now };
+        await db.inventoryBatches.put(stamped);
+        await db.outbox.add(queueOutboxRow('inventory_batches', 'UPDATE', stamped));
+      }
+      await db.inventoryMovements.add(stampedMovement);
+      await db.outbox.add(queueOutboxRow('inventory_movements', 'INSERT', stampedMovement));
+      const audit = auditLogRow({ entity: 'inventory', entityId: movement.id, action: movement.type.toUpperCase(), actorId, reason: `${movement.itemName}: ${movement.quantityBase}. ${movement.note || ''}`, timestamp: now });
+      await db.auditLogs.add(audit);
+      await db.outbox.add(queueOutboxRow('audit_logs', 'INSERT', audit));
     });
   }
 

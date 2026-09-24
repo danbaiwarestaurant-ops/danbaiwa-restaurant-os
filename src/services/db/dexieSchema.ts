@@ -14,6 +14,8 @@ import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
 import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
+import { RolePayConfig, StaffAssessment, WageLedgerEntry } from '../../types/workforce';
+import { InventoryBatch, InventoryItem, InventoryMovement } from '../../types/inventory';
 
 /** Storage-only row shape: UserAccount plus a derived, indexable lookup array that
  *  powers getUserByEmail's case-insensitive match across both the email and
@@ -70,6 +72,12 @@ export class TicketPosDB extends Dexie {
   serverSales!: Table<ServerSalesEntry, string>;
   outbox!: Table<OutboxItem, string>;
   auditLogs!: Table<AuditLogRow, string>;
+  rolePayConfigs!: Table<RolePayConfig, string>;
+  staffAssessments!: Table<StaffAssessment, string>;
+  wageLedger!: Table<WageLedgerEntry, string>;
+  inventoryItems!: Table<InventoryItem, string>;
+  inventoryBatches!: Table<InventoryBatch, string>;
+  inventoryMovements!: Table<InventoryMovement, string>;
 
   constructor() {
     super('ticket_pos_dexie_v1');
@@ -93,6 +101,14 @@ export class TicketPosDB extends Dexie {
       // count for this person today?" lookup an index hit rather than a table scan.
       serverSales: 'id, businessDay, serverId, [businessDay+serverId]',
     });
+    this.version(3).stores({
+      rolePayConfigs: 'id, role, updatedAt',
+      staffAssessments: 'id, businessDay, staffId, status, [businessDay+staffId]',
+      wageLedger: 'id, businessDay, staffId, kind',
+      inventoryItems: 'id, name, active, updatedAt',
+      inventoryBatches: 'id, itemId, receivedAt, expiryDate',
+      inventoryMovements: 'id, itemId, businessDay, type, recordedAt',
+    });
   }
 }
 
@@ -108,6 +124,12 @@ export const TABLE_NAMES = [
   'serverSales',
   'outbox',
   'auditLogs',
+  'rolePayConfigs',
+  'staffAssessments',
+  'wageLedger',
+  'inventoryItems',
+  'inventoryBatches',
+  'inventoryMovements',
 ] as const;
 
 export type TableName = (typeof TABLE_NAMES)[number];

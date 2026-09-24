@@ -18,6 +18,7 @@ export const SettingsView: React.FC = () => {
   const [deviceId, setDeviceId] = useState(config.deviceId);
   const [currencySymbol, setCurrencySymbol] = useState(config.currencySymbol);
   const [presets, setPresets] = useState(config.presetAmounts.join(', '));
+  const [weekStartsOn, setWeekStartsOn] = useState(String(config.weekStartsOn ?? 1));
   const [saved, setSaved] = useState(false);
 
   const handleSave = async (e: React.FormEvent) => {
@@ -34,6 +35,7 @@ export const SettingsView: React.FC = () => {
       deviceId,
       currencySymbol,
       presetAmounts: parsed.length > 0 ? parsed : config.presetAmounts,
+      weekStartsOn: Number(weekStartsOn),
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
@@ -74,6 +76,12 @@ export const SettingsView: React.FC = () => {
             <div>
               <label className={label}>Preset Amounts (comma separated)</label>
               <input className={field} value={presets} onChange={(e) => setPresets(e.target.value)} />
+            </div>
+            <div>
+              <label className={label}>Starting day of week</label>
+              <select aria-label="Starting day of week" className={field} value={weekStartsOn} onChange={(e) => setWeekStartsOn(e.target.value)}>
+                {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((name, day) => <option key={name} value={day}>{name}</option>)}
+              </select>
             </div>
           </div>
 

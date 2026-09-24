@@ -19,7 +19,8 @@ interface ShiftState {
   loadShift: (userId?: string) => Promise<void>;
   loadShiftHistory: () => Promise<void>;
   openShift: (openingFloat?: number, cashierName?: string, cashierId?: string) => Promise<Shift>;
-  closeShift: (countedCash: number, notes?: string) => Promise<Shift>;
+  closeShift: (countedCash?: number, notes?: string) => Promise<Shift>;
+  reconcileClosedShift: (shiftId: string, countedCash: number) => Promise<void>;
 }
 
 export const useShiftStore = create<ShiftState>((set, get) => ({
@@ -76,7 +77,7 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     return newShift;
   },
 
-  closeShift: async (countedCash: number, notes?: string) => {
+  closeShift: async (countedCash?: number, notes?: string) => {
     const shift = get().currentShift;
     if (!shift) throw new Error('No active shift to close');
 
@@ -97,9 +98,11 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     const expenses = await dbService.getExpenses(shift.id);
     const approvedExpenses = expenses.filter(e => e.status === 'approved').reduce((sum, e) => sum + e.amount, 0);
 
-    const recon = calculateShiftReconciliation(shift.openingFloat, totalCashTickets, approvedExpenses, countedCash);
+    const expected = calculateShiftReconciliation(shift.openingFloat, totalCashTickets, approvedExpenses, 0).expectedCash;
+    const pending = countedCash === undefined;
+    const recon = calculateShiftReconciliation(shift.openingFloat, totalCashTickets, approvedExpenses, pending ? expected : countedCash);
 
-    await dbService.closeShift(shift.id, recon.countedCash, recon.expectedCash, recon.variance, notes);
+    await dbService.closeShift(shift.id, recon.countedCash, recon.expectedCash, recon.variance, notes, pending);
 
     set({ currentShift: null });
     // Scoped to the cashier who owned it — an unscoped reload could pick up a *different*
@@ -117,7 +120,19 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
       countedCash: recon.countedCash,
       expectedCash: recon.expectedCash,
       variance: recon.variance,
+      reconciliationPending: pending,
       notes,
     };
+  },
+
+  reconcileClosedShift: async (shiftId, countedCash) => {
+    useAuthStore.getState().assertAdminRole();
+    const shift = get().shiftHistory.find((row) => row.id === shiftId && row.status === 'closed');
+    if (!shift) throw new Error('Closed shift not found.');
+    if (!Number.isFinite(countedCash) || countedCash < 0) throw new Error('Enter a valid physical cash count.');
+    const expected = shift.expectedCash || 0;
+    await dbService.updateShiftReconciliation(shiftId, countedCash, expected, countedCash - expected, useAuthStore.getState().activeUser?.id || 'ADMIN');
+    await get().loadShiftHistory();
+    void useSyncStore.getState().checkOutbox().then(() => useSyncStore.getState().triggerSyncWorker());
   },
 }));

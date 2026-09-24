@@ -23,10 +23,16 @@ export type SyncablePgTable =
   | 'shifts'
   | 'expenses'
   | 'server_sales'
+  | 'role_pay_configs'
+  | 'staff_assessments'
+  | 'wage_ledger'
+  | 'inventory_items'
+  | 'inventory_batches'
+  | 'inventory_movements'
   | 'audit_logs';
 
 /** The Dexie table each Postgres table lands in. */
-export type SyncableDexieTable = 'users' | 'tickets' | 'shifts' | 'expenses' | 'serverSales' | 'auditLogs';
+export type SyncableDexieTable = 'users' | 'tickets' | 'shifts' | 'expenses' | 'serverSales' | 'rolePayConfigs' | 'staffAssessments' | 'wageLedger' | 'inventoryItems' | 'inventoryBatches' | 'inventoryMovements' | 'auditLogs';
 
 const DEXIE_TABLE: Record<SyncablePgTable, SyncableDexieTable> = {
   users: 'users',
@@ -34,6 +40,12 @@ const DEXIE_TABLE: Record<SyncablePgTable, SyncableDexieTable> = {
   shifts: 'shifts',
   expenses: 'expenses',
   server_sales: 'serverSales',
+  role_pay_configs: 'rolePayConfigs',
+  staff_assessments: 'staffAssessments',
+  wage_ledger: 'wageLedger',
+  inventory_items: 'inventoryItems',
+  inventory_batches: 'inventoryBatches',
+  inventory_movements: 'inventoryMovements',
   audit_logs: 'auditLogs',
 };
 

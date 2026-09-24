@@ -40,6 +40,12 @@ describe('periodFor', () => {
     expect(periodFor('week', monday).start.getDate()).toBe(24);
   });
 
+  it('uses the manager-configured starting day for weekly reports', () => {
+    const wednesday = new Date(2026, 7, 26);
+    expect(periodFor('week', wednesday, 0).start.getDay()).toBe(0);
+    expect(periodFor('week', wednesday, 6).start.getDay()).toBe(6);
+  });
+
   it('spans exactly the calendar month, including a leap February', () => {
     const p = periodFor('month', new Date(2028, 1, 15));
     expect(p.start.getDate()).toBe(1);

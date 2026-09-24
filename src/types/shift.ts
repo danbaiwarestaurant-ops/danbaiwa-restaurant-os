@@ -13,6 +13,7 @@ export interface Shift {
   expectedCash?: number;
   countedCash?: number;
   variance?: number; // countedCash - expectedCash
+  reconciliationPending?: boolean;
   acknowledgedByManager?: string;
   notes?: string;
   /** Owning account: the admin's Supabase auth user id, and the tenant key the

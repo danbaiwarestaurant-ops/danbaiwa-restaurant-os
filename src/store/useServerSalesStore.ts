@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { ServerSalesEntry, serverSalesId } from '../types/serverSales';
+import { ServerItemSales, ServerSalesEntry, serverSalesId } from '../types/serverSales';
+import { serverCollectionVariance, serverProfitContribution, totalServerPerformance } from '../utils/serverPerformance';
 import { dbService } from '../services/db/IndexedDbService';
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';
@@ -30,6 +31,13 @@ interface ServerSalesState {
     businessDay: string;
     ticketCount: number;
     note?: string;
+  }) => Promise<ServerSalesEntry>;
+  recordPerformance: (input: {
+    serverId: string;
+    serverName: string;
+    businessDay: string;
+    itemVolumes: ServerItemSales[];
+    moneyGathered: number;
   }) => Promise<ServerSalesEntry>;
   removeCount: (entryId: string) => Promise<void>;
   /** This day's entries, keyed by server id — what the entry form fills itself from. */
@@ -79,6 +87,34 @@ export const useServerSalesStore = create<ServerSalesState>((set, get) => ({
       useSyncStore.getState().triggerSyncWorker();
     });
 
+    return entry;
+  },
+
+  recordPerformance: async ({ serverId, serverName, businessDay, itemVolumes, moneyGathered }) => {
+    const actor = useAuthStore.getState().activeUser;
+    useAuthStore.getState().assertAdminRole();
+    const cleanItems = itemVolumes.filter((item) => item.quantity > 0);
+    const totals = totalServerPerformance(cleanItems);
+    const cleanMoneyGathered = Math.max(0, Number(moneyGathered) || 0);
+    const entry: ServerSalesEntry = {
+      id: serverSalesId(businessDay, serverId),
+      serverId,
+      serverName,
+      businessDay,
+      ticketCount: 0,
+      itemVolumes: cleanItems,
+      ...totals,
+      moneyGathered: cleanMoneyGathered,
+      variance: serverCollectionVariance(totals.expectedSalesValue, cleanMoneyGathered),
+      actualProfitContribution: serverProfitContribution(totals.totalCost, cleanMoneyGathered),
+      recordedBy: actor?.id || 'ADMIN',
+      recordedByName: actor?.name,
+      recordedAt: new Date().toISOString(),
+    };
+    await dbService.init();
+    await dbService.saveServerSales(entry);
+    set({ entries: [entry, ...get().entries.filter((e) => e.id !== entry.id)] });
+    void useSyncStore.getState().checkOutbox().then(() => useSyncStore.getState().triggerSyncWorker());
     return entry;
   },
 

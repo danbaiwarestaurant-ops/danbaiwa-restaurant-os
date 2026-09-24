@@ -13,7 +13,7 @@ import { ScrollText } from 'lucide-react';
 const PAGE_SIZE = 12;
 
 export const ReconciliationView: React.FC = () => {
-  const { shiftHistory, loadShiftHistory } = useShiftStore();
+  const { shiftHistory, loadShiftHistory, reconcileClosedShift } = useShiftStore();
   const { tickets } = useTicketStore();
   const { config } = useDeviceStore();
   const { period } = useConsolePeriodStore();
@@ -56,6 +56,7 @@ export const ReconciliationView: React.FC = () => {
   const totalTransfer = rows.reduce((sum, v) => sum + v.transfer, 0);
 
   const closed = shifts.filter((s) => s.status === 'closed');
+  const pendingCounts = closed.filter((s) => s.reconciliationPending);
   const flagged = closed.filter((s) => Math.abs(s.variance ?? 0) > 0.01);
   const totalVariance = closed.reduce((sum, s) => sum + (s.variance ?? 0), 0);
 
@@ -71,6 +72,7 @@ export const ReconciliationView: React.FC = () => {
         stats={[
           { label: 'Shifts Closed', value: String(closed.length) },
           { label: 'With Variance', value: String(flagged.length) },
+          { label: 'Awaiting Count', value: String(pendingCounts.length) },
           { label: 'Net Variance', value: formatCurrency(totalVariance, currency) },
           { label: 'Still Open', value: String(shifts.length - closed.length) },
           { label: 'Cash Sales', value: formatCurrency(totalCash, currency) },
@@ -96,8 +98,9 @@ export const ReconciliationView: React.FC = () => {
               'Counted',
               'Variance',
               'Status',
+              'Action',
             ]}
-            alignRight={[3, 4, 5, 6, 7, 8, 9]}
+            alignRight={[3, 4, 5, 6, 7, 8, 9, 10]}
           >
             {visible.map((s) => {
               const isOpen = s.status === 'open';
@@ -139,20 +142,21 @@ export const ReconciliationView: React.FC = () => {
                     {isOpen ? '—' : formatCurrency(s.expectedCash ?? 0, currency)}
                   </td>
                   <td className="py-2.5 pr-3 text-right font-mono tabular-nums">
-                    {isOpen ? '—' : formatCurrency(s.countedCash ?? 0, currency)}
+                    {isOpen ? '—' : s.reconciliationPending ? 'Pending' : formatCurrency(s.countedCash ?? 0, currency)}
                   </td>
                   <td
                     className={`py-2.5 pr-3 text-right font-mono font-bold tabular-nums ${
                       flaggedRow ? 'text-rose-600' : 'text-slate-700'
                     }`}
                   >
-                    {isOpen ? '—' : formatCurrency(variance, currency)}
+                    {isOpen || s.reconciliationPending ? '—' : formatCurrency(variance, currency)}
                   </td>
                   <td className="py-2.5 text-right">
-                    <StatusBadge tone={isOpen ? 'warn' : flaggedRow ? 'danger' : 'ok'}>
-                      {isOpen ? 'Open' : flaggedRow ? 'Variance' : 'Balanced'}
+                    <StatusBadge tone={isOpen || s.reconciliationPending ? 'warn' : flaggedRow ? 'danger' : 'ok'}>
+                      {isOpen ? 'Open' : s.reconciliationPending ? 'Awaiting count' : flaggedRow ? 'Variance' : 'Balanced'}
                     </StatusBadge>
                   </td>
+                  <td className="py-2.5 text-right">{!isOpen && <button onClick={() => { const value = window.prompt(`Physical cash counted for ${s.cashierName}`, s.reconciliationPending ? '' : String(s.countedCash ?? '')); if (value !== null && value.trim() !== '') void reconcileClosedShift(s.id, Number(value)); }} className="px-2 py-1 border border-slate-300 bg-white hover:bg-amber-50 text-[10px] font-black uppercase">{s.reconciliationPending ? 'Enter count' : 'Correct count'}</button>}</td>
                 </tr>
               );
             })}

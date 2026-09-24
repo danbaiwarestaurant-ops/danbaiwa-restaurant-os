@@ -158,7 +158,7 @@ describe('countRecordsForUser', () => {
   it('reports zero for an account that has never recorded anything', async () => {
     await svc.saveUser(cashier());
     const counts = await svc.countRecordsForUser('cashier-1');
-    expect(counts).toEqual({ tickets: 0, shifts: 0, expenses: 0, auditLogs: 0 });
+    expect(counts).toEqual({ tickets: 0, shifts: 0, expenses: 0, assessments: 0, wageLedger: 0, auditLogs: 0 });
   });
 
   it('counts only that account’s records', async () => {
@@ -180,5 +180,11 @@ describe('countRecordsForUser', () => {
     expect(counts.tickets).toBe(1);
     expect(counts.shifts).toBe(1);
     expect(counts.expenses).toBe(0);
+  });
+
+  it('counts a staff-meal ticket against the employee who ate it', async () => {
+    await svc.saveTicket({ ...ticketBy('cashier-2'), id: 'meal-1', tender: 'staff', staffId: 'cashier-1', staffName: 'Amina Yusuf' });
+    const counts = await svc.countRecordsForUser('cashier-1');
+    expect(counts.tickets).toBe(1);
   });
 });

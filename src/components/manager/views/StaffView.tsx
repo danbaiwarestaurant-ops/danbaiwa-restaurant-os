@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTicketStore } from '../../../store/useTicketStore';
 import { useAuthStore } from '../../../store/useAuthStore';
 import { useDeviceStore } from '../../../store/useDeviceStore';
@@ -11,14 +11,18 @@ import { Panel, DataTable, EmptyState, StatusBadge } from '../ConsoleUI';
 import { StaffManagement } from '../StaffManagement';
 import { Users, UtensilsCrossed } from 'lucide-react';
 import { roleLabel, takesSales, countedManually } from '../../../utils/roles';
+import { StaffPayroll } from '../StaffPayroll';
+import { StaffPerformanceReport } from '../StaffPerformanceReport';
 
 export const StaffView: React.FC = () => {
+  const [section, setSection] = useState<'assessment' | 'performance' | 'wages' | 'balances' | 'team' | 'meals'>('assessment');
   const { tickets } = useTicketStore();
   const { users } = useAuthStore();
-  const { config } = useDeviceStore();
+  const { config, updateConfig } = useDeviceStore();
   const { period } = useConsolePeriodStore();
   const { entries: serverEntries, loadServerSales } = useServerSalesStore();
   const currency = config.currencySymbol || '₦';
+  const mealOptions = config.staffMealOptions || [];
 
   useEffect(() => {
     void loadServerSales();
@@ -43,7 +47,7 @@ export const StaffView: React.FC = () => {
     const totals: Record<string, number> = {};
     for (const e of serverEntries) {
       if (e.businessDay < from || e.businessDay > to) continue;
-      totals[e.serverId] = (totals[e.serverId] || 0) + e.ticketCount;
+      totals[e.serverId] = (totals[e.serverId] || 0) + (e.totalSalesUnits ?? e.ticketCount);
     }
     return totals;
   }, [serverEntries, period]);
@@ -67,15 +71,26 @@ export const StaffView: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      <div className="sticky top-[70px] z-10 bg-slate-100 border-b-2 border-slate-300 flex gap-0 overflow-x-auto" role="tablist" aria-label="Staff management sections">
+        {[
+          ['assessment', 'Daily performance'],
+          ['performance', 'Performance reports'],
+          ['wages', 'Wage configuration'],
+          ['balances', 'Balances & payments'],
+          ['team', 'Team & access'],
+          ['meals', 'Staff meals'],
+        ].map(([id, label]) => <button key={id} role="tab" aria-selected={section === id} onClick={() => setSection(id as typeof section)} className={`px-4 py-3 whitespace-nowrap border-x border-t-2 text-[11px] font-black uppercase tracking-wide ${section === id ? 'bg-white border-amber-500 text-slate-900 border-b-2 border-b-white -mb-0.5' : 'bg-slate-200 border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{label}</button>)}
+      </div>
       <Panel
         title="Staff Directory"
         subtitle={`Performance in ${period.label}. * marks a ticket count entered by a manager rather than rung up at the till.`}
         icon={Users}
+        className={section === 'team' ? '' : 'hidden'}
       >
         {users.length === 0 ? (
           <EmptyState>No staff accounts yet</EmptyState>
         ) : (
-          <DataTable headers={['Name', 'Role', 'Tickets', 'Revenue', 'Voids', 'Status']} alignRight={[2, 3, 4, 5]}>
+          <DataTable headers={['Name', 'Role', 'Tickets / sales units', 'Revenue', 'Voids', 'Status']} alignRight={[2, 3, 4, 5]}>
             {users.map((u) => {
               const r = rollupFor(u.id);
               // Kitchen and store staff never ring anything up, so a row of zeroes against
@@ -140,7 +155,12 @@ export const StaffView: React.FC = () => {
         title="Staff Meals"
         subtitle={`Meals issued to employees in ${period.label} — menu value, never counted as revenue`}
         icon={UtensilsCrossed}
+        className={section === 'meals' ? '' : 'hidden'}
       >
+        <div className="mb-4 border-2 border-slate-300 p-3">
+          <div className="flex items-center justify-between mb-2"><div><div className="text-xs font-black uppercase">Weekly meal checklist</div><div className="text-[10px] text-slate-500">Free items use the employee's daily allowance. Charged items always deduct from wages.</div></div><button onClick={() => void updateConfig({ staffMealOptions: [...mealOptions, { id: crypto.randomUUID(), name: 'New item', wageCharge: 0, isFree: false }] })} className="px-3 py-1.5 bg-slate-900 text-white text-[10px] font-black uppercase">Add option</button></div>
+          <div className="space-y-2">{mealOptions.map((option, index) => <div key={option.id} className="grid grid-cols-[1fr_8rem_6rem_2rem] gap-2 items-center"><input aria-label="Meal option name" value={option.name} onChange={(e) => { const next = [...mealOptions]; next[index] = { ...option, name: e.target.value }; void updateConfig({ staffMealOptions: next }); }} className="border-2 border-slate-300 p-2 text-xs" /><input aria-label={`${option.name} wage charge`} type="number" min="0" value={option.wageCharge} onChange={(e) => { const next = [...mealOptions]; next[index] = { ...option, wageCharge: Math.max(0, Number(e.target.value)) }; void updateConfig({ staffMealOptions: next }); }} className="border-2 border-slate-300 p-2 text-right text-xs font-mono" /><label className="text-[10px] font-black uppercase flex gap-1"><input type="checkbox" checked={option.isFree} onChange={(e) => { const next = [...mealOptions]; next[index] = { ...option, isFree: e.target.checked }; void updateConfig({ staffMealOptions: next }); }} />Allowance</label><button aria-label={`Remove ${option.name}`} onClick={() => void updateConfig({ staffMealOptions: mealOptions.filter((x) => x.id !== option.id) })} className="text-rose-700 font-black">×</button></div>)}</div>
+        </div>
         {meals.length === 0 ? (
           <EmptyState>No staff meals issued in this period</EmptyState>
         ) : (
@@ -170,7 +190,9 @@ export const StaffView: React.FC = () => {
       </Panel>
 
       {/* Existing component, unchanged — it already handles creation and PIN resets. */}
-      <StaffManagement />
+      {section === 'team' && <StaffManagement />}
+      {(section === 'assessment' || section === 'wages' || section === 'balances') && <StaffPayroll section={section} />}
+      {section === 'performance' && <StaffPerformanceReport />}
     </div>
   );
 };

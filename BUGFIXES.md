@@ -5,6 +5,108 @@ user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 
 ---
 
+## 2026-09-23 — PIN-only login was still blocked by the hidden legacy identity rule
+
+**What staff would have seen:** the screen said “Staff PIN,” but pressing Login did
+nothing unless the old email/staff-ID field was also populated.
+
+**Root cause:** the submit handler switched to PIN-only authentication, but the legacy
+identity input remained in the form as a required browser-validation field.
+
+**Fix:** once a local roster exists, the identity control is removed from the form and
+the PIN is the only required login input. Account restoration still uses identity plus
+secret on a device with no local roster.
+
+**Files:** `src/components/auth/AuthPage.tsx`.
+
+---
+
+## 2026-09-23 — Existing device settings hid new meal and penalty defaults
+
+**What the manager would have seen:** upgraded tills showed no default meal choices or
+penalty infractions even though a fresh in-memory configuration included them.
+
+**Root cause:** loading a saved device configuration replaced the whole default object.
+Older saved objects legitimately had none of the newly introduced fields.
+
+**Fix:** configuration loading now merges saved values over current defaults and fills
+only missing meal/penalty collections; first-boot IndexedDB defaults include them too.
+
+**Files:** `src/store/useDeviceStore.ts`, `src/services/db/IndexedDbService.ts`.
+
+---
+
+## 2026-09-23 — A free staff meal did not protect its employee from deletion
+
+**What the manager would have seen:** an employee with a free staff-meal ticket but no
+sales, shifts, assessments, or charged meals could still be permanently deleted. The meal
+record remained but lost the roster identity it belonged to.
+
+**Root cause:** the deletion guard counted tickets only where the employee was the
+cashier. Staff-meal tickets identify the person eating through `staffId` instead.
+
+**Fix:** ticket history now counts either relationship before permanent deletion is
+allowed.
+
+**Files:** `src/services/db/IndexedDbService.ts`.
+
+---
+
+## 2026-09-22 — Late auth refresh could report an unhandled storage error
+
+**What the user would have seen:** nothing in a normal browser, but automated regression
+runs could finish every assertion and still exit as failed when a delayed reconciliation
+refresh completed after the test storage shim had been removed.
+
+**Root cause:** the resumed-session lookup assumed `localStorage` was always present,
+including in non-browser runtimes and during test teardown.
+
+**Fix:** the lookup now treats an unavailable storage API as an empty resumed session.
+
+**Files:** `src/store/useAuthStore.ts`.
+
+---
+
+## 2026-09-22 — Saving a role wage rule could leave the old rule active locally
+
+**What the manager would have seen:** after changing a role's monetary reward, the save
+confirmation appeared but a later assessment could still use the earlier value until the
+page or another device refreshed.
+
+**Root cause:** cloud-safe wage-rule ids are `<account-id>_<role>`, but the Zustand update
+removed an existing row by comparing that composite id with the bare role name. The old
+and new versions could therefore coexist, and `configFor(role)` returned whichever came
+first.
+
+**Fix:** local replacement now removes by the stable `role` property before inserting the
+new configuration. The redesigned wage screen also refuses a zero monetary reward and
+the assessment path refuses to create unpaid performance accidentally.
+
+**Files:** `src/store/useWorkforceStore.ts`,
+`src/components/manager/StaffPayroll.tsx`.
+
+---
+
+## 2026-09-20 — Staff with wage history could still be permanently deleted
+
+**What the user would have seen:** after the performance-pay system was introduced, a
+manager could permanently delete a staff member who had assessments or wage-ledger
+entries but no tickets, shifts, expenses, or audit entries. The financial rows survived,
+but the roster identity they referred to disappeared.
+
+**Root cause:** the existing deletion guard counted only the record types that existed
+before payroll. The new `staff_assessments` and `wage_ledger` tables were not included in
+`countRecordsForUser`, its UI breakdown, or the aggregate deletion decision.
+
+**Fix:** staff-record counting now includes both payroll tables; the deletion dialog shows
+their counts; and deletion is refused whenever either contains history for that person.
+The regression test for an empty account was extended to pin the complete count shape.
+
+**Files:** `src/services/db/IndexedDbService.ts`, `src/store/useAuthStore.ts`,
+`src/components/manager/StaffManagement.tsx`, `src/tests/staffRoster.test.ts`.
+
+---
+
 ## 2026-09-04 — Every ticket was buying its cut feed twice, and its blank lines once
 
 **What the user saw:** noticeably more blank paper above and below each ticket than the
@@ -904,3 +1006,98 @@ from the editable form field. `src/components/auth/AuthPage.tsx` — that field 
 now read-only. Also removed a related issue where, if no matching account could be
 found, the app would create a brand-new account and default it to Admin access
 instead of refusing.
+
+---
+
+## 2026-09-23 — Server collections used the wrong expected-value formula
+
+**What the user saw:** Server performance added a separate “sales value” and profit,
+so managers could not configure the actual preparation cost of each food item or
+compare a waiter’s returned money with the amount that item mix should have produced.
+Payroll also still exposed percentage penalties after the rule had changed to
+fixed-naira deductions only.
+
+**Root cause:** The server-sales calculator treated the legacy sales-value field as
+the base of expected revenue and then added profit again. The daily record had no
+money-gathered or variance fields, and the payroll draft model still constructed
+percentage penalty rows.
+
+**Fix:** Added per-sales-unit preparation cost and made expected collection equal
+preparation cost plus configured profit. Daily server entries now persist itemized
+quantities, money gathered, and surplus/shortage; weekly and monthly rollups retain
+each item column. Removed percentage penalties from payroll entry, types, and wage
+calculation. Updated the cloud schema and compatibility fallbacks for older item rows.
+
+**Files:** `src/components/manager/views/InventoryView.tsx`,
+`src/components/manager/views/ServerSalesView.tsx`,
+`src/components/manager/StaffPayroll.tsx`, `src/utils/serverPerformance.ts`,
+`src/utils/workforce.ts`, `src/store/useServerSalesStore.ts`, related types/tests,
+and `supabase_schema.sql`.
+
+**Verified:** All 354 Vitest checks pass, the production build succeeds, and the
+browser lifecycle confirms item setup, daily quantity and cash entry, a ₦5,000
+surplus, fixed-penalty wage finalization, FIFO stock, and persisted reports.
+
+---
+
+## 2026-09-23 — Server wage assessment was disconnected from item sales
+
+**What the user saw:** Daily Performance & Pay still gave a server one generic
+performance-number field. The manager had to enter food quantities and collected
+cash on a separate screen, so the wage assessment did not itself explain the
+server's expected collection, shortage/surplus, or real profit/loss contribution.
+
+**Root cause:** Itemized server sales and staff wage assessment were persisted by
+separate forms even though both represent the same server's daily performance.
+
+**Fix:** Server rows in Daily Performance & Pay now list every inventory item that
+has Server sales enabled, accept quantity per item and money collected, calculate
+expected collection, actual profit/loss, and surplus/shortage live, and save the
+itemized server record together with the wage draft. Server wage output is derived
+from total units and cannot be manually contradicted.
+
+**Files:** `src/components/manager/StaffPayroll.tsx`,
+`src/components/manager/views/ServerSalesView.tsx`,
+`src/store/useServerSalesStore.ts`, `src/types/serverSales.ts`,
+`src/utils/serverPerformance.ts`, `supabase_schema.sql`, and related tests.
+
+**Verified:** All 355 Vitest checks pass, the production build succeeds, and the
+browser lifecycle records seven rice units and ₦180,000 collected directly from
+Daily Performance & Pay, persists ₦54,000 actual profit, ₦5,000 surplus, and the
+derived ₦1,300 final wage after a ₦100 fixed penalty.
+
+---
+
+## 2026-09-24 — Staff performance and audit history could not be investigated properly
+
+**What the user saw:** Audit history was a paginated list with no search or filters.
+Staff performance could be entered daily but there was no consolidated daily, weekly,
+monthly, or yearly view of each employee's output, rewards, penalties, wages, and
+server collection metrics. Weekly reports were permanently Monday-based, and managers
+could configure deductions but not reusable performance bonuses.
+
+**Root cause:** AuditLogView only applied the shared date window. The workforce model
+stored base earnings and penalties but had no reward items or reward totals. Weekly
+date boundaries were hard-coded in the period utility, and staff reporting had no
+rollup interface over assessments and itemized server sales.
+
+**Fix:** Added full-text audit search plus action, entity, and actor filters. Added
+account-synced fixed performance-reward rules beside fixed penalties, persisted the
+selected rewards in each assessment, and included them in wage calculation. Added a
+Performance reports staff tab that uses the console's Day/Week/Month/Year picker and
+shows every staff member's output, base reward, reward/penalty breakdowns, final wage,
+food quantities, preparation cost, expected and collected cash, actual profit/loss,
+and surplus/shortage. Added an account-wide starting-day-of-week setting and made all
+weekly periods honor it.
+
+**Files:** `src/components/manager/views/AuditLogView.tsx`,
+`src/components/manager/StaffPerformanceReport.tsx`,
+`src/components/manager/StaffPayroll.tsx`,
+`src/components/manager/views/StaffView.tsx`,
+`src/components/manager/views/SettingsView.tsx`, `src/utils/period.ts`,
+`src/store/useConsolePeriodStore.ts`, workforce/config types and stores,
+`supabase_schema.sql`, and related tests.
+
+**Verified:** All 357 Vitest checks pass, the production build succeeds, and the
+browser lifecycle verifies reward configuration and payout, the staff period report,
+audit search/entity filtering, persistence, and a Sunday-based weekly boundary.

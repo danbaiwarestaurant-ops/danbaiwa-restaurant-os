@@ -18,7 +18,9 @@ import { AuditLogView } from './views/AuditLogView';
 import { PrinterSetupView } from './views/PrinterSetupView';
 import { SettingsView } from './views/SettingsView';
 import { ComingSoonView } from './views/ComingSoonView';
+import { InventoryView } from './views/InventoryView';
 import { ArrowLeft, UtensilsCrossed, Boxes, Lock } from 'lucide-react';
+import { useConsolePeriodStore } from '../../store/useConsolePeriodStore';
 
 const LAST_VIEW_KEY = 'ticket_pos_console_view';
 
@@ -55,6 +57,11 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
   const { stuckCount } = useSyncStore();
   const { currentShift } = useShiftStore();
   const admin = useAuthStore((s) => s.users.find((u) => u.role === 'admin'));
+  const setWeekStartsOn = useConsolePeriodStore((s) => s.setWeekStartsOn);
+
+  useEffect(() => {
+    setWeekStartsOn(config.weekStartsOn ?? 1);
+  }, [config.weekStartsOn, setWeekStartsOn]);
 
   const [view, setView] = useState<ConsoleViewId>(() => {
     try {
@@ -107,18 +114,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
             ]}
           />
         );
-      case 'inventory':
-        return (
-          <ComingSoonView
-            title="Inventory"
-            icon={Boxes}
-            purpose="Track stock levels, reorder points and suppliers, and warn you before something runs out mid-service."
-            requires={[
-              'Ingredients, stock levels, reorder thresholds, suppliers and restock records — none of which exist in the data model today',
-              'Menu Management first: stock only depletes automatically once a ticket knows which dishes it contained',
-            ]}
-          />
-        );
+      case 'inventory': return <InventoryView />;
       default:
         return <OverviewView />;
     }

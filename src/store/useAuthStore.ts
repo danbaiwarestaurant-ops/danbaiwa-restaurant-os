@@ -229,6 +229,8 @@ export interface StaffRecordCounts {
   tickets: number;
   shifts: number;
   expenses: number;
+  assessments: number;
+  wageLedger: number;
   auditLogs: number;
   total: number;
 }
@@ -284,6 +286,8 @@ interface AuthState {
   loadUsers: () => Promise<void>;
   registerUser: (name: string, email: string, password: string, pin: string, role?: UserRole) => Promise<UserAccount>;
   loginUser: (email: string, passwordOrPin: string) => Promise<LoginResult>;
+  /** Local till sign-in: identifies the active cashier from their unique PIN alone. */
+  loginWithPin: (pin: string) => Promise<LoginResult>;
   /**
    * End the staff session at the till.
    *
@@ -310,7 +314,7 @@ interface AuthState {
   resetCashierPin: (cashierId: string, newPin: string) => Promise<boolean>;
 
   /** Rename a staff account, change its login username, or move it to another role. */
-  updateStaffMember: (userId: string, name: string, username: string, role?: UserRole) => Promise<StaffActionResult>;
+  updateStaffMember: (userId: string, name: string, username: string, role?: UserRole, dailyFoodCountLimit?: number) => Promise<StaffActionResult>;
   /**
    * Switch a staff account between active and deactivated. Deactivating blocks sign-in
    * while keeping every record they created intact — the reversible counterpart to
@@ -463,7 +467,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       : allUsers;
     const users = scoped.length ? scoped : allUsers;
     
-    const savedUserId = localStorage.getItem('ticket_pos_session_user_id');
+    // Reconciliation can finish after a non-browser test/runtime has already torn down
+    // its storage shim. Treat that exactly like a browser with no resumed session.
+    const savedUserId = typeof localStorage === 'undefined'
+      ? null
+      : localStorage.getItem('ticket_pos_session_user_id');
     let activeUser: UserAccount | null = null;
     let isAuthenticated = false;
 
@@ -598,6 +606,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       role,
       createdAt: new Date().toISOString(),
       status: 'active',
+      dailyFoodCountLimit: 1,
     };
 
     await dbService.saveUser(newUser);
@@ -618,6 +627,33 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await get().loadUsers();
     return newUser;
+  },
+
+  loginWithPin: async (pin: string): Promise<LoginResult> => {
+    if (!pin) return buildLoginFailure('missing_secret');
+    const lockout = get().lockoutUntil;
+    if (lockout && Date.now() < lockout) return buildLoginFailure('locked_out', { retryAfterSeconds: Math.ceil((lockout - Date.now()) / 1000) });
+    if (!hasWebCrypto()) return buildLoginFailure('crypto_unavailable');
+    const matches: UserAccount[] = [];
+    for (const user of get().users.filter((candidate) => candidate.status === 'active')) {
+      if (await verifySecret(pin, user.pinHash, user.pinSalt)) matches.push(user);
+    }
+    if (matches.length !== 1) {
+      const attemptsRemaining = registerFailedAttempt(get, set);
+      if (matches.length > 1) return { ok: false, code: 'ambiguous_login_key', message: 'That PIN is assigned to more than one active staff member.', hint: 'A manager must reset one of the duplicate PINs.', attemptsRemaining };
+      return buildLoginFailure('wrong_pin', { attemptsRemaining });
+    }
+    const user = matches[0];
+    if (!canSignIn(user.role)) return buildLoginFailure('role_has_no_till_access', { email: user.name });
+    localStorage.setItem('ticket_pos_session_user_id', user.id);
+    set({ activeUser: user, isAuthenticated: true, failedAttempts: 0, lockoutUntil: null });
+    startRealtimeSync();
+    runCloudCatchUp({ revive: true }).catch(() => {});
+    if (isSupabaseConfigured && user.role === 'admin' && user.email) {
+      const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
+      authenticateAdminWithSupabase(user.email, pin, locationId).then(() => { enrolThisTill(); startRealtimeSync(); }).catch(() => {});
+    }
+    return { ok: true };
   },
 
   loginUser: async (email: string, passwordOrPin: string): Promise<LoginResult> => {
@@ -1107,6 +1143,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (role === 'admin') {
       throw new Error('An admin account is created by signing up, not from the staff roster.');
     }
+    for (const existing of get().users.filter((u) => u.status === 'active')) {
+      if (await verifySecret(pin, existing.pinHash, existing.pinSalt)) throw new Error(`That PIN is already assigned to ${existing.name}. Each active staff member needs a unique PIN.`);
+    }
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(pin, pinSalt);
     const passwordSalt = generateSalt();
@@ -1135,7 +1174,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return staffUser;
   },
 
-  updateStaffMember: async (userId: string, name: string, username: string, role?: UserRole) => {
+  updateStaffMember: async (userId: string, name: string, username: string, role?: UserRole, dailyFoodCountLimit?: number) => {
     get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
     if (!user) return { ok: false, message: 'That staff account no longer exists.' };
@@ -1168,6 +1207,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       name: cleanName,
       username: cleanUsername,
       role: nextRole,
+      dailyFoodCountLimit: Math.max(0, Math.floor(dailyFoodCountLimit ?? user.dailyFoodCountLimit ?? 1)),
       // An admin's email is their cloud identity and is changed through the profile
       // screen, which also updates Supabase. Only a cashier's email tracks the username.
       email: user.role === 'admin' ? user.email : cleanUsername,
@@ -1213,7 +1253,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const counts = await dbService.countRecordsForUser(userId);
     return {
       ...counts,
-      total: counts.tickets + counts.shifts + counts.expenses + counts.auditLogs,
+      total: counts.tickets + counts.shifts + counts.expenses + counts.assessments + counts.wageLedger + counts.auditLogs,
     };
   },
 
@@ -1239,6 +1279,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         counts.tickets && `${counts.tickets} ticket${counts.tickets === 1 ? '' : 's'}`,
         counts.shifts && `${counts.shifts} shift${counts.shifts === 1 ? '' : 's'}`,
         counts.expenses && `${counts.expenses} expense${counts.expenses === 1 ? '' : 's'}`,
+        counts.assessments && `${counts.assessments} assessment${counts.assessments === 1 ? '' : 's'}`,
+        counts.wageLedger && `${counts.wageLedger} wage ledger entr${counts.wageLedger === 1 ? 'y' : 'ies'}`,
         counts.auditLogs && `${counts.auditLogs} audit entr${counts.auditLogs === 1 ? 'y' : 'ies'}`,
       ].filter(Boolean);
       return {
@@ -1259,6 +1301,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     get().assertAdminRole();
     const user = get().users.find(u => u.id === cashierId);
     if (!user) return false;
+    for (const existing of get().users.filter((u) => u.id !== cashierId && u.status === 'active')) {
+      if (await verifySecret(newPin, existing.pinHash, existing.pinSalt)) throw new Error(`That PIN is already assigned to ${existing.name}.`);
+    }
 
     const pinSalt = generateSalt();
     const pinHash = await hashSecretWithSalt(newPin, pinSalt);

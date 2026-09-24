@@ -6,6 +6,8 @@ import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 import { DeviceConfig } from '../../types/config';
 import { UserAccount } from '../../types/user';
+import { RolePayConfig, StaffAssessment, WageLedgerEntry } from '../../types/workforce';
+import { InventoryBatch, InventoryItem, InventoryMovement } from '../../types/inventory';
 
 const STORAGE_KEYS = {
   CONFIG: 'ticket_pos_device_config',
@@ -14,6 +16,12 @@ const STORAGE_KEYS = {
   SHIFTS: 'ticket_pos_shifts',
   EXPENSES: 'ticket_pos_expenses',
   SERVER_SALES: 'ticket_pos_server_sales',
+  ROLE_PAY_CONFIGS: 'ticket_pos_role_pay_configs',
+  STAFF_ASSESSMENTS: 'ticket_pos_staff_assessments',
+  WAGE_LEDGER: 'ticket_pos_wage_ledger',
+  INVENTORY_ITEMS: 'ticket_pos_inventory_items',
+  INVENTORY_BATCHES: 'ticket_pos_inventory_batches',
+  INVENTORY_MOVEMENTS: 'ticket_pos_inventory_movements',
   OUTBOX: 'ticket_pos_outbox',
   AUDIT: 'ticket_pos_audit_logs',
   SEQ: 'ticket_pos_sequences',
@@ -141,6 +149,11 @@ export class LocalStorageDbService implements IDbService {
     await this.queueOutbox('tickets', 'INSERT', ticket);
   }
 
+  async saveStaffMealTicket(ticket: Ticket, wageEntry?: WageLedgerEntry): Promise<void> {
+    await this.saveTicket(ticket);
+    if (wageEntry) await this.saveWageLedgerEntry(wageEntry, wageEntry.recordedBy);
+  }
+
   async updateTicketStatus(
     ticketId: string,
     status: 'paid' | 'collected' | 'void',
@@ -226,7 +239,8 @@ export class LocalStorageDbService implements IDbService {
     countedCash: number,
     expectedCash: number,
     variance: number,
-    notes?: string
+    notes?: string,
+    reconciliationPending = false
   ): Promise<void> {
     const shifts = await this.getShifts();
     const index = shifts.findIndex(s => s.id === shiftId);
@@ -237,9 +251,17 @@ export class LocalStorageDbService implements IDbService {
       shifts[index].expectedCash = expectedCash;
       shifts[index].variance = variance;
       shifts[index].notes = notes;
+      shifts[index].reconciliationPending = reconciliationPending;
       setItem(STORAGE_KEYS.SHIFTS, JSON.stringify(shifts));
       await this.queueOutbox('shifts', 'UPDATE', shifts[index]);
     }
+  }
+
+  async updateShiftReconciliation(shiftId: string, countedCash: number, expectedCash: number, variance: number, actorId: string): Promise<void> {
+    const shifts = await this.getShifts();
+    const shift = shifts.find((row) => row.id === shiftId);
+    if (!shift) return;
+    await this.closeShift(shiftId, countedCash, expectedCash, variance, shift.notes, false);
   }
 
   // User-Scoped Expenses
@@ -312,6 +334,55 @@ export class LocalStorageDbService implements IDbService {
     if (remaining.length === rows.length) return;
     setItem(STORAGE_KEYS.SERVER_SALES, JSON.stringify(remaining));
     await this.queueOutbox('server_sales', 'DELETE', { id: entryId });
+  }
+
+  private rows<T>(key: string): T[] { const raw = getItem(key); return raw ? JSON.parse(raw) : []; }
+  private writeRows<T>(key: string, rows: T[]): void { setItem(key, JSON.stringify(rows)); }
+
+  async getRolePayConfigs(): Promise<RolePayConfig[]> { return this.rows(STORAGE_KEYS.ROLE_PAY_CONFIGS); }
+  async saveRolePayConfig(row: RolePayConfig, _actorId: string): Promise<void> {
+    const rows = (await this.getRolePayConfigs()).filter((x) => x.id !== row.id); rows.push(row);
+    this.writeRows(STORAGE_KEYS.ROLE_PAY_CONFIGS, rows); await this.queueOutbox('role_pay_configs', 'UPDATE', row);
+  }
+  async getStaffAssessments(from?: string, to?: string): Promise<StaffAssessment[]> {
+    const rows = this.rows<StaffAssessment>(STORAGE_KEYS.STAFF_ASSESSMENTS);
+    return from && to ? rows.filter((x) => x.businessDay >= from && x.businessDay <= to) : rows;
+  }
+  async saveStaffAssessment(row: StaffAssessment, _actorId: string, _reason: string): Promise<void> {
+    const rows = (await this.getStaffAssessments()).filter((x) => x.id !== row.id); rows.push(row);
+    this.writeRows(STORAGE_KEYS.STAFF_ASSESSMENTS, rows); await this.queueOutbox('staff_assessments', 'UPDATE', row);
+  }
+  async getWageLedger(from?: string, to?: string): Promise<WageLedgerEntry[]> {
+    const rows = this.rows<WageLedgerEntry>(STORAGE_KEYS.WAGE_LEDGER);
+    return from && to ? rows.filter((x) => x.businessDay >= from && x.businessDay <= to) : rows;
+  }
+  async saveWageLedgerEntry(row: WageLedgerEntry, _actorId: string): Promise<void> {
+    const rows = await this.getWageLedger(); rows.push(row); this.writeRows(STORAGE_KEYS.WAGE_LEDGER, rows);
+    await this.queueOutbox('wage_ledger', 'INSERT', row);
+  }
+  async getInventoryItems(): Promise<InventoryItem[]> { return this.rows(STORAGE_KEYS.INVENTORY_ITEMS); }
+  async saveInventoryItem(row: InventoryItem, _actorId: string): Promise<void> {
+    const rows = (await this.getInventoryItems()).filter((x) => x.id !== row.id); rows.push(row);
+    this.writeRows(STORAGE_KEYS.INVENTORY_ITEMS, rows); await this.queueOutbox('inventory_items', 'UPDATE', row);
+  }
+  async getInventoryBatches(itemId?: string): Promise<InventoryBatch[]> {
+    const rows = this.rows<InventoryBatch>(STORAGE_KEYS.INVENTORY_BATCHES); return itemId ? rows.filter((x) => x.itemId === itemId) : rows;
+  }
+  async getInventoryMovements(from?: string, to?: string): Promise<InventoryMovement[]> {
+    const rows = this.rows<InventoryMovement>(STORAGE_KEYS.INVENTORY_MOVEMENTS);
+    return from && to ? rows.filter((x) => x.businessDay >= from && x.businessDay <= to) : rows;
+  }
+  async receiveInventory(batch: InventoryBatch, movement: InventoryMovement, _actorId: string): Promise<void> {
+    const batches = await this.getInventoryBatches(); batches.push(batch); this.writeRows(STORAGE_KEYS.INVENTORY_BATCHES, batches);
+    const moves = await this.getInventoryMovements(); moves.push(movement); this.writeRows(STORAGE_KEYS.INVENTORY_MOVEMENTS, moves);
+    await this.queueOutbox('inventory_batches', 'INSERT', batch); await this.queueOutbox('inventory_movements', 'INSERT', movement);
+  }
+  async issueInventory(movement: InventoryMovement, updated: InventoryBatch[], _actorId: string): Promise<void> {
+    const map = new Map(updated.map((x) => [x.id, x]));
+    const batches = (await this.getInventoryBatches()).map((x) => map.get(x.id) || x); this.writeRows(STORAGE_KEYS.INVENTORY_BATCHES, batches);
+    const moves = await this.getInventoryMovements(); moves.push(movement); this.writeRows(STORAGE_KEYS.INVENTORY_MOVEMENTS, moves);
+    for (const row of updated) await this.queueOutbox('inventory_batches', 'UPDATE', row);
+    await this.queueOutbox('inventory_movements', 'INSERT', movement);
   }
 
   async getAuditLogs(entityId?: string, actorId?: string): Promise<any[]> {

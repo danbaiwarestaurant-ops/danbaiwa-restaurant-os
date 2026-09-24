@@ -50,6 +50,7 @@ export const StaffManagement: React.FC = () => {
   const [editName, setEditName] = useState('');
   const [editUsername, setEditUsername] = useState('');
   const [editRole, setEditRole] = useState<UserRole>('cashier');
+  const [editMealLimit, setEditMealLimit] = useState('1');
 
   // Delete is a two-part dialog: it first counts what the account owns, then either
   // refuses with the reason or asks the admin to type the name to confirm.
@@ -88,10 +89,12 @@ export const StaffManagement: React.FC = () => {
     e.preventDefault();
     if (!resetModalUser || newCashierPin.length < 4) return;
 
-    await resetCashierPin(resetModalUser.id, newCashierPin);
-    flash(`PIN for "${resetModalUser.name}" reset successfully`);
-    setResetModalUser(null);
-    setNewCashierPin('');
+    try {
+      await resetCashierPin(resetModalUser.id, newCashierPin);
+      flash(`PIN for "${resetModalUser.name}" reset successfully`);
+      setResetModalUser(null);
+      setNewCashierPin('');
+    } catch (err: any) { fail(err?.message || 'Could not reset that PIN.'); }
   };
 
   const openEdit = (u: UserAccount) => {
@@ -100,12 +103,13 @@ export const StaffManagement: React.FC = () => {
     setEditName(u.name);
     setEditUsername(u.username || '');
     setEditRole(u.role);
+    setEditMealLimit(String(u.dailyFoodCountLimit ?? 1));
   };
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editUser) return;
-    const res = await updateStaffMember(editUser.id, editName, editUsername, editRole);
+    const res = await updateStaffMember(editUser.id, editName, editUsername, editRole, Number(editMealLimit));
     if (!res.ok) {
       fail(res.message || 'Could not update that account.');
       return;
@@ -168,14 +172,14 @@ export const StaffManagement: React.FC = () => {
       </div>
 
       {msg && (
-        <div className="p-3 bg-emerald-50 border-2 border-emerald-400 text-emerald-950 text-xs font-bold uppercase rounded-none flex items-center gap-2">
+        <div role="status" className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,36rem)] p-3 bg-emerald-50 border-2 border-emerald-500 text-emerald-950 text-xs font-bold uppercase rounded-none shadow-2xl flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-600" />
           <span>{msg}</span>
         </div>
       )}
 
       {error && (
-        <div className="p-3 bg-rose-50 border-2 border-rose-400 text-rose-900 text-xs font-semibold normal-case rounded-none flex items-start gap-2">
+        <div role="alert" className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,36rem)] p-3 bg-rose-50 border-2 border-rose-500 text-rose-900 text-xs font-semibold normal-case rounded-none shadow-2xl flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
           <span>{error}</span>
         </div>
@@ -418,6 +422,12 @@ export const StaffManagement: React.FC = () => {
                 </div>
               )}
 
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-700 mb-1">Free food count per day</label>
+                <input type="number" min="0" step="1" value={editMealLimit} onChange={(e) => setEditMealLimit(e.target.value)} className="w-full p-2.5 border-2 border-slate-300 font-mono text-xs font-bold rounded-none" />
+                <p className="text-[11px] text-slate-500 font-semibold mt-1 normal-case">Extra food and all charged add-ons are deducted from wages.</p>
+              </div>
+
               <div className="flex justify-end gap-2 border-t pt-3">
                 <button
                   type="button"
@@ -533,6 +543,8 @@ export const StaffManagement: React.FC = () => {
                         ['Tickets', deleteCounts.tickets],
                         ['Shifts', deleteCounts.shifts],
                         ['Expenses', deleteCounts.expenses],
+                        ['Assessments', deleteCounts.assessments],
+                        ['Wage ledger', deleteCounts.wageLedger],
                         ['Audit entries', deleteCounts.auditLogs],
                       ].map(([label, n]) => (
                         <tr key={String(label)}>
