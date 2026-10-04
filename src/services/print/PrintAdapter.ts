@@ -42,9 +42,11 @@ function escapeHtml(text: string): string {
  * Cached so we don't /health-check on every single ticket.
  */
 let _printServerAvailable: boolean | null = null;
+let lastServerProbe = 0;
 
 async function isPrintServerAvailable(): Promise<boolean> {
-  if (_printServerAvailable !== null) return _printServerAvailable;
+  if (_printServerAvailable === true || (_printServerAvailable === false && Date.now() - lastServerProbe < 5000)) return _printServerAvailable;
+  lastServerProbe = Date.now();
   try {
     const res = await fetch(`${PRINT_SERVER_URL}/health`, {
       signal: AbortSignal.timeout(1000),
@@ -62,6 +64,18 @@ export function resetPrintServerCache(): void {
 }
 
 export class PrintAdapter {
+  private static queue: Promise<unknown> = Promise.resolve();
+
+  static printTicket(
+    ticket: Ticket, businessName = 'Danbaiwa Restraunt', paperWidthMm?: number,
+    context?: { staffRoleText?: string; issuedByName?: string }
+  ): Promise<PrintResult> {
+    // Serialise discovery and dispatch as well as writes to avoid port-lock races.
+    const job = this.queue.then(() => this.dispatchTicket(ticket, businessName, paperWidthMm, context));
+    this.queue = job.catch(() => {});
+    return job;
+  }
+
   /**
    * Prints a ticket, silently wherever the till is able to.
    *
@@ -81,7 +95,7 @@ export class PrintAdapter {
    * The receipt itself is identical on all three: the same escpos.ts bytes, laid out for
    * whichever roll width the account is configured for.
    */
-  static async printTicket(
+  private static async dispatchTicket(
     ticket: Ticket,
     businessName: string = 'Danbaiwa Restraunt',
     paperWidthMm?: number,
@@ -131,6 +145,7 @@ export class PrintAdapter {
             message: `Printed ticket #${ticket.id} (${formattedAmount}) — silent`,
           };
         } catch (e: any) {
+          if (e?.dispatchUncertain) throw e;
           // An unplugged printer must not lose the ticket: fall through to the routes
           // below rather than failing the sale.
           // The cached 'yes, a printer is there' is now suspect — re-check next ticket.

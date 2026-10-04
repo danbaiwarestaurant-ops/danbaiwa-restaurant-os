@@ -47,7 +47,7 @@ const os = require('node:os');
  * while behaving nothing like the current build — which is exactly how the slow
  * per-receipt spooling survived unnoticed on a machine that looked healthy.
  */
-const AGENT_VERSION = 3;
+const AGENT_VERSION = 4;
 
 const PORT = Number(process.env.PRINT_PORT) || 9100;
 const DEFAULT_PRINTER = process.env.PRINT_PRINTER || 'POS-58 11.3.0.1';
@@ -385,7 +385,9 @@ async function getHelper(printerName) {
 
   const dropped = (reason) => {
     if (helper === h) helper = null;
-    failPending(h, new Error(reason));
+    const err = new Error(reason);
+    err.answered = !!h.pending; // dispatch already began; a replay could duplicate it
+    failPending(h, err);
   };
   proc.on('exit', () => dropped('The print helper exited.'));
   proc.on('error', (err) => dropped(err.message));
@@ -398,9 +400,11 @@ function sendViaHelper(h, bytes) {
     const timer = setTimeout(() => {
       // A helper that has stopped answering is not going to start; kill it so the next
       // receipt gets a fresh one rather than joining the same silence.
+      const err = new Error('Printer acknowledgement timed out. Check the paper before reprinting this ticket.');
+      err.answered = true;
+      failPending(h, err);
       stopHelper();
-      reject(new Error('The printer did not answer within 20 seconds.'));
-    }, 20000);
+    }, 10000);
 
     h.pending = {
       resolve: () => {

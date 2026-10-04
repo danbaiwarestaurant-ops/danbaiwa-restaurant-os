@@ -261,12 +261,19 @@ export async function restoreFromCloud(): Promise<{ restored: boolean; reason?: 
     };
   }
 
-  await db.transaction('rw', TABLE_NAMES.map((name) => (db as any)[name]), async () => {
+  const restored = await db.transaction('rw', TABLE_NAMES.map((name) => (db as any)[name]), async () => {
+    // A sale may have arrived while the snapshot was downloading.
+    if (!(await isLocalDataEmpty())) return false;
     for (const name of TABLE_NAMES) {
-      const rows = parsed.tables[name] ?? [];
+      if (name === 'sequences') continue;
+      const rows = name === 'config'
+        ? (parsed.tables.config ?? []).filter(row => row.key === 'device_config')
+        : parsed.tables[name] ?? [];
       if (rows.length) await (db as any)[name].bulkPut(rows);
     }
+    return true;
   });
+  if (!restored) return { restored: false, reason: 'local data arrived during download; restore cancelled' };
 
   // A snapshot carries the config table too, including the position the *snapshotting*
   // device had reached in the cloud's history. Inheriting that would tell this machine it

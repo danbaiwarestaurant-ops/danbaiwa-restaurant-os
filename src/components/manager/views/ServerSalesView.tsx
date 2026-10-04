@@ -11,7 +11,6 @@ import { calculateServerItemSales, serverCollectionVariance, serverProfitContrib
 import { formatCurrency } from '../../../utils/currency';
 import { ConsoleButton, DataTable, EmptyState, Panel, StatStrip } from '../ConsoleUI';
 
-const localDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
 export const ServerSalesView: React.FC = () => {
   const users = useAuthStore((s) => s.users);
@@ -19,7 +18,8 @@ export const ServerSalesView: React.FC = () => {
   const { items, load: loadInventory } = useInventoryStore();
   const period = useConsolePeriodStore((s) => s.period);
   const currency = useDeviceStore((s) => s.config.currencySymbol || '₦');
-  const [day, setDay] = useState(() => businessDayKey(new Date()));
+  const startHour = useDeviceStore(s => s.config.businessDayStartHour);
+  const [day, setDay] = useState(() => businessDayKey(new Date(), startHour));
   const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>({});
   const [moneyDrafts, setMoneyDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -64,8 +64,8 @@ export const ServerSalesView: React.FC = () => {
     } finally { setSaving(false); }
   };
 
-  const from = localDay(period.start);
-  const to = localDay(new Date(period.end.getTime() - 1));
+  const from = businessDayKey(period.start, period.businessDayStartHour ?? 0);
+  const to = businessDayKey(new Date(period.end.getTime() - 1), period.businessDayStartHour ?? 0);
   const inPeriod = entries.filter((e) => e.businessDay >= from && e.businessDay <= to);
   type Rollup = { id: string; name: string; items: Record<string, number>; units: number; cost: number; expectedProfit: number; actualProfit: number; expected: number; gathered: number; variance: number };
   const ranked = Object.values(inPeriod.reduce<Record<string, Rollup>>((map, entry) => {
@@ -85,7 +85,7 @@ export const ServerSalesView: React.FC = () => {
 
   return <div className="space-y-4">
     {(message || error) && <div role="status" className={`fixed top-4 left-1/2 -translate-x-1/2 z-[100] border-2 p-3 shadow-2xl text-xs font-bold ${error ? 'bg-rose-50 border-rose-500 text-rose-900' : 'bg-emerald-50 border-emerald-500 text-emerald-900'}`}>{error || message}</div>}
-    <Panel title="Daily Server Item Sales" subtitle="Enter each item sold and the money returned. Expected collection = preparation cost + configured profit." icon={ClipboardList} actions={<><input type="date" value={day} max={businessDayKey(new Date())} onChange={(e) => setDay(e.target.value)} className="border-2 border-slate-300 px-2 py-1.5 text-xs font-bold" /><ConsoleButton variant="primary" onClick={() => void save()} disabled={saving || !servers.length || !foods.length}><Save className="w-3 h-3 inline mr-1" />{saving ? 'Saving…' : 'Save all'}</ConsoleButton></>}>
+    <Panel title="Daily Server Item Sales" subtitle="Enter each item sold and the money returned. Expected collection = preparation cost + configured profit." icon={ClipboardList} actions={<><input type="date" value={day} max={businessDayKey(new Date(), startHour)} onChange={(e) => setDay(e.target.value)} className="border-2 border-slate-300 px-2 py-1.5 text-xs font-bold" /><ConsoleButton variant="primary" onClick={() => void save()} disabled={saving || !servers.length || !foods.length}><Save className="w-3 h-3 inline mr-1" />{saving ? 'Saving…' : 'Save all'}</ConsoleButton></>}>
       {!foods.length ? <EmptyState>Configure food items under Inventory → Ingredient setup, set preparation cost and profit, then enable “Server sales”.</EmptyState> : !servers.length ? <EmptyState>Add active servers under Staff → Team & access.</EmptyState> : <DataTable headers={['Server Name', ...foods.map((f) => `${f.name} (${f.cookingUnit || f.salesUnit || f.baseUnit})`), 'Preparation', 'Expected profit', 'Expected', 'Money gathered', 'Actual profit / loss', 'Surplus / shortage']} alignRight={Array.from({ length: foods.length + 6 }, (_, i) => i + 1)}>{servers.map((server) => { const p = preview(server.id); return <tr key={server.id} className="align-top"><td className="py-2 pr-3 font-bold">{server.name}</td>{foods.map((food) => <td key={food.id} className="py-2 pr-2"><input aria-label={`${server.name} ${food.name}`} type="number" min="0" step="any" value={drafts[server.id]?.[food.id] || ''} onChange={(e) => setDrafts((all) => ({ ...all, [server.id]: { ...all[server.id], [food.id]: e.target.value } }))} className="w-20 border-2 border-slate-300 p-2 text-right font-mono" /></td>)}<td className="py-2 pr-3 text-right font-mono">{formatCurrency(p.totalCost, currency)}</td><td className="py-2 pr-3 text-right font-mono text-emerald-700">{formatCurrency(p.totalProfit, currency)}</td><td className="py-2 pr-3 text-right font-mono font-black">{formatCurrency(p.expectedSalesValue, currency)}</td><td className="py-2 pr-3"><input aria-label={`${server.name} money gathered`} type="number" min="0" step="any" value={moneyDrafts[server.id] || ''} onChange={(e) => setMoneyDrafts((all) => ({ ...all, [server.id]: e.target.value }))} className="w-32 border-2 border-slate-300 p-2 text-right font-mono font-black" /></td><td className={`py-2 pr-3 text-right font-mono font-black ${p.actualProfitContribution < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{p.actualProfitContribution > 0 ? '+' : ''}{formatCurrency(p.actualProfitContribution, currency)}</td><td className={`py-2 text-right font-mono font-black ${p.variance < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{p.variance > 0 ? '+' : ''}{formatCurrency(p.variance, currency)}<div className="text-[9px] uppercase">{p.variance < 0 ? 'Shortage' : p.variance > 0 ? 'Surplus' : 'Balanced'}</div></td></tr>; })}</DataTable>}
     </Panel>
     <Panel title="Server Performance" subtitle={`Item volumes, collections, and variance for ${period.label}`} icon={Trophy}>

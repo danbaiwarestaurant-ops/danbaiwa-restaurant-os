@@ -9,7 +9,7 @@ import { Ticket } from '../../types/ticket';
 import { businessDayKey } from '../../utils/shiftDay';
 import { roleLabel } from '../../utils/roles';
 import { formatCurrency } from '../../utils/currency';
-import { staffMealWageDeduction, staffFoodCount } from '../../utils/staffMeals';
+import { staffMealWageDeduction, staffFoodCounts } from '../../utils/staffMeals';
 
 interface Props { isOpen: boolean; onClose: () => void; onSuccess: (msg: string) => void; onError: (msg: string) => void }
 const FALLBACK_OPTIONS = [
@@ -27,6 +27,13 @@ export const StaffMealModal: React.FC<Props> = ({ isOpen, onClose, onSuccess, on
   const [staffId, setStaffId] = useState('');
   const [mealTickets, setMealTickets] = useState<Ticket[]>([]);
   const [countReady, setCountReady] = useState(false);
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => {
+    if (!isOpen) return;
+    setClock(new Date());
+    const timer = setInterval(() => setClock(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, [isOpen]);
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
@@ -40,8 +47,9 @@ export const StaffMealModal: React.FC<Props> = ({ isOpen, onClose, onSuccess, on
   const roster = useMemo(() => users.filter((u) => u.status === 'active').sort((a, b) => a.name.localeCompare(b.name)), [users]);
   const selected = roster.find((u) => u.id === staffId);
   const selectedOptions = options.filter((o) => selectedIds.includes(o.id));
-  const today = businessDayKey(new Date());
-  const baseMealsToday = staffId ? staffFoodCount(mealTickets, staffId, today) : 0;
+  const today = businessDayKey(clock, config.businessDayStartHour);
+  const counts = useMemo(() => staffFoodCounts(mealTickets, today, config.businessDayStartHour), [mealTickets, today, config.businessDayStartHour]);
+  const baseMealsToday = counts[staffId] || 0;
   const freeLimit = selected?.dailyFoodCountLimit ?? 1;
   const allowanceExceeded = selectedOptions.some((o) => o.isFree) && baseMealsToday >= freeLimit;
   const deduction = staffMealWageDeduction(selectedOptions, baseMealsToday, freeLimit);
@@ -69,7 +77,7 @@ export const StaffMealModal: React.FC<Props> = ({ isOpen, onClose, onSuccess, on
   return <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4"><div className="bg-white border-2 border-slate-900 w-full max-w-md shadow-2xl rounded-none">
     <div className="bg-slate-900 text-white px-5 py-4 flex justify-between"><div className="flex gap-2 font-black uppercase text-amber-400"><UtensilsCrossed className="w-4 h-4" />Staff Meal</div><button onClick={close}><X className="w-5 h-5" /></button></div>
     <form onSubmit={submit} className="p-5 space-y-4">
-      <label className="block text-xs font-black uppercase">Employee<select required value={staffId} onChange={(e) => setStaffId(e.target.value)} className="mt-1 w-full p-3 border-2 border-slate-300 rounded-none bg-white normal-case"><option value="">Select employee…</option>{roster.map((u) => <option key={u.id} value={u.id}>{u.name} ({roleLabel(u.role)})</option>)}</select></label>
+      <label className="block text-xs font-black uppercase">Employee<select required value={staffId} onChange={(e) => setStaffId(e.target.value)} className="mt-1 w-full p-3 border-2 border-slate-300 rounded-none bg-white normal-case"><option value="">Select employee…</option>{roster.map((u) => <option key={u.id} value={u.id}>{u.name} ({roleLabel(u.role)}) · {countReady ? `${counts[u.id] || 0}/${u.dailyFoodCountLimit ?? 1} meals · ${Math.max(0, (u.dailyFoodCountLimit ?? 1) - (counts[u.id] || 0))} left` : 'Loading meals…'}</option>)}</select></label>
       {selected && <div className="text-[11px] font-bold bg-slate-50 border border-slate-300 p-2">{countReady ? <>Food issued today: {baseMealsToday} / {freeLimit} free meals. Remaining: {Math.max(0, freeLimit - baseMealsToday)}</> : 'Loading allowance...'}</div>}
       <fieldset><legend className="text-xs font-black uppercase mb-2">Select meal items</legend><div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{options.map((option) => <label key={option.id} className={`border-2 p-3 flex items-center gap-2 cursor-pointer ${selectedIds.includes(option.id) ? 'border-amber-500 bg-amber-50' : 'border-slate-300'}`}><input type="checkbox" checked={selectedIds.includes(option.id)} onChange={() => setSelectedIds((ids) => ids.includes(option.id) ? ids.filter((id) => id !== option.id) : [...ids, option.id])} /><span className="font-black text-xs uppercase">{option.name}</span><span className="ml-auto text-[10px] font-mono">{option.isFree ? 'Allowance' : formatCurrency(option.wageCharge, config.currencySymbol || '₦')}</span></label>)}</div></fieldset>
       {allowanceExceeded && <div className="bg-amber-50 border-2 border-amber-400 p-3 flex gap-2 text-[11px] font-bold text-amber-900"><AlertTriangle className="w-4 h-4 shrink-0" />Daily free-food limit exceeded. This food selection is charged once against wages.</div>}

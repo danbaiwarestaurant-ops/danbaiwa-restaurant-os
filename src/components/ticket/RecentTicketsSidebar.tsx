@@ -20,7 +20,9 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
   onOpenVoidModal,
   onOpenScanModal,
 }) => {
-  const { tickets, markCollected, changeTender } = useTicketStore();
+  const tickets = useTicketStore(state => state.tickets);
+  const markCollected = useTicketStore(state => state.markCollected);
+  const changeTender = useTicketStore(state => state.changeTender);
   const { activeUser } = useAuthStore();
   const { shiftHistory, currentShift } = useShiftStore();
   const { config } = useDeviceStore();

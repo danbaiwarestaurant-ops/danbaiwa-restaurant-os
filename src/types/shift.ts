@@ -4,6 +4,8 @@ export interface Shift {
   id: string; // client UUID
   locationId: string;
   deviceId: string;
+  /** Browser installation that owns this drawer; account device settings are shared. */
+  installationId?: string;
   cashierId: string;
   cashierName: string;
   status: ShiftStatus;

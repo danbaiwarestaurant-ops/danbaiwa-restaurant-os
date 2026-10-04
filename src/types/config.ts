@@ -13,6 +13,8 @@ export interface DeviceConfig {
   performanceRewardRules?: Array<{ id: string; label: string; fixedAmount: number }>;
   /** JavaScript weekday number: Sunday 0 through Saturday 6. */
   weekStartsOn?: number;
+  /** Local hour (0–23) at which trading days, allowances and reports turn over. */
+  businessDayStartHour?: number;
   /**
    * Thermal roll width in millimetres — 58 or 80.
    *

@@ -1121,3 +1121,10 @@ ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS cooking_unit TEXT;
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS base_units_per_cooking_unit NUMERIC CHECK (base_units_per_cooking_unit > 0);
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS preparation_cost_per_cooking_unit NUMERIC(16,2) CHECK (preparation_cost_per_cooking_unit >= 0);
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS profit_per_cooking_unit NUMERIC(16,2) CHECK (profit_per_cooking_unit >= 0);
+
+
+-- SHIFT OWNERSHIP (2026-10-04). Also available as a standalone rollout migration.
+ALTER TABLE public.shifts ADD COLUMN IF NOT EXISTS installation_id text;
+ALTER TABLE public.tickets ADD COLUMN IF NOT EXISTS shift_id uuid;
+CREATE INDEX IF NOT EXISTS tickets_account_shift_idx ON public.tickets(account_id, shift_id);
+NOTIFY pgrst, 'reload schema';

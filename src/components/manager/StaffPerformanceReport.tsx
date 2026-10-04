@@ -8,9 +8,9 @@ import { useServerSalesStore } from '../../store/useServerSalesStore';
 import { useWorkforceStore } from '../../store/useWorkforceStore';
 import { formatCurrency } from '../../utils/currency';
 import { roleLabel } from '../../utils/roles';
+import { businessDayKey } from '../../utils/shiftDay';
 import { EmptyState, DataTable, Panel, StatStrip, StatusBadge } from './ConsoleUI';
 
-const dayKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 type Breakdown = Record<string, { count: number; amount: number }>;
 type StaffRollup = {
   id: string; name: string; role: string; metric: string; days: Set<string>; output: number;
@@ -41,8 +41,8 @@ export const StaffPerformanceReport: React.FC = () => {
   const { items, load: loadInventory } = useInventoryStore();
 
   useEffect(() => { void load(); void loadServerSales(); void loadInventory(); }, [load, loadServerSales, loadInventory]);
-  const from = dayKey(period.start);
-  const to = dayKey(new Date(period.end.getTime() - 1));
+  const from = businessDayKey(period.start, period.businessDayStartHour ?? 0);
+  const to = businessDayKey(new Date(period.end.getTime() - 1), period.businessDayStartHour ?? 0);
   const foods = useMemo(() => items.filter((item) => item.active && item.trackServerSales).sort((a, b) => a.name.localeCompare(b.name)), [items]);
 
   const rows = useMemo(() => {

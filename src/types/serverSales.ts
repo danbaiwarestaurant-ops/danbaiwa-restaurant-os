@@ -30,7 +30,7 @@ export interface ServerSalesEntry {
    * people after they have left the roster and their user row is gone.
    */
   serverName: string;
-  /** Trading day as `YYYY-MM-DD`, from businessDayKey — the 6am-to-6am day, not the calendar one. */
+  /** Trading day as `YYYY-MM-DD`, using the configured local starting hour. */
   businessDay: string;
   /** Tickets turned over. A whole number; zero is a real answer and is stored as one. */
   /** Legacy manual ticket count. New entries record itemized sales volumes below. */

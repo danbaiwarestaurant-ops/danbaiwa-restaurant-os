@@ -8,6 +8,7 @@ import { formatCurrency } from '../../utils/currency';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { PerformanceReward, WagePenalty } from '../../types/workforce';
 import { useConsolePeriodStore } from '../../store/useConsolePeriodStore';
+import { periodContains } from '../../utils/period';
 import { ConsoleButton, DataTable, EmptyState, Panel, StatusBadge } from './ConsoleUI';
 import { useShiftStore } from '../../store/useShiftStore';
 import { businessDayKey } from '../../utils/shiftDay';
@@ -17,14 +18,14 @@ import { calculateServerItemSales, serverCollectionVariance, serverProfitContrib
 
 type Draft = { output: string; fixed: string; fixedLabel: string; rewardLabel: string; note: string };
 const blankDraft = (): Draft => ({ output: '', fixed: '', fixedLabel: '', rewardLabel: '', note: '' });
-const today = () => new Date().toLocaleDateString('en-CA');
 export type PayrollSection = 'assessment' | 'wages' | 'balances';
 
 export const StaffPayroll: React.FC<{ section: PayrollSection }> = ({ section }) => {
   const { users } = useAuthStore();
   const { config: deviceConfig, updateConfig } = useDeviceStore();
   const { configs, assessments, ledger, load, configFor, saveConfig, saveAssessment, finalizeDay, reopenAssessment, addLedgerEntry } = useWorkforceStore();
-  const [day, setDay] = useState(today());
+  const today = () => businessDayKey(new Date(), deviceConfig.businessDayStartHour);
+  const [day, setDay] = useState(today);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [serverItemDrafts, setServerItemDrafts] = useState<Record<string, Record<string, string>>>({});
   const [serverMoneyDrafts, setServerMoneyDrafts] = useState<Record<string, string>>({});
@@ -125,8 +126,7 @@ export const StaffPayroll: React.FC<{ section: PayrollSection }> = ({ section })
     balance: wageBalance(assessments.filter((a) => a.staffId === person.id), ledger.filter((l) => l.staffId === person.id)),
     earned: assessments.filter((a) => {
       if (a.staffId !== person.id || a.status !== 'finalized') return false;
-      const at = new Date(`${a.businessDay}T12:00:00`);
-      return at >= period.start && at < period.end;
+      return periodContains(period, a.businessDay);
     }).reduce((sum, a) => sum + a.netPay, 0),
   })), [staff, assessments, ledger, period]);
 
@@ -152,7 +152,7 @@ export const StaffPayroll: React.FC<{ section: PayrollSection }> = ({ section })
     </Panel>}
 
     {section === 'assessment' && <><Panel title="Cashier Variance" subtitle="Closed till shortages and overages for the selected trading day." icon={Calculator}>
-      {shiftHistory.filter((shift) => shift.status === 'closed' && businessDayKey(shift.openedAt) === day).length === 0 ? <EmptyState>No closed cashier shifts for this day</EmptyState> : <DataTable headers={['Cashier', 'Expected cash', 'Counted cash', 'Variance']} alignRight={[1, 2, 3]}>{shiftHistory.filter((shift) => shift.status === 'closed' && businessDayKey(shift.openedAt) === day).map((shift) => <tr key={shift.id}><td className="py-2 pr-3 font-bold">{shift.cashierName}</td><td className="py-2 pr-3 text-right font-mono">{formatCurrency(shift.expectedCash || 0, currency)}</td><td className="py-2 pr-3 text-right font-mono">{formatCurrency(shift.countedCash || 0, currency)}</td><td className={`py-2 text-right font-mono font-black ${(shift.variance || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatCurrency(shift.variance || 0, currency)}</td></tr>)}</DataTable>}
+      {shiftHistory.filter((shift) => shift.status === 'closed' && businessDayKey(shift.openedAt, deviceConfig.businessDayStartHour) === day).length === 0 ? <EmptyState>No closed cashier shifts for this day</EmptyState> : <DataTable headers={['Cashier', 'Expected cash', 'Counted cash', 'Variance']} alignRight={[1, 2, 3]}>{shiftHistory.filter((shift) => shift.status === 'closed' && businessDayKey(shift.openedAt, deviceConfig.businessDayStartHour) === day).map((shift) => <tr key={shift.id}><td className="py-2 pr-3 font-bold">{shift.cashierName}</td><td className="py-2 pr-3 text-right font-mono">{formatCurrency(shift.expectedCash || 0, currency)}</td><td className="py-2 pr-3 text-right font-mono">{formatCurrency(shift.countedCash || 0, currency)}</td><td className={`py-2 text-right font-mono font-black ${(shift.variance || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatCurrency(shift.variance || 0, currency)}</td></tr>)}</DataTable>}
     </Panel><Panel title="Daily Performance & Pay" subtitle="Everyone starts Excellent. Record work completed and add a penalty only when an infraction occurred." icon={Calculator} actions={<input type="date" value={day} max={today()} onChange={(e) => setDay(e.target.value)} className="border-2 border-slate-300 px-2 py-1.5 text-xs font-bold rounded-none" />}>
       {staff.length === 0 ? <EmptyState>Add active staff before recording performance</EmptyState> : <>
         <DataTable headers={['Staff', 'Performance recorded', 'Base reward', 'Performance rewards', 'Fixed penalties', 'Final wage', 'Status']} alignRight={[1, 2, 3, 4, 5, 6]}>

@@ -1,3 +1,4 @@
+import { useShiftStore } from './useShiftStore';
 import { create } from 'zustand';
 import { Ticket, TicketTender } from '../types/ticket';
 import { dbService } from '../services/db/IndexedDbService';
@@ -59,6 +60,10 @@ interface TicketState {
  * from the open shift's own tickets. There is deliberately no day-scoped total kept here:
  * a till worked by two people in a day would have shown each of them the other's takings.
  */
+let ticketLoadGeneration = 0;
+let ticketWriteGeneration = 0;
+const committedDuringLoads = new Map<string, { version: number; ticket: Ticket }>();
+
 export const useTicketStore = create<TicketState>((set, get) => ({
   tickets: [],
   isLoading: false,
@@ -68,10 +73,23 @@ export const useTicketStore = create<TicketState>((set, get) => ({
   clearPrintError: () => set({ printError: null }),
 
   loadTickets: async (userId?: string) => {
+    const generation = ++ticketLoadGeneration;
+    const writeVersion = ticketWriteGeneration;
     set({ isLoading: true, scope: userId });
-    await dbService.init();
-    const tickets = await dbService.getTickets(userId);
-    set({ tickets, isLoading: false });
+    try {
+      await dbService.init();
+      const tickets = await dbService.getTickets(userId);
+      if (generation !== ticketLoadGeneration) return;
+      const merged = new Map(tickets.map(ticket => [ticket.id, ticket]));
+      for (const { version, ticket } of committedDuringLoads.values()) {
+        if (version > writeVersion && (!userId || ticket.cashierId === userId)) merged.set(ticket.id, ticket);
+      }
+      committedDuringLoads.clear();
+      set({ tickets: [...merged.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)), isLoading: false });
+    } catch (error) {
+      if (generation === ticketLoadGeneration) set({ isLoading: false });
+      throw error;
+    }
   },
 
   createAndPrintTicket: async (
@@ -94,17 +112,9 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     const locationId = config.locationId || 'LOC01';
     const deviceId = config.deviceId || 'DEV01';
 
-    /**
-     * STEP 1: Atomically commit sequence + ticket to SQLite BEFORE printing.
-     *
-     * getNextSeq() wraps the sequence increment in a BEGIN/COMMIT transaction.
-     * If two rapid prints hit this simultaneously, SQLite serialises them —
-     * one gets seq=1, the other gets seq=2. No duplicates, no gaps, ever.
-     *
-     * If the browser crashes AFTER this await resolves, the ticket row is in
-     * the database. If it crashes before, the insert never happened.
-     * Either way the DB and receipt are always in sync.
-     */
+    // Reserve a unique sequence, then commit the ticket and its outbox entry before
+    // printing. A crash between those transactions can leave a numbering gap; it can
+    // never reuse a committed ticket number or print an uncommitted sale.
     await dbService.init();
     const installationId = await dbService.getInstallationId();
     const nextSeq = await dbService.getNextSeq(locationId, deviceId);
@@ -122,6 +132,9 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       tender,
       createdAt: nowIso,
       cashierId,
+      accountId: useAuthStore.getState().activeUser?.accountId,
+      shiftId: useShiftStore.getState().currentShift?.cashierId === cashierId
+        ? useShiftStore.getState().currentShift?.id : undefined,
       ...(tender === 'staff' && staffMeal
         ? {
             staffId: staffMeal.staffId,
@@ -146,7 +159,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
           id: crypto.randomUUID(),
           staffId: staffMeal.staffId,
           staffName: staffMeal.staffName,
-          businessDay: businessDayKey(nowIso),
+          businessDay: businessDayKey(nowIso, config.businessDayStartHour),
           kind: 'manual_adjustment',
           amount: -mealDeduction,
           note: `Staff meal deduction: ${(staffMeal.options || []).filter((o) => o.wageCharge > 0).map((o) => o.name).join(', ') || 'extra meal'}`,
@@ -162,6 +175,8 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // for this id first — a concurrent reload (reconciliation pull, realtime echo)
     // can land between the saveTicket() above and this point and already have
     // picked up the just-saved row, which would otherwise duplicate it here.
+    if (get().isLoading) committedDuringLoads.set(newTicket.id, { version: ++ticketWriteGeneration, ticket: newTicket });
+    else ticketWriteGeneration++;
     const currentTickets = get().tickets.filter(t => t.id !== newTicket.id);
     const updatedTickets = [newTicket, ...currentTickets];
     set({ tickets: updatedTickets });

@@ -47,7 +47,7 @@ const AGENT_HEALTH = 'http://127.0.0.1:9100/health';
  * spent about a second recompiling itself for every receipt — so "it is running" is not
  * the same question as "it is the right one", and the page has to ask both.
  */
-const EXPECTED_AGENT_VERSION = 3;
+const EXPECTED_AGENT_VERSION = 4;
 
 async function probeAgent(): Promise<number | null> {
   try {

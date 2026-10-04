@@ -67,6 +67,9 @@ type PassOutcome = 'drained' | 'skipped' | 'retry-soon' | 'session-lost';
  * the whole reason records appeared to trickle out rather than leave immediately.
  */
 let resyncRequested = false;
+let workerRunning = false;
+let statusRefresh: Promise<void> | null = null;
+let queueProgress = 0;
 
 /** Last outbox housekeeping sweep, and how often one is worth doing. */
 let lastPrune = 0;
@@ -394,7 +397,7 @@ type SyncGet = StoreApi<SyncStoreState>['getState'];
  * value the caller can act on rather than a bare `return`.
  */
 async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
-  if (get().isSyncing || get().pendingCount === 0) return 'skipped';
+  if (get().isSyncing) return 'skipped';
 
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   if (!isOnline || !isSupabaseConfigured) {
@@ -423,11 +426,9 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
   set({ isSyncing: true, cloudConnected: true, cloudError: null });
 
   try {
-    const items = await dbService.getPendingOutbox();
+    const items = await dbService.getPendingOutbox(1000);
     const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
-    // The tenant key every RLS policy checks. Resolved once per batch rather than per
-    // row, and never cached across batches, so a different account signing in on this
-    // device can't push under the previous one's id.
+    // Resolve the tenant for this page; verify it again before each cloud batch.
     const accountId = await getAccountId();
 
     // Without a tenant id every row goes up unowned, and every RLS policy in the schema
@@ -608,6 +609,22 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
     };
 
     for (const batch of batchOutbox(items)) {
+      if (await getAccountId() !== accountId) {
+        set({ isSyncing: false });
+        return 'session-lost';
+      }
+      const foreign = batch.items.filter(item => item.payload.accountId && item.payload.accountId !== accountId);
+      if (foreign.length) {
+        for (const item of foreign) await fail(item, { message: 'Queued record belongs to another account; retained on this device.' }, true);
+        batch.items = batch.items.filter(item => !foreign.includes(item));
+        if (!batch.items.length) continue;
+      }
+      const current: OutboxItem[] = [];
+      for (const item of batch.items) {
+        if (item.retryCount === 0 || await dbService.prepareOutboxRetry(item, accountId)) current.push(item);
+      }
+      batch.items = current;
+      if (!batch.items.length) continue;
       const { send, superseded } = dedupeBatch(batch.items);
       const { error } = await pushRows(batch, send);
 
@@ -615,6 +632,12 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
         // Superseded rows are acknowledged too: the record they described was sent, in
         // its newer form, by this very request.
         await dbService.markOutboxSyncedMany([...send, ...superseded].map((i) => i.id));
+        queueProgress++;
+        // Native index counts still visit every matching key in Chromium. Recounting
+        // a 20k queue after every 200-row acknowledgement makes draining quadratic.
+        // Show batch progress immediately; reconcile the count once per queue page.
+        set(state => ({ pendingCount: Math.max(0, state.pendingCount - send.length - superseded.length),
+          lastSyncedAt: new Date().toISOString() }));
         continue;
       }
 
@@ -640,7 +663,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
               `${ids.join(', ')}${send.length > ids.length ? `, +${send.length - ids.length} more` : ''}`
           );
         }
-        for (const item of send) await fail(item, error, true);
+        await dbService.markOutboxAttemptsFailedMany(send, error.message || String(error));
         continue;
       }
 
@@ -690,25 +713,23 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
 
     // Housekeeping, occasionally: acknowledged rows are never read again, but they were
     // kept forever and every "is this still owed?" lookup had to walk past them.
-    if (Date.now() - lastPrune > PRUNE_EVERY_MS) {
-      lastPrune = Date.now();
-      const dropped = await dbService.pruneSyncedOutbox();
-      if (dropped) console.info(`[Sync Store] Pruned ${dropped} acknowledged outbox row(s)`);
-    }
-
     // Re-fetch remaining outbox queue size
-    const remaining = await dbService.getPendingOutbox();
     const { total, stuck, topError } = await dbService.countUnsyncedOutbox();
+    if (Date.now() - lastPrune > PRUNE_EVERY_MS && total === 0) {
+      lastPrune = Date.now();
+      void dbService.pruneSyncedOutbox().catch(error => console.warn('[Sync Store] Queue cleanup postponed:', error));
+    }
     if (topError && total) {
       console.warn(
         `[Sync Store] ${total} row(s) still queued; ${topError.count} of them share one reason: ${topError.reason}`
       );
     }
+    queueProgress++;
     set({
       pendingCount: total,
       stuckCount: stuck,
       queueFault: topError ?? null,
-      pendingItems: remaining,
+      pendingItems: [],
       isSyncing: false,
       lastSyncedAt: new Date().toISOString(),
     });
@@ -734,39 +755,43 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
   lastSyncedAt: undefined,
 
   checkOutbox: async () => {
-    await dbService.init();
-    const pending = await dbService.getPendingOutbox();
-    // Report everything still owed to the cloud, not just what is due for a retry right
-    // now, so a row waiting out a backoff can never be displayed as "synced".
-    const { total, stuck, topError } = await dbService.countUnsyncedOutbox();
-    set({
-      pendingCount: total,
-      stuckCount: stuck,
-      queueFault: topError ?? null,
-      pendingItems: pending,
-      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
-      cloudConnected: await hasCloudSession(),
-    });
-
-    // Automatically trigger self-contained background polling loop
-    get().startBackgroundLoop();
+    // Bursts of tickets/realtime echoes share one status query, not N full scans.
+    if (statusRefresh) return statusRefresh;
+    statusRefresh = (async () => {
+      await dbService.init();
+      const cloudConnected = await hasCloudSession();
+      const revision = queueProgress;
+      const { total, stuck, topError } = await dbService.countUnsyncedOutbox();
+      set({ ...(revision === queueProgress ? { pendingCount: total, stuckCount: stuck, queueFault: topError ?? null } : {}),
+        pendingItems: [], isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
+        cloudConnected });
+      get().startBackgroundLoop();
+    })();
+    try { await statusRefresh; } finally { statusRefresh = null; }
   },
 
   triggerSyncWorker: async () => {
-    // A pass already running is not a reason to skip this one: note that more work
-    // arrived and the running pass will pick it up as soon as it lands.
-    if (get().isSyncing) {
-      resyncRequested = true;
-      return;
-    }
-
-    // Bounded so a pathological write rate cannot keep one caller pushing forever;
-    // the background loop is still there to catch whatever the last pass missed.
-    let passes = 0;
-    do {
-      resyncRequested = false;
-      if (await runSyncPass(set, get) !== 'drained') return;
-    } while (resyncRequested && get().pendingCount > 0 && ++passes < 10);
+    // Latch BEFORE any await, including cloud session restoration.
+    if (workerRunning) { resyncRequested = true; return; }
+    workerRunning = true;
+    const drain = async () => {
+      do {
+        resyncRequested = false;
+        if (await runSyncPass(set, get) !== 'drained') break;
+        // Keep draining bounded pages immediately, including writes made mid-pass.
+        const due = await dbService.getPendingOutbox(1);
+        if (!due.length && !resyncRequested) break;
+        await new Promise(resolve => setTimeout(resolve, 0));
+      } while (true);
+    };
+    try {
+      if (typeof navigator !== 'undefined' && navigator.locks) {
+        // Tabs share IndexedDB; only one tab may send the ordered queue at a time.
+        await navigator.locks.request('ticket-pos-outbox', { ifAvailable: true }, async lock => {
+          if (lock) await drain();
+        });
+      } else await drain();
+    } finally { workerRunning = false; }
   },
 
   forceSyncNow: async () => {
@@ -795,7 +820,7 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     // top of the file because realtimeSync imports this store, and a static import back
     // would close the loop.
     void import('../services/db/realtimeSync')
-      .then(({ runCloudCatchUp }) => runCloudCatchUp({ revive: true }))
+      .then(({ runCloudCatchUp }) => runCloudCatchUp())
       .catch((e) => console.warn('[Sync Store] Manual sync could not pull from the cloud:', e));
   },
 
@@ -831,7 +856,7 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
       set({ isOnline: online });
 
-      if (!online || !isSupabaseConfigured) return;
+      if (!online || !isSupabaseConfigured || workerRunning) return;
 
       ticks++;
       try {

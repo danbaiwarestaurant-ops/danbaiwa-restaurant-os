@@ -414,9 +414,9 @@ export const StaffManagement: React.FC = () => {
               )}
 
               <div>
-                <label className="block text-xs font-bold uppercase text-slate-700 mb-1">Free food count per day</label>
-                <input type="number" min="0" step="1" value={editMealLimit} onChange={(e) => setEditMealLimit(e.target.value)} className="w-full p-2.5 border-2 border-slate-300 font-mono text-xs font-bold rounded-none" />
-                <p className="text-[11px] text-slate-500 font-semibold mt-1 normal-case">Extra food and all charged add-ons are deducted from wages.</p>
+                <label htmlFor="staff-free-meals" className="block text-xs font-bold uppercase text-slate-700 mb-1">Free meals per business day</label>
+                <input id="staff-free-meals" type="number" required min="0" step="1" value={editMealLimit} onChange={(e) => setEditMealLimit(e.target.value)} className="w-full p-2.5 border-2 border-slate-300 font-mono text-xs font-bold rounded-none" />
+                <p className="text-[11px] text-slate-500 font-semibold mt-1 normal-case">Set 0 for no free meals. Resets at the starting hour configured in Settings. Extra food and charged add-ons are deducted from wages.</p>
               </div>
 
               <div className="flex justify-end gap-2 border-t pt-3">

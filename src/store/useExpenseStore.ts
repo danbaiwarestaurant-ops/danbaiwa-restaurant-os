@@ -26,16 +26,19 @@ interface ExpenseState {
   rejectExpense: (expenseId: string, reviewerName: string, reason: string) => Promise<void>;
 }
 
+let expenseLoadGeneration = 0;
+
 export const useExpenseStore = create<ExpenseState>((set, get) => ({
   expenses: [],
   isLoading: false,
   scope: {},
 
   loadExpenses: async (shiftId?: string, userId?: string) => {
+    const generation = ++expenseLoadGeneration;
     set({ isLoading: true, scope: { shiftId, userId } });
     await dbService.init();
     const expenses = await dbService.getExpenses(shiftId, userId);
-    set({ expenses, isLoading: false });
+    if (generation === expenseLoadGeneration) set({ expenses, isLoading: false });
   },
 
   logExpense: async (amount: number, category: string, description: string) => {

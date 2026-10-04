@@ -9,7 +9,7 @@
  * tickets was filed against it and expected cash accumulated across both. The variance
  * recorded when it was finally closed covered two days of trading and belonged to nobody.
  *
- * The boundary is NOT midnight. A kitchen still serving at 00:30 is working the evening
+ * The default boundary is 06:00. A kitchen still serving at 00:30 is working the evening
  * that started the night before, and cutting the shift underneath them would be worse
  * than the bug — so the trading day runs from BUSINESS_DAY_START_HOUR to the same hour
  * the following morning. Local time throughout, for the reason period.ts gives: the day
@@ -23,10 +23,14 @@ import { Shift } from '../types/shift';
  *
  * 06:00: late enough that a night that ran long is still counted as the night before,
  * and early enough to be ahead of the first delivery or prep shift. A restaurant that
- * genuinely trades through this hour would want it moved; it is a single constant so
- * that stays a one-line change.
+ * trades through this hour can move it in Settings. Callers pass the account's
+ * businessDayStartHour; old settings fall back to this default.
  */
 export const BUSINESS_DAY_START_HOUR = 6;
+
+export function cleanBusinessDayStartHour(hour: number | undefined): number {
+  return typeof hour === 'number' && Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : BUSINESS_DAY_START_HOUR;
+}
 
 /**
  * The trading day an instant falls in, as local YYYY-MM-DD.
@@ -42,7 +46,7 @@ export function businessDayKey(
   if (Number.isNaN(at.getTime())) return '';
 
   const shifted = new Date(at);
-  if (shifted.getHours() < startHour) shifted.setDate(shifted.getDate() - 1);
+  if (shifted.getHours() < cleanBusinessDayStartHour(startHour)) shifted.setDate(shifted.getDate() - 1);
 
   const m = String(shifted.getMonth() + 1).padStart(2, '0');
   const d = String(shifted.getDate()).padStart(2, '0');

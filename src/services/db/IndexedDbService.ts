@@ -1,3 +1,4 @@
+import Dexie from 'dexie';
 /**
  * IndexedDbService.ts
  *
@@ -264,8 +265,8 @@ export class IndexedDbService implements IDbService {
 
   async getTickets(userId?: string): Promise<Ticket[]> {
     if (userId) {
-      const rows = await db.tickets.where('cashierId').equals(userId).sortBy('createdAt');
-      return rows.reverse();
+      return db.tickets.where('[cashierId+createdAt]')
+        .between([userId, Dexie.minKey], [userId, Dexie.maxKey]).reverse().toArray();
     }
     return db.tickets.orderBy('createdAt').reverse().toArray();
   }
@@ -274,7 +275,13 @@ export class IndexedDbService implements IDbService {
     const stamped = { ...ticket, updatedAt: new Date().toISOString() };
     await db.transaction('rw', db.tickets, db.outbox, async () => {
       const existing = await db.tickets.get(ticket.id);
-      if (!existing) await db.tickets.add(stamped);
+      if (existing) {
+        if (existing.cashierId !== ticket.cashierId || existing.createdAt !== ticket.createdAt || existing.amount !== ticket.amount) {
+          throw new Error('Ticket number collision detected. Sale was not recorded; preserve this till and contact support.');
+        }
+        return; // replay of the same sale; do not queue a stale snapshot
+      }
+      await db.tickets.add(stamped);
       await db.outbox.add(queueOutboxRow('tickets', 'INSERT', stamped));
     });
   }
@@ -282,16 +289,18 @@ export class IndexedDbService implements IDbService {
   async saveStaffMealTicket(ticket: Ticket, wageEntry?: WageLedgerEntry): Promise<void> {
     const now = new Date().toISOString();
     const stampedTicket = { ...ticket, updatedAt: now };
-    await db.transaction('rw', db.tickets, db.users, db.wageLedger, db.outbox, db.auditLogs, async () => {
+    await db.transaction('rw', [db.tickets, db.users, db.config, db.wageLedger, db.outbox, db.auditLogs], async () => {
       if (await db.tickets.get(ticket.id)) return;
       const staff = ticket.staffId ? await db.users.get(ticket.staffId) : undefined;
       if (staff && ticket.mealOptions?.length) {
+        const config = (await db.config.get(DEFAULT_CONFIG_KEY))?.value as DeviceConfig | undefined;
+        const day = businessDayKey(ticket.createdAt, config?.businessDayStartHour);
         const meals = (await db.tickets.toArray()).filter(t => !staff.accountId || !t.accountId || t.accountId === staff.accountId);
-        const used = staffFoodCount(meals, staff.id, businessDayKey(ticket.createdAt));
+        const used = staffFoodCount(meals, staff.id, day, config?.businessDayStartHour);
         const deduction = staffMealWageDeduction(ticket.mealOptions, used, staff.dailyFoodCountLimit ?? 1);
         ticket.staffMealWageDeduction = deduction;
         stampedTicket.staffMealWageDeduction = deduction;
-        if (wageEntry) wageEntry = deduction > 0 ? { ...wageEntry, amount: -deduction } : undefined;
+        if (wageEntry) wageEntry = deduction > 0 ? { ...wageEntry, amount: -deduction, businessDay: day } : undefined;
       }
       await db.tickets.add(stampedTicket);
       await db.outbox.add(queueOutboxRow('tickets', 'INSERT', stampedTicket));
@@ -380,8 +389,27 @@ export class IndexedDbService implements IDbService {
   // ─── Shifts ──────────────────────────────────────────────────────────────
 
   async getCurrentShift(userId?: string): Promise<Shift | null> {
+    if (!userId) return null;
+    const installationId = await this.getInstallationId();
+    const binding = await db.config.get('active_shift_' + userId);
+    if (binding?.value) {
+      const bound = await db.shifts.get(binding.value);
+      if (bound?.status === 'open' && bound.cashierId === userId) return bound;
+    }
     const shifts = await this.getShifts(userId);
-    return shifts.find((s) => s.status === 'open') ?? null;
+    for (const shift of shifts.filter(row => row.status === 'open')) {
+      if (shift.installationId === installationId) return shift;
+      if (shift.installationId) continue;
+      // Legacy rows have no installation field. Only resume a shift with evidence
+      // that it was created here, never a remote cashier's open drawer on a phone.
+      const localQueue = await db.outbox.where('[tableName+payload.id+status]')
+        .anyOf(['pending', 'failed', 'synced'].map(status => ['shifts', shift.id, status])).count();
+      const localTicket = await db.tickets.where('[cashierId+createdAt]')
+        .between([userId, shift.openedAt], [userId, Dexie.maxKey], true, true)
+        .filter(ticket => ticket.id.includes(installationId)).first();
+      if (localQueue || localTicket) return shift;
+    }
+    return null;
   }
 
   async getShifts(userId?: string): Promise<Shift[]> {
@@ -393,10 +421,11 @@ export class IndexedDbService implements IDbService {
   }
 
   async saveShift(shift: Shift): Promise<void> {
-    const stamped = { ...shift, updatedAt: new Date().toISOString() };
-    await db.transaction('rw', db.shifts, db.outbox, async () => {
+    const stamped = { ...shift, installationId: shift.installationId || await this.getInstallationId(), updatedAt: new Date().toISOString() };
+    await db.transaction('rw', db.shifts, db.outbox, db.config, async () => {
       const existing = await db.shifts.get(shift.id);
       if (!existing) await db.shifts.add(stamped);
+      if (shift.status === 'open') await db.config.put({ key: 'active_shift_' + shift.cashierId, value: shift.id });
       await db.outbox.add(queueOutboxRow('shifts', 'INSERT', stamped));
     });
   }
@@ -646,10 +675,47 @@ export class IndexedDbService implements IDbService {
   // ─── Outbox Sync ─────────────────────────────────────────────────────────
 
   /** Queued rows that are eligible to be pushed right now (i.e. not waiting out a backoff). */
-  async getPendingOutbox(): Promise<OutboxItem[]> {
+  async getPendingOutbox(limit = Number.POSITIVE_INFINITY): Promise<OutboxItem[]> {
     const now = Date.now();
-    const rows = await db.outbox.where('status').equals('pending').sortBy('createdAt');
-    return rows.filter((r) => !r.nextAttemptAt || Date.parse(r.nextAttemptAt) <= now);
+    if (limit <= 0) return [];
+    const due: OutboxItem[] = [];
+    let after: any[] = ['pending', Dexie.minKey];
+    const pageSize = Math.min(1000, Math.max(200, limit));
+    while (due.length < limit) {
+      // Collection.filter/offset force an IPC cursor round trip per record. Native
+      // getAll reads a page in one request; id disambiguates equal timestamps.
+      const page = await db.outbox.where('[status+createdAt+id]')
+        .between(after, ['pending', Dexie.maxKey], false, false)
+        .limit(pageSize).toArray();
+      if (!page.length) break;
+      for (const row of page) {
+        if (!row.nextAttemptAt || Date.parse(row.nextAttemptAt) <= now) due.push(row);
+        if (due.length === limit) return due;
+      }
+      const last = page[page.length - 1];
+      after = ['pending', last.createdAt, last.id];
+      if (page.length < pageSize) break;
+    }
+    return due;
+  }
+
+  /** A backed-off older snapshot must never overwrite a newer acknowledged edit. */
+  async prepareOutboxRetry(item: OutboxItem, accountId: string): Promise<boolean> {
+    if (item.retryCount === 0) return true;
+    return db.transaction('rw', db.outbox, async () => {
+      const query = item.payload.id
+        ? db.outbox.where('[tableName+payload.id+status]').anyOf(
+          ['pending', 'failed', 'synced'].map(status => [item.tableName, item.payload.id, status]))
+        : db.outbox.where('[tableName+status]').anyOf(
+          ['pending', 'failed', 'synced'].map(status => [item.tableName, status]));
+      const versions = (await query.toArray()).filter(row => !row.payload.accountId || row.payload.accountId === accountId);
+      const newer = versions.filter(row => row.createdAt > item.createdAt)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      if (!newer) return true;
+      if (newer.status === 'synced') await db.outbox.update(item.id, { status: 'synced' });
+      else await db.outbox.update(item.id, { nextAttemptAt: new Date(Date.now() + BASE_BACKOFF_MS).toISOString() });
+      return false;
+    });
   }
 
   /**
@@ -657,12 +723,28 @@ export class IndexedDbService implements IDbService {
    * This — not getPendingOutbox — is what the UI must report, so a row quietly sitting
    * out a 30-minute backoff can never be mistaken for "synced".
    */
-  async countUnsyncedOutbox(): Promise<{
+  async countUnsyncedOutbox(includeDiagnostics = true): Promise<{
     total: number;
     stuck: number;
     topError?: { reason: string; count: number };
   }> {
-    const rows = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
+    // One read snapshot, with native requests issued together. Separate transactions
+    // both multiplied disk/IPC latency and mixed counts from different queue states.
+    const [pending, failed, stuckPending, stuckFailed] = await db.transaction('r', db.outbox, () => Promise.all([
+      db.outbox.where('status').equals('pending').count(),
+      db.outbox.where('status').equals('failed').count(),
+      db.outbox.where('[status+retryCount]').between(
+        ['pending', STUCK_AFTER_RETRIES], ['pending', Dexie.maxKey], true, true).count(),
+      db.outbox.where('[status+retryCount]').between(
+        ['failed', STUCK_AFTER_RETRIES], ['failed', Dexie.maxKey], true, true).count(),
+    ]));
+    const total = pending + failed;
+    const stuck = stuckPending + stuckFailed;
+    if (!includeDiagnostics) return { total, stuck };
+    // Healthy payloads need never be loaded to display a queue count.
+    const rows = await db.outbox.where('[status+retryCount]').between(
+      ['pending', 1], ['pending', Dexie.maxKey], true, true).toArray();
+    rows.push(...await db.outbox.where('status').equals('failed').toArray());
 
     // Why the queue is not moving is recorded on every row that failed, and used to be
     // readable nowhere: the badge said "N pending" whether the cloud was busy or was
@@ -675,8 +757,8 @@ export class IndexedDbService implements IDbService {
     const top = [...tally.entries()].sort((a, b) => b[1] - a[1])[0];
 
     return {
-      total: rows.length,
-      stuck: rows.filter((r) => r.retryCount >= STUCK_AFTER_RETRIES).length,
+      total,
+      stuck,
       topError: top ? { reason: top[0], count: top[1] } : undefined,
     };
   }
@@ -688,9 +770,9 @@ export class IndexedDbService implements IDbService {
   async markOutboxSyncedMany(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     await db.transaction('rw', db.outbox, async () => {
-      for (const id of ids) {
-        await db.outbox.update(id, { status: 'synced' });
-      }
+      const rows = await db.outbox.bulkGet(ids);
+      await db.outbox.bulkPut(rows.filter((row): row is OutboxItem => !!row)
+        .map(row => ({ ...row, status: 'synced' as const })));
     });
   }
 
@@ -719,6 +801,20 @@ export class IndexedDbService implements IDbService {
     });
   }
 
+  async markOutboxAttemptsFailedMany(items: OutboxItem[], reason: string): Promise<void> {
+    await db.transaction('rw', db.outbox, async () => {
+      const current = await db.outbox.bulkGet(items.map(item => item.id));
+      const rows = current.filter((row): row is OutboxItem => !!row && row.status !== 'synced')
+        .map(row => {
+          const retryCount = row.retryCount + 1;
+          const delay = Math.min(BASE_BACKOFF_MS * 2 ** Math.min(retryCount, 12), MAX_BACKOFF_MS);
+          return { ...row, status: 'pending' as const, retryCount, lastError: reason,
+            nextAttemptAt: new Date(Date.now() + delay).toISOString() };
+        });
+      await db.outbox.bulkPut(rows);
+    });
+  }
+
   /**
    * Drops acknowledged outbox rows older than the retention window.
    *
@@ -730,12 +826,25 @@ export class IndexedDbService implements IDbService {
    * Only rows already confirmed in the cloud are touched — nothing unsynced can be lost.
    */
   async pruneSyncedOutbox(olderThanMs: number = 24 * 60 * 60_000): Promise<number> {
+    // Keep newer acknowledged snapshots while older retries may still need them
+    // as proof that their state has already been superseded.
+    if ((await this.countUnsyncedOutbox(false)).total > 0) return 0;
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-    return db.outbox
-      .where('status')
-      .equals('synced')
-      .filter((row) => row.createdAt < cutoff)
-      .delete();
+    let removed = 0;
+    while (true) {
+      const count = await db.transaction('rw', db.outbox, async () => {
+        if (await db.outbox.where('status').equals('pending').count()
+          || await db.outbox.where('status').equals('failed').count()) return 0;
+        const keys = await db.outbox.where('[status+createdAt]')
+          .between(['synced', Dexie.minKey], ['synced', cutoff], true, false)
+          .limit(200).primaryKeys();
+        await db.outbox.bulkDelete(keys);
+        return keys.length;
+      });
+      removed += count;
+      if (count < 200) return removed;
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
 
   /**
@@ -746,17 +855,24 @@ export class IndexedDbService implements IDbService {
    */
   async revivePendingOutbox(): Promise<number> {
     let revived = 0;
-    await db.transaction('rw', db.outbox, async () => {
-      const rows = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
-      for (const row of rows) {
-        if (row.status === 'failed') revived++;
-        await db.outbox.update(row.id, {
-          status: 'pending',
-          retryCount: 0,
-          nextAttemptAt: undefined,
+    // Short transactions allow new ticket writes between maintenance chunks.
+    for (const status of ['failed', 'pending'] as const) {
+      while (true) {
+        const changed = await db.transaction('rw', db.outbox, async () => {
+          const query = status === 'failed'
+            ? db.outbox.where('status').equals('failed')
+            : db.outbox.where('[status+retryCount]').between(
+                ['pending', 1], ['pending', Dexie.maxKey], true, true);
+          const rows = await query.limit(200).toArray();
+          await db.outbox.bulkPut(rows.map(row => ({ ...row, status: 'pending' as const,
+            retryCount: 0, nextAttemptAt: undefined, lastError: undefined })));
+          return rows.length;
         });
+        if (status === 'failed') revived += changed;
+        if (changed < 200) break;
+        await new Promise(resolve => setTimeout(resolve, 0));
       }
-    });
+    }
     return revived;
   }
 
@@ -767,17 +883,21 @@ export class IndexedDbService implements IDbService {
   async enqueueBackfill(tableName: string, payloads: Record<string, any>[]): Promise<number> {
     if (!payloads.length) return 0;
     let queued = 0;
-    await db.transaction('rw', db.outbox, async () => {
-      const inFlight = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
-      const already = new Set(
-        inFlight.filter((o) => o.tableName === tableName).map((o) => (o.payload as any)?.id)
-      );
-      for (const payload of payloads) {
-        if (already.has(payload.id)) continue;
-        await db.outbox.add(queueOutboxRow(tableName, 'INSERT', payload));
-        queued++;
-      }
-    });
+    for (let offset = 0; offset < payloads.length; offset += 200) {
+      const chunk = payloads.slice(offset, offset + 200);
+      queued += await db.transaction('rw', db.outbox, async () => {
+        const rows = await Promise.all(chunk.map(async payload => {
+          const exists = await db.outbox.where('[tableName+payload.id+status]')
+            .anyOf([[tableName, payload.id, 'pending'], [tableName, payload.id, 'failed']]).count();
+          return exists ? null : queueOutboxRow(tableName, 'INSERT', payload);
+        }));
+        const additions = rows.filter((row): row is OutboxItem => row !== null);
+        const unique = [...new Map(additions.map(row => [row.payload.id, row])).values()];
+        await db.outbox.bulkAdd(unique);
+        return unique.length;
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
     return queued;
   }
 }

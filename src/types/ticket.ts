@@ -30,6 +30,8 @@ export interface Ticket {
   tender?: TicketTender;
   createdAt: string; // ISO 8601 string
   cashierId: string;
+  /** Stable shift association; timestamp matching is retained for legacy tickets. */
+  shiftId?: string;
   voidReason?: string;
   voidedBy?: string;
   voidedAt?: string;

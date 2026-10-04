@@ -20,7 +20,7 @@ export type PeriodUnit = 'day' | 'week' | 'month' | 'year';
 
 export interface Period {
   unit: PeriodUnit;
-  /** Inclusive start, local midnight. */
+  /** Inclusive start, at the configured local trading-day boundary. */
   start: Date;
   /** Exclusive end — the first instant of the next period. */
   end: Date;
@@ -28,6 +28,7 @@ export interface Period {
   label: string;
   /** JavaScript weekday number used to build weekly boundaries. */
   weekStartsOn?: number;
+  businessDayStartHour?: number;
 }
 
 /** Local midnight of the given date, without mutating it. */
@@ -61,7 +62,7 @@ function shortDate(d: Date): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}`;
 }
 
-function build(unit: PeriodUnit, start: Date, end: Date, weekStartsOn = 1): Period {
+function build(unit: PeriodUnit, start: Date, end: Date, weekStartsOn = 1, businessDayStartHour = 0): Period {
   let label: string;
   if (unit === 'year') {
     label = String(start.getFullYear());
@@ -77,29 +78,37 @@ function build(unit: PeriodUnit, start: Date, end: Date, weekStartsOn = 1): Peri
     last.setDate(last.getDate() - 1);
     label = `${shortDate(start)} – ${shortDate(last)} ${last.getFullYear()}`;
   }
-  return { unit, start, end, label, weekStartsOn };
+  return { unit, start, end, label, weekStartsOn, businessDayStartHour };
 }
 
 /** The period of `unit` that contains `anchor`. */
-export function periodFor(unit: PeriodUnit, anchor: Date = new Date(), weekStartsOn = 1): Period {
+export function periodFor(unit: PeriodUnit, anchor: Date = new Date(), weekStartsOn = 1, businessDayStartHour = 0): Period {
+  const hour = Number.isInteger(businessDayStartHour) && businessDayStartHour >= 0 && businessDayStartHour <= 23 ? businessDayStartHour : 0;
+  const tradingDate = new Date(anchor);
+  if (tradingDate.getHours() < hour) tradingDate.setDate(tradingDate.getDate() - 1);
+  const make = (start: Date, end: Date) => {
+    start.setHours(hour, 0, 0, 0);
+    end.setHours(hour, 0, 0, 0);
+    return build(unit, start, end, weekStartsOn, hour);
+  };
   if (unit === 'year') {
-    const start = new Date(anchor.getFullYear(), 0, 1);
-    return build(unit, start, new Date(anchor.getFullYear() + 1, 0, 1), weekStartsOn);
+    const start = new Date(tradingDate.getFullYear(), 0, 1);
+    return make(start, new Date(tradingDate.getFullYear() + 1, 0, 1));
   }
   if (unit === 'month') {
-    const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
-    return build(unit, start, new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1), weekStartsOn);
+    const start = new Date(tradingDate.getFullYear(), tradingDate.getMonth(), 1);
+    return make(start, new Date(tradingDate.getFullYear(), tradingDate.getMonth() + 1, 1));
   }
   if (unit === 'day') {
-    const start = startOfDay(anchor);
+    const start = startOfDay(tradingDate);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
-    return build(unit, start, end, weekStartsOn);
+    return make(start, end);
   }
-  const start = startOfWeek(anchor, weekStartsOn);
+  const start = startOfWeek(tradingDate, weekStartsOn);
   const end = new Date(start);
   end.setDate(end.getDate() + 7);
-  return build(unit, start, end, weekStartsOn);
+  return make(start, end);
 }
 
 /** Move `delta` periods forward (positive) or back (negative), keeping the same unit. */
@@ -109,7 +118,7 @@ export function shiftPeriod(p: Period, delta: number): Period {
   else if (p.unit === 'month') a.setMonth(a.getMonth() + delta);
   else if (p.unit === 'day') a.setDate(a.getDate() + delta);
   else a.setDate(a.getDate() + delta * 7);
-  return periodFor(p.unit, a, p.weekStartsOn ?? 1);
+  return periodFor(p.unit, a, p.weekStartsOn ?? 1, p.businessDayStartHour ?? 0);
 }
 
 /**
@@ -123,11 +132,15 @@ export function shiftPeriod(p: Period, delta: number): Period {
  * current period holds `now`, the new one is anchored on `now` too.
  */
 export function withUnit(p: Period, unit: PeriodUnit, now: Date = new Date()): Period {
-  return periodFor(unit, isCurrentPeriod(p, now) ? now : p.start, p.weekStartsOn ?? 1);
+  return periodFor(unit, isCurrentPeriod(p, now) ? now : p.start, p.weekStartsOn ?? 1, p.businessDayStartHour ?? 0);
 }
 
 export function periodContains(p: Period, when: string | Date): boolean {
-  const t = when instanceof Date ? when.getTime() : Date.parse(when);
+  // Stored businessDay values are date labels, not UTC-midnight instants. Place them
+  // at the local trading boundary so the first day is included and the next excluded.
+  const t = when instanceof Date ? when.getTime() : /^\d{4}-\d{2}-\d{2}$/.test(when)
+    ? new Date(`${when}T${String(p.businessDayStartHour ?? 0).padStart(2, '0')}:00:00`).getTime()
+    : Date.parse(when);
   if (Number.isNaN(t)) return false;
   return t >= p.start.getTime() && t < p.end.getTime();
 }
@@ -165,17 +178,17 @@ export function periodBuckets(p: Period): Bucket[] {
   const buckets: Bucket[] = [];
 
   if (p.unit === 'day') {
-    const dayPart = `${p.start.getFullYear()}-${String(p.start.getMonth() + 1).padStart(2, '0')}-${String(p.start.getDate()).padStart(2, '0')}`;
     for (let h = 0; h < 24; h++) {
       const start = new Date(p.start);
-      start.setHours(h, 0, 0, 0);
+      start.setHours(p.start.getHours() + h, 0, 0, 0);
       const end = new Date(start);
       // setHours(24) rolls into the next day, which is exactly the exclusive end wanted
       // for the 23:00 bucket.
-      end.setHours(h + 1, 0, 0, 0);
+      end.setHours(start.getHours() + 1, 0, 0, 0);
+      const dayPart = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
       buckets.push({
-        key: `${dayPart}T${String(h).padStart(2, '0')}`,
-        label: String(h).padStart(2, '0'),
+        key: `${dayPart}T${String(start.getHours()).padStart(2, '0')}`,
+        label: String(start.getHours()).padStart(2, '0'),
         start,
         end,
       });
@@ -185,8 +198,8 @@ export function periodBuckets(p: Period): Bucket[] {
 
   if (p.unit === 'year') {
     for (let m = 0; m < 12; m++) {
-      const start = new Date(p.start.getFullYear(), m, 1);
-      const end = new Date(p.start.getFullYear(), m + 1, 1);
+      const start = new Date(p.start.getFullYear(), m, 1, p.businessDayStartHour ?? 0);
+      const end = new Date(p.start.getFullYear(), m + 1, 1, p.businessDayStartHour ?? 0);
       buckets.push({
         key: `${start.getFullYear()}-${String(m + 1).padStart(2, '0')}`,
         label: MONTHS[m].slice(0, 3),

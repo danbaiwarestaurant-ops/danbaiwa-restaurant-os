@@ -1,3 +1,4 @@
+import { readSessionIdentity, writeSessionIdentity } from '../services/sessionIdentity';
 import { create } from 'zustand';
 import { UserAccount, UserRole, UserStatus } from '../types/user';
 import { canSignIn } from '../utils/roles';
@@ -408,6 +409,8 @@ function enrolThisTill(): void {
   }).catch((e) => console.warn('[Auth] till enrolment skipped:', e));
 }
 
+let rosterGeneration = 0;
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   users: [],
   activeUser: null,
@@ -451,6 +454,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loadUsers: async () => {
+    const generation = ++rosterGeneration;
+    const identityAtStart = get().activeUser?.id;
+    const wasLoaded = get().isLoaded;
     await dbService.init();
     const allUsers = await dbService.getUsers();
 
@@ -475,12 +481,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       ? allUsers.filter((u) => !u.accountId || u.accountId === scopeAccountId)
       : allUsers;
     const users = scoped.length ? scoped : allUsers;
+    if (generation !== rosterGeneration || (wasLoaded && get().activeUser?.id !== identityAtStart)) return;
     
     // Reconciliation can finish after a non-browser test/runtime has already torn down
     // its storage shim. Treat that exactly like a browser with no resumed session.
-    const savedUserId = typeof localStorage === 'undefined'
-      ? null
-      : localStorage.getItem('ticket_pos_session_user_id');
+    const resuming = !get().isLoaded;
+    const savedUserId = resuming ? readSessionIdentity() : get().activeUser?.id;
     let activeUser: UserAccount | null = null;
     let isAuthenticated = false;
 
@@ -513,9 +519,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // a till that had been logged out, cleared, or left offline long enough to lose its
     // token came up cloud-less and stayed that way until an owner arrived with a PIN,
     // which is precisely what running the business remotely cannot depend on.
-    if (isAuthenticated) {
+    if (isAuthenticated && resuming) {
       (async () => {
-        const restored = await restoreDeviceSession().catch(() => false);
+        const { data } = await supabase.auth.getSession();
+        const restored = !data?.session && await restoreDeviceSession().catch(() => false);
         // An owner session that predates device identity (or one whose enrolment was
         // revoked and then re-established by a PIN sign-in) still needs enrolling once.
         enrolThisTill();
@@ -621,7 +628,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await dbService.saveUser(newUser);
     // Held for the one screen that can ever show it; only the hash was stored.
     set({ pendingRecoveryKey: recoveryKey });
-    localStorage.setItem('ticket_pos_session_user_id', newUser.id);
+    writeSessionIdentity(newUser.id);
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
     });
@@ -656,7 +663,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
     const user = matches[0];
     if (!canSignIn(user.role)) return buildLoginFailure('role_has_no_till_access', { email: user.name });
-    localStorage.setItem('ticket_pos_session_user_id', user.id);
+    writeSessionIdentity(user.id);
     set({ activeUser: user, isAuthenticated: true, hasAdminAuthority: false, failedAttempts: 0, lockoutUntil: null });
     startRealtimeSync();
     runCloudCatchUp({ revive: true }).catch(() => {});
@@ -748,7 +755,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       }
 
-      localStorage.setItem('ticket_pos_session_user_id', adopted.user.id);
+      writeSessionIdentity(adopted.user.id);
       set({
         activeUser: adopted.user,
         isAuthenticated: true,
@@ -779,7 +786,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return buildLoginFailure('role_has_no_till_access', { email: cleanEmail });
       }
 
-      localStorage.setItem('ticket_pos_session_user_id', user.id);
+      writeSessionIdentity(user.id);
       set({
         activeUser: user,
         isAuthenticated: true,
@@ -871,7 +878,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           console.info('[Auth] Local credentials were stale; repaired from the verified cloud sign-in.');
         }
 
-        localStorage.setItem('ticket_pos_session_user_id', verified.user.id);
+        writeSessionIdentity(verified.user.id);
         set({
           activeUser: verified.user,
           isAuthenticated: true,
@@ -980,7 +987,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // either way, and the session's reach is exactly the account it belongs to — so
     // holding it grants nothing the machine did not already have.
 
-    localStorage.removeItem('ticket_pos_session_user_id');
+    writeSessionIdentity(null);
     set({
       activeUser: null,
       isAuthenticated: false,

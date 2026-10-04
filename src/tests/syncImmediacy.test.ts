@@ -78,6 +78,60 @@ describe('sync immediacy', () => {
     useSyncStore.setState({ isSyncing: false, pendingCount: 0, stuckCount: 0, cloudConnected: false });
   });
 
+  it('drains multiple queue pages immediately without another caller or poll', async () => {
+    await db.outbox.bulkAdd(Array.from({ length: 1201 }, (_, i) => queued('tickets', `PAGE-${i}`)));
+    const counts = vi.spyOn(dbService, 'countUnsyncedOutbox');
+    // No checkOutbox first: a stale badge count must not suppress the worker.
+    try {
+      await useSyncStore.getState().triggerSyncWorker();
+      expect(counts.mock.calls.length).toBeLessThanOrEqual(3); // two pages + cleanup, never per batch
+    } finally { counts.mockRestore(); }
+    expect(calls.flatMap(call => call.rows)).toHaveLength(1201);
+    expect(calls.every(call => call.rows.length <= 200)).toBe(true);
+    expect(await db.outbox.where('status').equals('pending').count()).toBe(0);
+  }, 60000);
+
+  it('latches before asynchronous session checks so two triggers never send the same page', async () => {
+    await db.outbox.add(queued('tickets', 'ONCE'));
+    await Promise.all([useSyncStore.getState().triggerSyncWorker(), useSyncStore.getState().triggerSyncWorker()]);
+    expect(calls.flatMap(call => call.rows).map(row => row.id)).toEqual(['ONCE']);
+  });
+
+  it('leaves the queue intact when another tab owns the browser sync lock', async () => {
+    await db.outbox.add(queued('tickets', 'LOCKED'));
+    (navigator as any).locks = { request: async (_name: string, _options: any, callback: any) => callback(null) };
+    await useSyncStore.getState().triggerSyncWorker();
+    expect(calls).toHaveLength(0);
+    expect(await db.outbox.where('status').equals('pending').count()).toBe(1);
+    (navigator as any).locks.request = async (_name: string, _options: any, callback: any) => callback({});
+    await useSyncStore.getState().triggerSyncWorker();
+    expect(calls.flatMap(call => call.rows).map(row => row.id)).toEqual(['LOCKED']);
+  });
+
+  it('never replays an older failed ticket over a newer acknowledged void', async () => {
+    const old = { ...queued('tickets', 'VOIDED'), retryCount: 2, createdAt: '2026-01-01T00:00:00Z', payload: { id: 'VOIDED', status: 'paid', amount: 500 } };
+    const newer = { ...queued('tickets', 'VOIDED'), status: 'synced' as const, createdAt: '2026-01-01T00:01:00Z', payload: { id: 'VOIDED', status: 'void', amount: 500 } };
+    await db.outbox.bulkAdd([old, newer]);
+    expect(await dbService.pruneSyncedOutbox()).toBe(0); // retain the newer acknowledgement
+    await useSyncStore.getState().triggerSyncWorker();
+    expect(calls).toHaveLength(0);
+    expect(await db.outbox.where('status').equals('pending').count()).toBe(0);
+  });
+
+  it('retains an older retry until its newer replacement has actually reached the cloud', async () => {
+    const old = { ...queued('shifts', 'CLOSED'), retryCount: 2, createdAt: '2026-01-01T00:00:00Z' };
+    const newer = { ...queued('shifts', 'CLOSED'), nextAttemptAt: '2099-01-01T00:00:00Z', createdAt: '2026-01-01T00:01:00Z', payload: { id: 'CLOSED', status: 'closed' } };
+    await db.outbox.bulkAdd([old, newer]);
+    await useSyncStore.getState().triggerSyncWorker();
+    expect(calls).toHaveLength(0);
+    expect(await db.outbox.where('status').equals('pending').count()).toBe(2);
+    await dbService.markOutboxSynced(newer.id);
+    await db.outbox.update(old.id, { nextAttemptAt: undefined });
+    await useSyncStore.getState().triggerSyncWorker();
+    expect(calls).toHaveLength(0);
+    expect(await db.outbox.where('status').equals('pending').count()).toBe(0);
+  });
+
   it('sends a record queued mid-push as soon as that push lands, without waiting for a poll', async () => {
     await db.outbox.add(queued('tickets', 'T1'));
     await useSyncStore.getState().checkOutbox();

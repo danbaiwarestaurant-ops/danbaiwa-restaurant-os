@@ -67,25 +67,12 @@ export async function runBackfillPush(): Promise<number> {
 
   for (const { pg, dexie } of BACKFILL_TABLES) {
     try {
-      const localRows: any[] = await (db as any)[dexie].toArray();
+      const localRows: any[] = (await (db as any)[dexie].toArray())
+        .filter((row: any) => !row.accountId || row.accountId === accountId);
       if (!localRows.length) continue;
 
-      // Ask how many rows the cloud holds before asking which. `head: true` returns the
-      // count in a header and no rows at all, so this costs nothing to transfer — whereas
-      // the id list below is every id the account owns, which at 3,000 tickets a day is
-      // megabytes. When the two agree there is nothing this sweep could queue, and the
-      // expensive read is skipped entirely.
-      //
-      // Equal counts with differing ids is possible in principle (one row missing here,
-      // an unrelated one missing there). It is repaired by the same statement on the next
-      // sweep where the counts do differ, and the outbox — not this net — is what actually
-      // gets a written row to the cloud.
-      const { count, error: countError } = await supabase
-        .from(pg)
-        .select('id', { count: 'exact', head: true })
-        .eq('account_id', accountId);
-
-      if (!countError && typeof count === 'number' && count >= localRows.length) continue;
+      // Equal counts do not prove equal ids. Always compare ids on this infrequent
+      // recovery sweep so a lost outbox entry can be repaired even on a busy account.
 
       // Only ids are needed for the diff, so this stays cheap even on a long history.
       // Scoped to this account: without the filter another tenant's ids could read as

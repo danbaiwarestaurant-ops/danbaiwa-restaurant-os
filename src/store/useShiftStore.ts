@@ -23,6 +23,8 @@ interface ShiftState {
   reconcileClosedShift: (shiftId: string, countedCash: number) => Promise<void>;
 }
 
+let shiftGeneration = 0;
+
 export const useShiftStore = create<ShiftState>((set, get) => ({
   currentShift: null,
   shiftHistory: [],
@@ -36,10 +38,16 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   },
 
   loadShift: async (userId?: string) => {
-    set({ isLoading: true });
-    await dbService.init();
-    const shift = await dbService.getCurrentShift(userId);
-    set({ currentShift: shift, isLoading: false });
+    const generation = ++shiftGeneration;
+    set({ isLoading: true, ...(!userId || get().currentShift?.cashierId !== userId ? { currentShift: null } : {}) });
+    try {
+      await dbService.init();
+      const shift = await dbService.getCurrentShift(userId);
+      if (generation === shiftGeneration) set({ currentShift: shift, isLoading: false });
+    } catch (error) {
+      if (generation === shiftGeneration) set({ isLoading: false });
+      throw error;
+    }
   },
 
   // openingFloat defaults to 0: opening a shift is a one-click confirmation and no
@@ -58,6 +66,8 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     const newShift: Shift = {
       id: crypto.randomUUID(),
       locationId: config.locationId || 'LOC01',
+      installationId: await dbService.getInstallationId(),
+      accountId: activeUser?.accountId,
       deviceId: config.deviceId || 'DEV01',
       cashierId: resolvedCashierId,
       cashierName: resolvedCashierName,
@@ -67,7 +77,8 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     };
 
     await dbService.saveShift(newShift);
-    set({ currentShift: newShift });
+    shiftGeneration++;
+    set({ currentShift: newShift, isLoading: false });
     // The till's sidebar pages by shift boundary, so a shift the history does not know
     // about yet would have its first tickets filed against the previous one.
     await get().loadShiftHistory();
@@ -104,6 +115,7 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
 
     await dbService.closeShift(shift.id, recon.countedCash, recon.expectedCash, recon.variance, notes, pending);
 
+    shiftGeneration++;
     set({ currentShift: null });
     // Scoped to the cashier who owned it — an unscoped reload could pick up a *different*
     // user's open shift and present it as this till's own.

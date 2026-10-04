@@ -34,11 +34,11 @@ import { takesSales } from './utils/roles';
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Idle Auto-Lock
 
 export function App() {
-  const { loadConfig } = useDeviceStore();
+  const { config, loadConfig } = useDeviceStore();
   const { loadTickets, voidTicket, printError, clearPrintError } = useTicketStore();
   const { currentShift, loadShift, loadShiftHistory, openShift } = useShiftStore();
   const { loadExpenses } = useExpenseStore();
-  const { checkOutbox } = useSyncStore();
+  const checkOutbox = useSyncStore(state => state.checkOutbox);
   const { loadAuditLogs } = useAuditStore();
 
   const {
@@ -145,7 +145,7 @@ export function App() {
     if (!activeUser || activeUser.role === 'admin') return;
     const open = useShiftStore.getState().currentShift;
 
-    if (isStaleShift(open)) {
+    if (isStaleShift(open, new Date(), config.businessDayStartHour)) {
       setMustCloseStaleShift(true);
       setIsCloseShiftOpen(true);
       return;
@@ -188,7 +188,8 @@ export function App() {
       // Still the signed-in user's own shift, not a rollup: the console's shift control
       // acts on this till, and a stale value there would offer to open a second shift for
       // a cashier who already has one.
-      loadShift(activeUser.id).then(settleShiftForSignIn);
+      if (activeUser.role !== 'admin') loadShift(activeUser.id).then(settleShiftForSignIn);
+      else void loadShift();
       return;
     }
 
@@ -212,10 +213,10 @@ export function App() {
    * for, and the check is two date comparisons against state already in memory.
    */
   useEffect(() => {
-    if (!isAuthenticated || !currentShift) return;
+    if (!isAuthenticated || !currentShift || activeUser?.role === 'admin') return;
 
     const check = () => {
-      if (!isStaleShift(useShiftStore.getState().currentShift)) return;
+      if (!isStaleShift(useShiftStore.getState().currentShift, new Date(), useDeviceStore.getState().config.businessDayStartHour)) return;
       setMustCloseStaleShift(true);
       setIsCloseShiftOpen(true);
     };
@@ -223,7 +224,7 @@ export function App() {
     check();
     const timer = setInterval(check, 60_000);
     return () => clearInterval(timer);
-  }, [isAuthenticated, currentShift?.id, currentShift?.openedAt]);
+  }, [isAuthenticated, currentShift?.id, currentShift?.openedAt, config.businessDayStartHour]);
 
   // 5-Minute Inactivity Idle Auto-Lock Timer
   useEffect(() => {

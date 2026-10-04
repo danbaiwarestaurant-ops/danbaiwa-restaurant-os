@@ -19,7 +19,7 @@
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
 import { selectAllPages } from '../supabase/pagedSelect';
 import { toCamelCase } from '../../utils/caseMapping';
-import { applyRemoteRow, applyRemoteSettings, loadDirtyIds, SyncablePgTable } from './remoteMerge';
+import { applyRemoteRow, applyRemoteSettings, applyRemoteRows, SyncablePgTable } from './remoteMerge';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { runBackfillPush } from './cloudBackfill';
 import { getAccountId, stampLocalRowsWithAccount } from './accountScope';
@@ -91,27 +91,25 @@ const reloadTimers: Partial<Record<SyncablePgTable, ReturnType<typeof setTimeout
 
 /** Tickets/expenses show an account-wide rollup for admins, but only "my own" for
  *  cashiers — mirrors App.tsx's loading scope so realtime-triggered reloads match. */
-function scopedUserId(): string | undefined {
-  const activeUser = useAuthStore.getState().activeUser;
-  return activeUser?.role === 'admin' ? undefined : activeUser?.id;
-}
 
 function scheduleStoreReload(pgTable: SyncablePgTable): void {
   if (reloadTimers[pgTable]) clearTimeout(reloadTimers[pgTable]);
   reloadTimers[pgTable] = setTimeout(() => {
     switch (pgTable) {
       case 'tickets':
-        useTicketStore.getState().loadTickets(scopedUserId());
+        useTicketStore.getState().loadTickets(useTicketStore.getState().scope);
         break;
       case 'shifts':
         // currentShift is a personal "is my shift open" gate, never a rollup —
         // always scoped to the signed-in user regardless of role. See App.tsx.
-        useShiftStore.getState().loadShift(useAuthStore.getState().activeUser?.id);
+        if (useAuthStore.getState().activeUser?.role !== 'admin') {
+          useShiftStore.getState().loadShift(useAuthStore.getState().activeUser?.id);
+        }
         // The console's reconciliation view reads every shift, so refresh that too.
         useShiftStore.getState().loadShiftHistory();
         break;
       case 'expenses':
-        useExpenseStore.getState().loadExpenses(undefined, scopedUserId());
+        useExpenseStore.getState().loadExpenses(useExpenseStore.getState().scope.shiftId, useExpenseStore.getState().scope.userId);
         break;
       case 'server_sales':
         // Account-wide, never scoped to the signed-in user: these are entered by a manager
@@ -218,17 +216,11 @@ export async function runReconciliationPull(
         continue;
       }
 
-      // One indexed read for the whole table, rather than a full outbox walk per row.
-      const dirtyIds = await loadDirtyIds(pgTable);
-
-      let changedAny = false;
-      let newest = '';
-      for (const row of data) {
+      const changedAny = await applyRemoteRows(pgTable, data.map(row => toCamelCase(row)));
+      const newest = data.reduce((latest, row) => {
         const stamp = String((row as any).updated_at ?? '');
-        if (stamp > newest) newest = stamp;
-        const changed = await applyRemoteRow(pgTable, toCamelCase(row), 'UPDATE', dirtyIds);
-        if (changed) changedAny = true;
-      }
+        return stamp > latest ? stamp : latest;
+      }, '');
 
       // Only ever advanced after the rows it covers have actually been applied, so a
       // failure part-way through re-reads them next time rather than skipping them.
@@ -271,15 +263,11 @@ export async function runReconciliationPull(
  * Full two-way catch-up, to be run whenever this device (re)gains a cloud session:
  * on login, on reconnect, and on the periodic safety net.
  *
- * Order matters. Stamping comes first: rows created before account scoping existed carry
- * no accountId, and the cloud would reject every one of them, so they must be claimed by
- * the signed-in account before anything tries to upload them. Reviving the outbox next
- * clears any backoff left over from the disconnected stretch, so the backfill sweep sees
- * an accurate picture of what is genuinely still owed. Backfill then queues anything the
- * cloud never received, and only then do we pull down — so a device holding the sole copy
- * of some history uploads it before it starts merging remote state on top of its own.
+ * Send already-queued work before doing expensive historical comparisons. Queue
+ * entries are stamped when sent; older domain rows are stamped in bounded chunks
+ * before deep backfill. Pulls then merge without overwriting unsent local mutations.
  */
-export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
+async function catchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
 
   // Reviving means "clear every backoff and try the lot again", which is right when
@@ -304,22 +292,19 @@ export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<
   // learn nothing — more than a month's transfer allowance every hour. Now it runs when
   // something has actually changed (a sign-in, the network returning) and every six hours
   // otherwise, and even then it looks back a day rather than for ever.
-  const deep = revive || Date.now() - lastDeepSweep >= DEEP_SWEEP_EVERY_MS;
+  const deep = Date.now() - lastDeepSweep >= DEEP_SWEEP_EVERY_MS;
   if (deep) lastDeepSweep = Date.now();
 
   try {
-    const accountId = await getAccountId();
-    if (accountId) await stampLocalRowsWithAccount(accountId);
-
-    const revived = revive ? await dbService.revivePendingOutbox() : 0;
-    if (revived) {
-      console.info(`[realtimeSync] revived ${revived} outbox row(s) that were parked as failed`);
-    }
-    const queued = deep ? await runBackfillPush() : 0;
-    if (revive || queued) {
-      // Push immediately rather than waiting for the next poll.
-      await useSyncStore.getState().checkOutbox();
-      await useSyncStore.getState().triggerSyncWorker();
+    if (revive) await dbService.revivePendingOutbox();
+    // Sending the existing queue must not wait for a full-history cloud comparison.
+    await useSyncStore.getState().checkOutbox();
+    await useSyncStore.getState().triggerSyncWorker();
+    if (deep) {
+      const accountId = await getAccountId();
+      if (accountId) await stampLocalRowsWithAccount(accountId);
+      const queued = await runBackfillPush();
+      if (queued) await useSyncStore.getState().triggerSyncWorker();
     }
   } catch (e) {
     console.warn('[realtimeSync] upward catch-up failed:', e);
@@ -330,6 +315,13 @@ export async function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<
   // re-reading the whole history would cost the same whether it had missed a minute or a
   // year, which is precisely the behaviour that made a flaky connection expensive.
   return runReconciliationPull(deep ? { lookBackMs: DEEP_SWEEP_LOOKBACK_MS } : {});
+}
+
+let catchUpFlight: Promise<boolean> | null = null;
+export function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
+  if (catchUpFlight) return catchUpFlight;
+  catchUpFlight = catchUp(opts).finally(() => { catchUpFlight = null; });
+  return catchUpFlight;
 }
 
 /** Opens one realtime channel covering all five syncable tables, plus the reconnect/

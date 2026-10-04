@@ -7,6 +7,7 @@ import { formatCurrency } from '../../utils/currency';
 import { calculateShiftReconciliation } from '../../utils/reconciliation';
 import { shiftTickets, shiftExpenses, splitByTender, sumApprovedExpenses } from '../../utils/analytics';
 import { staleDayCount } from '../../utils/shiftDay';
+import { useDeviceStore } from '../../store/useDeviceStore';
 
 interface CloseShiftModalProps {
   isOpen: boolean;
@@ -31,6 +32,7 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
   const { currentShift, closeShift } = useShiftStore();
   const { tickets } = useTicketStore();
   const { expenses } = useExpenseStore();
+  const startHour = useDeviceStore(s => s.config.businessDayStartHour);
 
   if (!isOpen || !currentShift) return null;
 
@@ -48,7 +50,7 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
   // rather than merely implied: a cashier asked to count a drawer needs to know which
   // day's money they are being held to, especially when it is not the money in front
   // of them right now.
-  const daysBehind = staleDayCount(currentShift);
+  const daysBehind = staleDayCount(currentShift, new Date(), startHour);
   const openedLabel = new Date(currentShift.openedAt).toLocaleString(undefined, {
     weekday: 'long',
     day: 'numeric',

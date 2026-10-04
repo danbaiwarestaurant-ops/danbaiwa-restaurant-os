@@ -16,11 +16,13 @@ function savedUnit(): PeriodUnit {
 interface ConsolePeriodState {
   period: Period;
   weekStartsOn: number;
+  businessDayStartHour: number;
   setUnit: (unit: PeriodUnit) => void;
   step: (delta: number) => void;
   goToCurrent: () => void;
   isCurrent: () => boolean;
   setWeekStartsOn: (day: number) => void;
+  setCalendar: (weekStartsOn: number, businessDayStartHour: number) => void;
 }
 
 /**
@@ -37,6 +39,7 @@ interface ConsolePeriodState {
 export const useConsolePeriodStore = create<ConsolePeriodState>((set, get) => ({
   period: periodFor(savedUnit()),
   weekStartsOn: 1,
+  businessDayStartHour: 0,
 
   setUnit: (unit) => {
     try {
@@ -49,14 +52,22 @@ export const useConsolePeriodStore = create<ConsolePeriodState>((set, get) => ({
 
   step: (delta) => set({ period: shiftPeriod(get().period, delta) }),
 
-  goToCurrent: () => set({ period: periodFor(get().period.unit, new Date(), get().weekStartsOn) }),
+  goToCurrent: () => set({ period: periodFor(get().period.unit, new Date(), get().weekStartsOn, get().businessDayStartHour) }),
 
   isCurrent: () => isCurrentPeriod(get().period),
 
   setWeekStartsOn: (day) => {
+    get().setCalendar(day, get().businessDayStartHour);
+  },
+
+  setCalendar: (day, hour) => {
     const weekStartsOn = Number.isInteger(day) && day >= 0 && day <= 6 ? day : 1;
+    const businessDayStartHour = Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 6;
+    if (weekStartsOn === get().weekStartsOn && businessDayStartHour === get().businessDayStartHour) return;
     const current = get().period;
-    const anchor = isCurrentPeriod(current) ? new Date() : current.start;
-    set({ weekStartsOn, period: periodFor(current.unit, anchor, weekStartsOn) });
+    const anchor = isCurrentPeriod(current) ? new Date() : new Date(current.start);
+    // Preserve a historical trading-date label when the boundary moves later.
+    if (!isCurrentPeriod(current)) anchor.setHours(businessDayStartHour, 0, 0, 0);
+    set({ weekStartsOn, businessDayStartHour, period: periodFor(current.unit, anchor, weekStartsOn, businessDayStartHour) });
   },
 }));

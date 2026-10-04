@@ -159,37 +159,24 @@ function explainOpenFailure(e: any): Error {
 async function writeSerial(port: any, bytes: Uint8Array, baudRate: number): Promise<void> {
   // Opening a port already open throws; reopening one left open by a previous ticket is
   // both slower and a common source of "the second receipt never prints".
-  let opened = false;
   if (!port.writable) {
     try {
       await port.open({ baudRate });
     } catch (e) {
       throw explainOpenFailure(e);
     }
-    opened = true;
   }
 
   const writer = port.writable.getWriter();
   try {
     await writer.write(bytes);
+  } catch (error: any) {
+    // Dispatch may have partly succeeded; never fall back and print a duplicate.
+    error.dispatchUncertain = true;
+    throw error;
   } finally {
-    // The lock must go back before anything else can use the port, even on failure.
-    try {
-      await writer.close();
-    } catch {
-      try {
-        writer.releaseLock();
-      } catch {
-        /* already gone */
-      }
-    }
-    if (opened) {
-      try {
-        await port.close();
-      } catch {
-        /* a closed port is the desired state either way */
-      }
-    }
+    // Keep the serial connection open between receipts, release only the writer lock.
+    try { writer.releaseLock(); } catch { /* disconnected */ }
   }
 }
 
@@ -233,7 +220,15 @@ async function writeUsb(device: any, bytes: Uint8Array): Promise<void> {
 
   await device.claimInterface(target.interfaceNumber);
   try {
-    await device.transferOut(target.endpoint, bytes);
+    try {
+      const result = await device.transferOut(target.endpoint, bytes);
+      if (result.status !== 'ok' || result.bytesWritten !== bytes.length) {
+        throw new Error('Printer accepted an incomplete receipt. Check the paper before reprinting.');
+      }
+    } catch (error: any) {
+      error.dispatchUncertain = true;
+      throw error;
+    }
   } finally {
     try {
       await device.releaseInterface(target.interfaceNumber);

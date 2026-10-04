@@ -4,6 +4,8 @@ import { InventoryBatch, InventoryItem, InventoryMovement, InventoryMovementType
 import { fifoAllocate, stockSummary, validateInventoryUnits } from '../utils/inventory';
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';
+import { useDeviceStore } from './useDeviceStore';
+import { businessDayKey } from '../utils/shiftDay';
 
 interface InventoryState {
   items: InventoryItem[];
@@ -18,7 +20,7 @@ interface InventoryState {
   count: (item: InventoryItem, countedQuantity: number, note: string) => Promise<void>;
 }
 
-const dayKey = () => new Date().toLocaleDateString('en-CA');
+const dayKey = () => businessDayKey(new Date(), useDeviceStore.getState().config.businessDayStartHour);
 const syncNow = () => useSyncStore.getState().checkOutbox().then(() => useSyncStore.getState().triggerSyncWorker());
 
 export const useInventoryStore = create<InventoryState>((set, get) => ({

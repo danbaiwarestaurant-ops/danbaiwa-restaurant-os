@@ -7,6 +7,7 @@ import { useServerSalesStore } from '../../../store/useServerSalesStore';
 import { formatCurrency } from '../../../utils/currency';
 import { staffSalesRollups, staffMealRollups } from '../../../utils/analytics';
 import { filterByPeriod } from '../../../utils/period';
+import { businessDayKey } from '../../../utils/shiftDay';
 import { Panel, DataTable, EmptyState, StatusBadge } from '../ConsoleUI';
 import { StaffManagement } from '../StaffManagement';
 import { Users, UtensilsCrossed } from 'lucide-react';
@@ -40,10 +41,8 @@ export const StaffView: React.FC = () => {
    * already the unit, and re-parsing it into a Date only invites a timezone question.
    */
   const serverTickets = useMemo(() => {
-    const ymd = (d: Date) =>
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    const from = ymd(period.start);
-    const to = ymd(new Date(period.end.getTime() - 1));
+    const from = businessDayKey(period.start, period.businessDayStartHour ?? 0);
+    const to = businessDayKey(new Date(period.end.getTime() - 1), period.businessDayStartHour ?? 0);
     const totals: Record<string, number> = {};
     for (const e of serverEntries) {
       if (e.businessDay < from || e.businessDay > to) continue;

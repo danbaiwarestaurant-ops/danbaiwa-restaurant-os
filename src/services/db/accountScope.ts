@@ -95,16 +95,15 @@ export async function stampLocalRowsWithAccount(accountId: string): Promise<numb
     if (!table) continue;
 
     try {
-      const rows: any[] = await table.toArray();
-      const unstamped = rows.filter((r) => r && !r.accountId);
-      if (!unstamped.length) continue;
-
-      await db.transaction('rw', table, async () => {
-        for (const row of unstamped) {
-          await table.put({ ...row, accountId });
-        }
-      });
-      stamped += unstamped.length;
+      const ids = (await table.filter((row: any) => row && !row.accountId).primaryKeys()) as string[];
+      for (let offset = 0; offset < ids.length; offset += 200) {
+        stamped += await db.transaction('rw', table, async () => {
+          // Modify the CURRENT row; never put a stale snapshot over a new sale/edit.
+          return table.where('id').anyOf(ids.slice(offset, offset + 200))
+            .filter((row: any) => !row.accountId).modify({ accountId });
+        });
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     } catch (e) {
       console.warn(`[accountScope] could not stamp local ${tableName} rows:`, e);
     }

@@ -172,13 +172,14 @@ export function bucketRevenue(tickets: Ticket[], buckets: Bucket[]): DayPoint[] 
  * therefore the account's lifetime revenue, so the variance recorded against the shift was
  * meaningless and every closed shift was flagged.
  */
-export function shiftTickets(tickets: Ticket[], shift: Pick<Shift, 'cashierId' | 'openedAt' | 'closedAt'>): Ticket[] {
+export function shiftTickets(tickets: Ticket[], shift: Pick<Shift, 'cashierId' | 'openedAt' | 'closedAt'> & { id?: string }): Ticket[] {
   const from = Date.parse(shift.openedAt);
   const to = shift.closedAt ? Date.parse(shift.closedAt) : Number.POSITIVE_INFINITY;
   if (Number.isNaN(from)) return [];
 
   return tickets.filter((t) => {
     if (t.cashierId !== shift.cashierId) return false;
+    if (t.shiftId && shift.id) return t.shiftId === shift.id;
     const at = Date.parse(t.createdAt);
     return !Number.isNaN(at) && at >= from && at <= to;
   });
@@ -193,6 +194,7 @@ export function shiftTickets(tickets: Ticket[], shift: Pick<Shift, 'cashierId' |
  * group rather than being folded into a neighbouring shift's.
  */
 export function shiftIdForTicket(ticket: Ticket, shifts: Shift[]): string {
+  if (ticket.shiftId) return ticket.shiftId;
   const at = Date.parse(ticket.createdAt);
   if (Number.isNaN(at)) return '';
 
@@ -222,9 +224,37 @@ export function paginateByShift(tickets: Ticket[], shifts: Shift[], pageSize: nu
   const pages: Ticket[][] = [];
   let page: Ticket[] = [];
   let pageShiftId: string | null = null;
+  // Parse shift windows once. A large legacy ledger otherwise did tickets ? shifts
+  // date parsing on every sale, even though almost every cashier's windows are disjoint.
+  const windows = new Map<string, Array<{ id: string; from: number; to: number }>>();
+  for (const shift of shifts) {
+    const from = Date.parse(shift.openedAt);
+    if (Number.isNaN(from)) continue;
+    const rows = windows.get(shift.cashierId) || [];
+    rows.push({ id: shift.id, from, to: shift.closedAt ? Date.parse(shift.closedAt) : Infinity });
+    windows.set(shift.cashierId, rows);
+  }
+  const overlapping = new Set<string>();
+  for (const [cashierId, rows] of windows) {
+    rows.sort((a, b) => a.from - b.from);
+    if (rows.some((row, i) => i > 0 && rows[i - 1].to >= row.from)) overlapping.add(cashierId);
+  }
+  const owner = (ticket: Ticket): string => {
+    if (ticket.shiftId) return ticket.shiftId;
+    if (overlapping.has(ticket.cashierId)) return shiftIdForTicket(ticket, shifts);
+    const rows = windows.get(ticket.cashierId) || [];
+    const at = Date.parse(ticket.createdAt);
+    let lo = 0, hi = rows.length - 1, found = -1;
+    while (lo <= hi) {
+      const middle = (lo + hi) >>> 1;
+      if (rows[middle].from <= at) { found = middle; lo = middle + 1; }
+      else hi = middle - 1;
+    }
+    return found >= 0 && at <= rows[found].to ? rows[found].id : '';
+  };
 
   for (const t of tickets) {
-    const shiftId = shiftIdForTicket(t, shifts);
+    const shiftId = owner(t);
     if (page.length > 0 && (shiftId !== pageShiftId || page.length >= pageSize)) {
       pages.push(page);
       page = [];

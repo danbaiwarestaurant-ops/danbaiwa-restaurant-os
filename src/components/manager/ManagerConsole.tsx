@@ -58,11 +58,11 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
   const { stuckCount } = useSyncStore();
   const { currentShift } = useShiftStore();
   const admin = useAuthStore((s) => s.users.find((u) => u.role === 'admin'));
-  const setWeekStartsOn = useConsolePeriodStore((s) => s.setWeekStartsOn);
+  const setCalendar = useConsolePeriodStore((s) => s.setCalendar);
 
   useEffect(() => {
-    setWeekStartsOn(config.weekStartsOn ?? 1);
-  }, [config.weekStartsOn, setWeekStartsOn]);
+    setCalendar(config.weekStartsOn ?? 1, config.businessDayStartHour ?? 6);
+  }, [config.weekStartsOn, config.businessDayStartHour, setCalendar]);
 
   const [view, setView] = useState<ConsoleViewId>(() => {
     try {

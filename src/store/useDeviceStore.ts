@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { DeviceConfig } from '../types/config';
 import { dbService } from '../services/db/IndexedDbService';
+import { cleanBusinessDayStartHour, BUSINESS_DAY_START_HOUR } from '../utils/shiftDay';
 
 interface DeviceState {
   config: DeviceConfig;
@@ -36,6 +37,7 @@ const defaultConfig: DeviceConfig = {
     { id: 'extra-duty', label: 'Extra duty', fixedAmount: 0 },
   ],
   weekStartsOn: 1,
+  businessDayStartHour: BUSINESS_DAY_START_HOUR,
   paperWidthMm: 58,
   isConfigured: true,
 };
@@ -55,6 +57,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
         penaltyRules: saved.penaltyRules ?? defaultConfig.penaltyRules,
         performanceRewardRules: saved.performanceRewardRules ?? defaultConfig.performanceRewardRules,
         weekStartsOn: saved.weekStartsOn ?? defaultConfig.weekStartsOn,
+        businessDayStartHour: cleanBusinessDayStartHour(saved.businessDayStartHour),
       }, isLoaded: true });
     } else {
       set({ config: defaultConfig, isLoaded: true });
@@ -62,8 +65,16 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
   },
 
   updateConfig: async (newConfig: Partial<DeviceConfig>) => {
-    const updated = { ...get().config, ...newConfig };
+    if (newConfig.businessDayStartHour !== undefined && (!Number.isInteger(newConfig.businessDayStartHour) || newConfig.businessDayStartHour < 0 || newConfig.businessDayStartHour > 23)) {
+      throw new Error('Starting hour of day must be a whole hour from 00:00 to 23:00.');
+    }
+    const previous = get().config;
+    const updated = { ...previous, ...newConfig };
     set({ config: updated });
-    await dbService.saveDeviceConfig(updated);
+    try { await dbService.saveDeviceConfig(updated); }
+    catch (error) {
+      if (get().config === updated) set({ config: previous });
+      throw error;
+    }
   },
 }));

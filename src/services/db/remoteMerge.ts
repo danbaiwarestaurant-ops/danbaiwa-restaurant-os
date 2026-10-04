@@ -13,7 +13,7 @@
  *    a stale remote pull must never clobber a local edit that hasn't synced up yet.
  */
 
-import { db, computeLoginKeys, UserRow } from './dexieSchema';
+import { db, computeLoginKeys } from './dexieSchema';
 
 /** Postgres/outbox table names — the only tables realtime/reconciliation sync touches.
  *  sequences/config/outbox stay device-local and must never be written here. */
@@ -68,10 +68,12 @@ export async function applyRemoteSettings(remote: {
 }): Promise<boolean> {
   if (!remote?.settings || typeof remote.settings !== 'object') return false;
 
+  return db.transaction('rw', db.config, db.outbox, async () => {
   // Indexed on status, so this reads only what is still owed rather than walking every
   // outbox row the device has ever written.
-  const unsynced = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
-  if (unsynced.some((o) => o.tableName === 'account_settings')) return false;
+  const dirty = await db.outbox.where('[tableName+status]')
+    .anyOf([['account_settings', 'pending'], ['account_settings', 'failed']]).count();
+  if (dirty) return false;
 
   const existing = await db.config.get(DEVICE_CONFIG_KEY);
   const localUpdatedAt = (existing?.value as any)?.__updatedAt as string | undefined;
@@ -87,6 +89,7 @@ export async function applyRemoteSettings(remote: {
     value: { ...(existing?.value ?? {}), ...remote.settings, __updatedAt: remote.updatedAt },
   });
   return true;
+  });
 }
 
 /**
@@ -100,7 +103,8 @@ export async function applyRemoteSettings(remote: {
  * to make the whole queue look frozen. Callers that apply many rows load the set once.
  */
 export async function loadDirtyIds(pgTable: SyncablePgTable): Promise<Set<string>> {
-  const rows = await db.outbox.where('status').anyOf('pending', 'failed').toArray();
+  const rows = await db.outbox.where('[tableName+status]')
+    .anyOf([[pgTable, 'pending'], [pgTable, 'failed']]).toArray();
   const ids = new Set<string>();
   for (const row of rows) {
     if (row.tableName !== pgTable) continue;
@@ -112,7 +116,8 @@ export async function loadDirtyIds(pgTable: SyncablePgTable): Promise<Set<string
 
 /** True when a pending/failed outbox entry exists for this row — it hasn't synced up yet. */
 export async function isRowDirty(pgTable: SyncablePgTable, id: string): Promise<boolean> {
-  return (await loadDirtyIds(pgTable)).has(id);
+  return await db.outbox.where('[tableName+payload.id+status]')
+    .anyOf([[pgTable, id, 'pending'], [pgTable, id, 'failed']]).count() > 0;
 }
 
 /** Last-write-wins: apply the incoming row only if it's strictly newer than what's local. */
@@ -135,35 +140,50 @@ export async function applyRemoteRow(
   /** Pre-loaded dirty ids, for callers applying a whole table's worth of rows. */
   dirtyIds?: Set<string>
 ): Promise<boolean> {
-  const dexieTable = db[DEXIE_TABLE[pgTable]] as any;
-  const id = camelRow.id as string;
-  if (!id) return false;
-
-  const isDirty = dirtyIds ? dirtyIds.has(id) : await isRowDirty(pgTable, id);
-
-  if (op === 'DELETE') {
-    if (isDirty) return false;
-    await dexieTable.delete(id);
+  // The optional snapshot is advisory only. A new local write can arrive after it.
+  void dirtyIds;
+  const table = db[DEXIE_TABLE[pgTable]] as any;
+  return db.transaction('rw', table, db.outbox, async () => {
+    const id = camelRow.id as string;
+    if (!id || await isRowDirty(pgTable, id)) return false;
+    if (op === 'DELETE') {
+      await table.delete(id);
+      return true;
+    }
+    const existing = await table.get(id);
+    if (!shouldApplyRemote(existing, camelRow)) return false;
+    await table.put(normaliseRemote(pgTable, camelRow));
     return true;
+  });
+}
+
+function normaliseRemote(pgTable: SyncablePgTable, row: Record<string, any>): Record<string, any> {
+  if (pgTable === 'users') return { ...row, loginKeys: computeLoginKeys(row as any) };
+  if (pgTable === 'tickets') return { ...row, qrPayload: row.qrPayload || ticketQrPayload(row as any) };
+  return row;
+}
+
+/** Short, atomic merge transactions; dirty checks cannot race a ticket mutation. */
+export async function applyRemoteRows(pgTable: SyncablePgTable, rows: Record<string, any>[]): Promise<boolean> {
+  const table = db[DEXIE_TABLE[pgTable]] as any;
+  let changed = false;
+  for (let offset = 0; offset < rows.length; offset += 200) {
+    const chunk = rows.slice(offset, offset + 200).filter(row => row.id);
+    changed = await db.transaction('rw', table, db.outbox, async () => {
+      const [dirty, existing] = await Promise.all([
+        db.outbox.where('[tableName+payload.id+status]')
+          .anyOf(chunk.flatMap(row => [[pgTable, row.id, 'pending'], [pgTable, row.id, 'failed']]))
+          .keys().then(keys => new Set(keys.map(key => String((key as any[])[1])))),
+        table.bulkGet(chunk.map(row => row.id)),
+      ]);
+      const writes = chunk.filter((row, i) => !dirty.has(row.id) && shouldApplyRemote(existing[i], row))
+        .map(row => normaliseRemote(pgTable, row));
+      if (writes.length) await table.bulkPut(writes);
+      return writes.length > 0;
+    }) || changed;
+    await new Promise(resolve => setTimeout(resolve, 0));
   }
-
-  if (isDirty) return false;
-
-  const existing = await dexieTable.get(id);
-  if (!shouldApplyRemote(existing, camelRow)) return false;
-
-  if (pgTable === 'users') {
-    const row: UserRow = { ...(camelRow as any), loginKeys: computeLoginKeys(camelRow as any) };
-    await dexieTable.put(row);
-  } else if (pgTable === 'tickets') {
-    await dexieTable.put({
-      ...camelRow,
-      qrPayload: camelRow.qrPayload || ticketQrPayload(camelRow as any),
-    });
-  } else {
-    await dexieTable.put(camelRow);
-  }
-  return true;
+  return changed;
 }
 
 /**

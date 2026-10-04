@@ -109,6 +109,11 @@ export class TicketPosDB extends Dexie {
       inventoryBatches: 'id, itemId, receivedAt, expiryDate',
       inventoryMovements: 'id, itemId, businessDay, type, recordedAt',
     });
+    // Index-only upgrade: keep every existing ticket, sequence and queued write.
+    this.version(4).stores({
+      tickets: 'id, cashierId, createdAt, status, shiftId, [cashierId+createdAt], [staffId+createdAt]',
+      outbox: 'id, status, createdAt, [status+createdAt], [status+createdAt+id], [status+retryCount], [tableName+status], [tableName+payload.id+status]',
+    });
   }
 }
 

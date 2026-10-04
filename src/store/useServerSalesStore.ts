@@ -22,7 +22,7 @@ interface ServerSalesState {
   /**
    * Records (or corrects) one server's count for one trading day.
    *
-   * `businessDay` is a trading day key from businessDayKey — the 6am-to-6am day, so an
+   * `businessDay` is a trading day key using the configured starting hour, so an
    * entry made at 1am after a late service still lands on the night that was worked.
    */
   recordCount: (input: {
