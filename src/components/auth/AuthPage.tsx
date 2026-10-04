@@ -9,6 +9,7 @@ export const AuthPage: React.FC = () => {
   
   // Login State
   const [loginEmail, setLoginEmail] = useState('');
+  const [identifiedLogin, setIdentifiedLogin] = useState(false);
   const [loginSecret, setLoginSecret] = useState('');
   
   // Register State (first-launch primary Admin setup only — see hasAnyUsers gating below)
@@ -27,11 +28,19 @@ export const AuthPage: React.FC = () => {
   // goes with it, so the banner never degrades to a bare "login failed".
   const [error, setErrorState] = useState<{ message: string; hint?: string | null } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
   const clearError = () => setErrorState(null);
   const showError = (message: string, hint?: string | null) => setErrorState({ message, hint });
 
   const { loginUser, loginWithPin, registerUser, updatePasswordAfterRecovery, lockoutUntil, failedAttempts, hasAnyUsers } = useAuthStore();
+
+  useEffect(() => {
+    if (!lockoutUntil) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [lockoutUntil]);
 
   // Check if user arrives via Supabase Email Reset Link (#type=recovery or PASSWORD_RECOVERY event)
   useEffect(() => {
@@ -79,8 +88,8 @@ export const AuthPage: React.FC = () => {
     }
   }, [hasAnyUsers, mode]);
 
-  const isLockedOut = lockoutUntil ? Date.now() < lockoutUntil : false;
-  const remainingLockoutSec = lockoutUntil ? Math.ceil((lockoutUntil - Date.now()) / 1000) : 0;
+  const isLockedOut = lockoutUntil ? now < lockoutUntil : false;
+  const remainingLockoutSec = lockoutUntil ? Math.max(0, Math.ceil((lockoutUntil - now) / 1000)) : 0;
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -91,7 +100,7 @@ export const AuthPage: React.FC = () => {
       setLoading(true);
       // The store owns every failure reason (empty field, lockout, unknown account,
       // wrong PIN, cloud restore problems) so the banner can state the actual one.
-      const result = hasAnyUsers ? await loginWithPin(loginSecret) : await loginUser(loginEmail, loginSecret);
+      const result = hasAnyUsers && !identifiedLogin ? await loginWithPin(loginSecret) : await loginUser(loginEmail, loginSecret);
       if (!result.ok) {
         showError(result.message, result.hint);
         return;
@@ -309,7 +318,8 @@ export const AuthPage: React.FC = () => {
         {/* Login Form */}
         {mode === 'login' && (
           <form onSubmit={handleLoginSubmit} className="space-y-4">
-            {!hasAnyUsers && <div>
+            {hasAnyUsers && <button type="button" className="w-full border-2 border-amber-400 p-3 text-sm font-bold" onClick={() => { setIdentifiedLogin(!identifiedLogin); clearError(); setLoginSecret(''); }}>{identifiedLogin ? 'Use quick staff PIN' : 'Admin / email or staff ID sign-in'}</button>}
+            {(!hasAnyUsers || identifiedLogin) && <div>
               <label className="block text-xs font-bold uppercase text-slate-700 mb-1 flex items-center gap-1">
                 <Mail className="w-3.5 h-3.5 text-amber-600" />
                 <span>Email Address / Staff ID</span>
@@ -341,7 +351,7 @@ export const AuthPage: React.FC = () => {
               <div className="flex justify-between items-center mb-1">
                 <label className="block text-xs font-bold uppercase text-slate-700 flex items-center gap-1">
                   <Lock className="w-3.5 h-3.5 text-amber-600" />
-                  <span>{hasAnyUsers ? 'Staff PIN' : 'Password or PIN'}</span>
+                  <span>{hasAnyUsers && !identifiedLogin ? 'Staff PIN' : 'Password or PIN'}</span>
                 </label>
                 <button
                   type="button"
@@ -355,8 +365,8 @@ export const AuthPage: React.FC = () => {
                 type="password"
                 value={loginSecret}
                 onChange={e => setLoginSecret(e.target.value)}
-                placeholder={hasAnyUsers ? 'Enter PIN' : 'Enter Password or PIN'}
-                inputMode={hasAnyUsers ? 'numeric' : undefined}
+                placeholder={hasAnyUsers && !identifiedLogin ? 'Enter PIN' : 'Enter Password or PIN'}
+                inputMode={hasAnyUsers && !identifiedLogin ? 'numeric' : undefined}
                 className="w-full p-3 border-2 border-slate-300 rounded-none font-mono text-sm font-bold text-slate-900 focus:border-amber-500 focus:outline-none"
                 disabled={isLockedOut}
                 required
@@ -365,7 +375,7 @@ export const AuthPage: React.FC = () => {
 
             <button
               type="submit"
-              disabled={loading || isLockedOut || (!hasAnyUsers && !loginEmail) || !loginSecret}
+              disabled={loading || isLockedOut || ((!hasAnyUsers || identifiedLogin) && !loginEmail) || !loginSecret}
               className="w-full py-3.5 mt-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-black uppercase text-sm tracking-wider border-2 border-amber-600 shadow-xs flex items-center justify-center gap-2 rounded-none transition active:scale-95"
             >
               <LogIn className="w-4 h-4" />

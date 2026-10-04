@@ -9,13 +9,20 @@ export function standardCostPerSalesUnit(item: InventoryItem): number {
   return (purchaseCost / basePerPurchase) * basePerSales;
 }
 
+export function standardCostPerCookingUnit(item: InventoryItem): number {
+  return standardCostPerSalesUnit({ ...item, baseUnitsPerSalesUnit: item.baseUnitsPerCookingUnit ?? item.baseUnitsPerSalesUnit });
+}
+
 export function calculateServerItemSales(item: InventoryItem, quantity: number): ServerItemSales {
   const cleanQuantity = Math.max(0, Number.isFinite(quantity) ? quantity : 0);
-  const configuredPreparationCost = Number(item.preparationCostPerSalesUnit);
+  const scale = item.cookingUnit && item.baseUnitsPerCookingUnit && item.baseUnitsPerSalesUnit
+    ? item.baseUnitsPerCookingUnit / item.baseUnitsPerSalesUnit : 1;
+  const legacyCost = item.preparationCostPerSalesUnit == null ? undefined : item.preparationCostPerSalesUnit * scale;
+  const configuredPreparationCost = Number(item.preparationCostPerCookingUnit ?? legacyCost);
   const unitCost = Number.isFinite(configuredPreparationCost) && configuredPreparationCost >= 0
     ? configuredPreparationCost
-    : standardCostPerSalesUnit(item);
-  const unitProfit = Math.max(0, item.profitPerSalesUnit || 0);
+    : standardCostPerCookingUnit(item);
+  const unitProfit = Math.max(0, item.profitPerCookingUnit ?? (item.profitPerSalesUnit || 0) * scale);
   const unitSales = unitCost + unitProfit;
   const cost = cleanQuantity * unitCost;
   const sales = cleanQuantity * unitSales;
@@ -24,7 +31,7 @@ export function calculateServerItemSales(item: InventoryItem, quantity: number):
     itemId: item.id,
     itemName: item.name,
     quantity: cleanQuantity,
-    salesUnit: item.salesUnit || item.baseUnit,
+    salesUnit: item.cookingUnit || item.salesUnit || item.baseUnit,
     unitCost,
     unitSales,
     unitProfit,

@@ -1115,3 +1115,9 @@ ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS variance NUMERIC(16,2) NOT NUL
 ALTER TABLE server_sales ADD COLUMN IF NOT EXISTS actual_profit_contribution NUMERIC(16,2) NOT NULL DEFAULT 0;
 ALTER TABLE staff_assessments ADD COLUMN IF NOT EXISTS rewards JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE staff_assessments ADD COLUMN IF NOT EXISTS reward_total NUMERIC(14,2) NOT NULL DEFAULT 0;
+
+-- Kitchen production units. Optional fields preserve existing ingredients and server history.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS cooking_unit TEXT;
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS base_units_per_cooking_unit NUMERIC CHECK (base_units_per_cooking_unit > 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS preparation_cost_per_cooking_unit NUMERIC(16,2) CHECK (preparation_cost_per_cooking_unit >= 0);
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS profit_per_cooking_unit NUMERIC(16,2) CHECK (profit_per_cooking_unit >= 0);

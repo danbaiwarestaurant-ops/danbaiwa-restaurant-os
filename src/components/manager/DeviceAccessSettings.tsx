@@ -1,3 +1,4 @@
+import { DataTable } from './ConsoleUI';
 import React, { useCallback, useEffect, useState } from 'react';
 import { MonitorSmartphone, Loader2, ShieldOff, ShieldCheck, RefreshCw } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../services/supabase/supabaseClient';
@@ -152,17 +153,7 @@ export const DeviceAccessSettings: React.FC = () => {
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-2 border-slate-200">
-            <thead className="bg-slate-100">
-              <tr className="text-[10px] font-black uppercase tracking-wider text-slate-600">
-                <th className="px-3 py-2 border-b-2 border-slate-200">Till</th>
-                <th className="px-3 py-2 border-b-2 border-slate-200">Enrolled</th>
-                <th className="px-3 py-2 border-b-2 border-slate-200">Last Seen</th>
-                <th className="px-3 py-2 border-b-2 border-slate-200">Status</th>
-                <th className="px-3 py-2 border-b-2 border-slate-200 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200">
+          <DataTable headers={['Till', 'Enrolled', 'Last seen', 'Status', 'Action']}>
               {devices.map((d) => {
                 const isThis = d.auth_user_id === thisDeviceId;
                 const isActive = d.status === 'active';
@@ -215,8 +206,7 @@ export const DeviceAccessSettings: React.FC = () => {
                   </tr>
                 );
               })}
-            </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

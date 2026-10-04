@@ -1,4 +1,17 @@
-import { InventoryBatch } from '../types/inventory';
+import { InventoryBatch, InventoryItem } from '../types/inventory';
+
+export function validateInventoryUnits(item: Omit<InventoryItem, 'id' | 'createdAt' | 'active'>) {
+  if (!item.name.trim() || !item.baseUnit.trim() || !item.purchaseUnit.trim()) throw new Error('Name, base and purchase units are required.');
+  if (!Number.isFinite(item.baseUnitsPerPurchaseUnit) || item.baseUnitsPerPurchaseUnit <= 0) throw new Error('Purchase conversion must be greater than zero.');
+  if (!Number.isFinite(item.reorderLevel) || item.reorderLevel < 0) throw new Error('Reorder level cannot be negative.');
+  for (const [unit, conversion, label] of [[item.cookingUnit, item.baseUnitsPerCookingUnit, 'Cooking'], [item.salesUnit, item.baseUnitsPerSalesUnit, 'Sales']] as const) {
+    if (unit && (!Number.isFinite(conversion) || Number(conversion) <= 0)) throw new Error(`${label} conversion must be greater than zero.`);
+    if (conversion && !unit?.trim()) throw new Error(`${label} unit name is required.`);
+  }
+  for (const cost of [item.standardPurchaseCost, item.preparationCostPerSalesUnit, item.profitPerSalesUnit, item.preparationCostPerCookingUnit, item.profitPerCookingUnit]) {
+    if (cost != null && (!Number.isFinite(cost) || cost < 0)) throw new Error('Costs and profit must be finite, non-negative amounts.');
+  }
+}
 
 export function fifoAllocate(batches: InventoryBatch[], requested: number) {
   let remaining = Math.max(0, requested);

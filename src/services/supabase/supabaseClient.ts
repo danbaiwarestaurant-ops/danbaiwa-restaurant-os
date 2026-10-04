@@ -32,6 +32,34 @@ export function deriveSupabasePassword(pin: string): string {
   return `Danbaiwa_POS_#2026_${pin}_Secret`;
 }
 
+/** Owner security changes must never modify or replace the till's cloud identity. */
+export async function updateOwnerCloudProfile(ownerId: string, email: string, currentPin?: string, newPin?: string, newEmail?: string) {
+  const changes = {
+    ...(newPin ? { password: deriveSupabasePassword(newPin) } : {}),
+    ...(newEmail ? { email: newEmail } : {}),
+  };
+  const { data } = await supabase.auth.getSession();
+  if (data.session?.user.id === ownerId && data.session.user.user_metadata?.kind !== 'pos-till') {
+    const { error } = await supabase.auth.updateUser(changes);
+    if (error) throw error;
+    return;
+  }
+  if (!currentPin) throw new Error('Enter the current admin PIN to update cloud security settings.');
+  const ownerClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+  try {
+    const result = await ownerClient.auth.signInWithPassword({ email, password: deriveSupabasePassword(currentPin) });
+    if (result.error) throw result.error;
+    if (result.data.user?.id !== ownerId) throw new Error('The authenticated cloud account does not own this admin profile.');
+    const { error } = await ownerClient.auth.updateUser(changes);
+    if (error) throw error;
+  } finally {
+    // Do not sign out: that can revoke the owner's other sessions.
+    await ownerClient.auth.stopAutoRefresh();
+  }
+}
+
 /**
  * Where a Supabase email link (password reset, email confirmation) is allowed to land.
  *

@@ -28,12 +28,12 @@ export const Header: React.FC<HeaderProps> = ({
   const { currentShift } = useShiftStore();
 
   return (
-    <header className="bg-white border-b-4 border-amber-500 px-6 py-4 shadow-xs flex flex-wrap items-center justify-between gap-4">
+    <header className="bg-white border-b-4 border-amber-500 px-3 sm:px-6 py-4 shadow-xs flex flex-wrap items-center justify-between gap-4">
       {/* Brand & Device Meta */}
       <div className="flex items-center gap-3">
         <div className="w-3.5 h-3.5 bg-emerald-500 rounded-none shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
         <div>
-          <div className="font-black text-lg tracking-wider uppercase text-slate-900 flex items-center gap-2">
+          <div className="font-black text-base sm:text-lg tracking-wider uppercase text-slate-900 flex flex-wrap items-center gap-2">
             <span>{config.businessName || 'Danbaiwa Restraunt'}</span>
             <span className="text-xs px-2 py-0.5 border border-slate-300 bg-slate-100 text-slate-700 font-mono font-bold rounded-none">
               {config.locationId}-{config.deviceId}
@@ -47,7 +47,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Action Controls & Badges */}
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
         {/* Dedicated Cloud Sync Component */}
         <SyncIndicator />
 

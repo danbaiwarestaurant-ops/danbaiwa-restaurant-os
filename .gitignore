@@ -36,3 +36,7 @@ danbaiwa-rawprint*.exe
 
 # Copied from the repo root by scripts/copy-print-agent.mjs
 public/print-agent/
+
+# Local browser verification output
+artifacts/
+mobile-debug.png

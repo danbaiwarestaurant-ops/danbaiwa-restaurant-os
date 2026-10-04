@@ -14,6 +14,8 @@
  */
 
 import { IDbService } from './IDbService';
+import { staffFoodCount, staffMealWageDeduction } from '../../utils/staffMeals';
+import { businessDayKey } from '../../utils/shiftDay';
 import { Ticket, TicketTender } from '../../types/ticket';
 import { Shift } from '../../types/shift';
 import { Expense } from '../../types/expense';
@@ -280,10 +282,20 @@ export class IndexedDbService implements IDbService {
   async saveStaffMealTicket(ticket: Ticket, wageEntry?: WageLedgerEntry): Promise<void> {
     const now = new Date().toISOString();
     const stampedTicket = { ...ticket, updatedAt: now };
-    await db.transaction('rw', db.tickets, db.wageLedger, db.outbox, db.auditLogs, async () => {
-      if (!(await db.tickets.get(ticket.id))) await db.tickets.add(stampedTicket);
+    await db.transaction('rw', db.tickets, db.users, db.wageLedger, db.outbox, db.auditLogs, async () => {
+      if (await db.tickets.get(ticket.id)) return;
+      const staff = ticket.staffId ? await db.users.get(ticket.staffId) : undefined;
+      if (staff && ticket.mealOptions?.length) {
+        const meals = (await db.tickets.toArray()).filter(t => !staff.accountId || !t.accountId || t.accountId === staff.accountId);
+        const used = staffFoodCount(meals, staff.id, businessDayKey(ticket.createdAt));
+        const deduction = staffMealWageDeduction(ticket.mealOptions, used, staff.dailyFoodCountLimit ?? 1);
+        ticket.staffMealWageDeduction = deduction;
+        stampedTicket.staffMealWageDeduction = deduction;
+        if (wageEntry) wageEntry = deduction > 0 ? { ...wageEntry, amount: -deduction } : undefined;
+      }
+      await db.tickets.add(stampedTicket);
       await db.outbox.add(queueOutboxRow('tickets', 'INSERT', stampedTicket));
-      if (wageEntry) {
+      if (wageEntry && wageEntry.amount < 0) {
         const stampedEntry = { ...wageEntry, updatedAt: now };
         await db.wageLedger.add(stampedEntry);
         await db.outbox.add(queueOutboxRow('wage_ledger', 'INSERT', stampedEntry));

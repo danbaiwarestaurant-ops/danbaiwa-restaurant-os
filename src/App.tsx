@@ -77,6 +77,16 @@ export function App() {
   // View state
   const [isManagerView, setIsManagerView] = useState(false);
 
+  useEffect(() => {
+    if (isAuthenticated && activeUser?.role === 'admin') {
+      grantAdminAuthority();
+      setIsManagerView(true);
+    } else {
+      revokeAdminAuthority();
+      setIsManagerView(false);
+    }
+  }, [isAuthenticated, activeUser?.id, activeUser?.role]);
+
   // Toast feedback
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
@@ -132,7 +142,7 @@ export function App() {
    *    staff have no takings to reconcile at all.
    */
   const settleShiftForSignIn = () => {
-    if (!activeUser) return;
+    if (!activeUser || activeUser.role === 'admin') return;
     const open = useShiftStore.getState().currentShift;
 
     if (isStaleShift(open)) {
@@ -406,8 +416,9 @@ export function App() {
         <OpenShiftModal isOpen={isOpenShiftOpen} onClose={() => setIsOpenShiftOpen(false)} onSuccess={showSuccess} />
         <CloseShiftModal
           isOpen={isCloseShiftOpen}
+          endsSession={logoutAfterClose}
           mandatory={mustCloseStaleShift}
-          onClose={() => setIsCloseShiftOpen(false)}
+          onClose={() => { setIsCloseShiftOpen(false); setLogoutAfterClose(false); }}
           onSuccess={handleShiftClosed}
         />
         <Toast message={toastMsg} type={toastType} onClose={() => setToastMsg(null)} />
@@ -437,7 +448,7 @@ export function App() {
       {/* Main Workspace Body */}
       <main className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-0 max-w-[1920px] mx-auto w-full">
         {/* Main Till Area */}
-        <div className="p-6 space-y-6 overflow-y-auto">
+        <div className="p-3 sm:p-6 space-y-4 sm:space-y-6 min-w-0 overflow-y-auto">
           {/* Custom Amount Section */}
           <CustomAmountInput onTicketCreated={showSuccess} onError={showError} />
 

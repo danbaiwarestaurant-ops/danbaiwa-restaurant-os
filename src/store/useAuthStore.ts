@@ -6,6 +6,7 @@ import { dbService } from '../services/db/IndexedDbService';
 import {
   authenticateAdminWithSupabase,
   updateSupabaseUserPassword,
+  updateOwnerCloudProfile,
   deriveSupabasePassword,
   signUpNewAdminAccount,
   supabase,
@@ -39,7 +40,9 @@ const LOCKOUT_MS = 30_000;
  * so the message can say exactly where the user stands.
  */
 function registerFailedAttempt(get: () => AuthState, set: (partial: Partial<AuthState>) => void): number {
-  const fails = get().failedAttempts + 1;
+  const state = get();
+  const expired = state.lockoutUntil !== null && Date.now() >= state.lockoutUntil;
+  const fails = (expired ? 0 : state.failedAttempts) + 1;
   const lockoutUntil = fails >= MAX_FAILED_ATTEMPTS ? Date.now() + LOCKOUT_MS : null;
   set({ failedAttempts: fails, lockoutUntil });
   return Math.max(0, MAX_FAILED_ATTEMPTS - fails);
@@ -210,6 +213,12 @@ async function adoptAccountFromCloud(
     }
   }
 
+  // Only the verified owner identity may promote a confirmed cloud email locally.
+  if (user.id === data.user.id && data.user.email && user.email?.toLowerCase() !== data.user.email.toLowerCase()) {
+    user = { ...user, email: data.user.email.toLowerCase(), username: data.user.email.toLowerCase() };
+    await dbService.updateUser(user);
+  }
+
   return { ok: true, user, authUserId: data.user.id, restored };
 }
 
@@ -301,7 +310,7 @@ interface AuthState {
    */
   logoutUser: (options?: { unenrolDevice?: boolean }) => Promise<void>;
 
-  updateAdminProfile: (userId: string, name: string, email: string, newPin?: string) => Promise<boolean>;
+  updateAdminProfile: (userId: string, name: string, email: string, newPin?: string, currentPin?: string) => Promise<boolean>;
   updatePasswordAfterRecovery: (email: string, newPassword: string, newPin: string) => Promise<boolean>;
   /**
    * Add someone to the roster.
@@ -639,14 +648,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (await verifySecret(pin, user.pinHash, user.pinSalt)) matches.push(user);
     }
     if (matches.length !== 1) {
+      if (matches.length > 1) {
+        return { ok: false, code: 'ambiguous_login_key', message: 'That PIN is assigned to more than one active staff member.', hint: 'Use email or staff ID sign-in to identify your account.' };
+      }
       const attemptsRemaining = registerFailedAttempt(get, set);
-      if (matches.length > 1) return { ok: false, code: 'ambiguous_login_key', message: 'That PIN is assigned to more than one active staff member.', hint: 'A manager must reset one of the duplicate PINs.', attemptsRemaining };
       return buildLoginFailure('wrong_pin', { attemptsRemaining });
     }
     const user = matches[0];
     if (!canSignIn(user.role)) return buildLoginFailure('role_has_no_till_access', { email: user.name });
     localStorage.setItem('ticket_pos_session_user_id', user.id);
-    set({ activeUser: user, isAuthenticated: true, failedAttempts: 0, lockoutUntil: null });
+    set({ activeUser: user, isAuthenticated: true, hasAdminAuthority: false, failedAttempts: 0, lockoutUntil: null });
     startRealtimeSync();
     runCloudCatchUp({ revive: true }).catch(() => {});
     if (isSupabaseConfigured && user.role === 'admin' && user.email) {
@@ -977,12 +988,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
   },
 
-  updateAdminProfile: async (userId: string, name: string, email: string, newPin?: string) => {
+  updateAdminProfile: async (userId: string, name: string, email: string, newPin?: string, currentPin?: string) => {
     get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
-    if (!user) return false;
+    if (!user || user.role !== 'admin') return false;
 
     const cleanEmail = email.trim().toLowerCase();
+    if (!name.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Enter a name and valid email.');
+    if (newPin && !/^\d{4,8}$/.test(newPin)) throw new Error('PIN must contain 4 to 8 digits.');
+    const emailChanging = cleanEmail !== user.email?.toLowerCase();
+    if (get().users.some(other => other.id !== userId && (other.email?.toLowerCase() === cleanEmail || other.username?.toLowerCase() === cleanEmail))) throw new Error('That email is already assigned to another account.');
+    if (newPin) {
+      for (const other of get().users.filter(u => u.id !== userId && u.status === 'active' && canSignIn(u.role))) {
+        if (await verifySecret(newPin, other.pinHash, other.pinSalt)) throw new Error('This PIN is already used by another staff member. Choose a unique PIN.');
+      }
+    }
     let pinHash = user.pinHash;
     let pinSalt = user.pinSalt;
 
@@ -994,8 +1014,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const updatedUser: UserAccount = {
       ...user,
       name: name.trim(),
-      email: cleanEmail,
-      username: cleanEmail,
+      email: isSupabaseConfigured && emailChanging ? user.email : cleanEmail,
+      username: isSupabaseConfigured && emailChanging ? user.username : cleanEmail,
       pinHash,
       pinSalt,
     };
@@ -1003,19 +1023,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // The cloud password is derived from the PIN, so changing the PIN locally without
     // updating it in Supabase would silently break cloud sign-in (and therefore sync
     // and backups) on the next login.
-    if (newPin && newPin.length >= 4 && isSupabaseConfigured && user.role === 'admin') {
+    if (isSupabaseConfigured && (newPin || emailChanging)) {
       try {
-        await updateSupabaseUserPassword(deriveSupabasePassword(newPin));
+        await updateOwnerCloudProfile(user.id, user.email!, currentPin, newPin, emailChanging ? cleanEmail : undefined);
       } catch (e: any) {
         throw new Error(
-          `PIN not changed: the cloud account could not be updated (${e.message}). ` +
+          `Profile not changed: the cloud account could not be updated (${e.message}). ` +
           `Check your internet connection and try again.`
         );
       }
     }
 
     await dbService.updateUser(updatedUser);
-    set({ activeUser: updatedUser });
+    if (get().activeUser?.id === userId) set({ activeUser: updatedUser });
     await get().loadUsers();
     useSyncStore.getState().checkOutbox().then(() => {
       useSyncStore.getState().triggerSyncWorker();
@@ -1181,6 +1201,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     const cleanName = name.trim();
     const cleanUsername = username.trim().toLowerCase();
+    if (dailyFoodCountLimit != null && (!Number.isSafeInteger(dailyFoodCountLimit) || dailyFoodCountLimit < 0)) return { ok: false, message: 'Free meals per day must be a whole number of zero or more.' };
     if (!cleanName) return { ok: false, message: 'A name is required.' };
     if (!cleanUsername) return { ok: false, message: 'A staff ID is required.' };
 

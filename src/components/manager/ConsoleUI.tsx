@@ -14,7 +14,7 @@ export const Panel: React.FC<{
   className?: string;
   children: React.ReactNode;
 }> = ({ title, subtitle, actions, icon: Icon, className = '', children }) => (
-  <section className={`bg-white border-2 border-slate-300 rounded-none shadow-xs ${className}`}>
+  <section className={`bg-white border-2 border-slate-300 rounded-none shadow-xs min-w-0 ${className}`}>
     {(title || actions) && (
       <div className="flex items-center justify-between gap-3 flex-wrap px-5 py-3.5 border-b-2 border-slate-200">
         <div>
@@ -29,7 +29,7 @@ export const Panel: React.FC<{
         {actions && <div className="flex items-center gap-2 flex-wrap">{actions}</div>}
       </div>
     )}
-    <div className="p-5">{children}</div>
+    <div className="p-3 sm:p-5">{children}</div>
   </section>
 );
 
@@ -77,7 +77,7 @@ export const KpiCard: React.FC<{
   return (
     <div className="bg-white border-2 border-slate-300 rounded-none shadow-xs p-4 border-l-4 border-l-amber-500">
       <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
-      <div className={`text-2xl font-black font-mono mt-1 tabular-nums ${valueTone}`}>{value}</div>
+      <div className={`text-xl sm:text-2xl break-words font-black font-mono mt-1 tabular-nums ${valueTone}`}>{value}</div>
       {trend && <div className="mt-1"><TrendChip trend={trend} /></div>}
       {hint && <div className="text-[11px] text-slate-500 font-medium mt-1">{hint}</div>}
     </div>
@@ -122,7 +122,7 @@ export const DataTable: React.FC<{
   alignRight?: number[];
   children: React.ReactNode;
 }> = ({ headers, alignRight = [], children }) => (
-  <div className="overflow-x-auto">
+  <div className="responsive-table overflow-x-auto max-w-full">
     <table className="w-full text-left text-xs border-collapse">
       <thead>
         <tr className="border-b-2 border-slate-200 text-slate-500 uppercase">
@@ -138,7 +138,15 @@ export const DataTable: React.FC<{
           ))}
         </tr>
       </thead>
-      <tbody className="divide-y divide-slate-100">{children}</tbody>
+      <tbody className="divide-y divide-slate-100">{React.Children.map(children, row => {
+        if (!React.isValidElement<{ children?: React.ReactNode }>(row) || row.type !== 'tr') return row;
+        let column = 0;
+        return React.cloneElement(row, {}, React.Children.map(row.props.children, cell => {
+          if (!React.isValidElement<{ colSpan?: number; children?: React.ReactNode }>(cell) || cell.type !== 'td') return cell;
+          const label = headers[column]; column += cell.props.colSpan || 1;
+          return React.cloneElement(cell, { 'data-label': label } as React.HTMLAttributes<HTMLTableCellElement>);
+        }));
+      })}</tbody>
     </table>
   </div>
 );

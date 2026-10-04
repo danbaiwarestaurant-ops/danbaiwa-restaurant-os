@@ -141,7 +141,7 @@ export const useTicketStore = create<TicketState>((set, get) => ({
 
     // Commit to DB (synchronous — ticket row is durable before print fires)
     const mealDeduction = Math.max(0, staffMeal?.wageDeduction || 0);
-    const mealWageEntry: WageLedgerEntry | undefined = tender === 'staff' && staffMeal && mealDeduction > 0
+    const mealWageEntry: WageLedgerEntry | undefined = tender === 'staff' && staffMeal && (mealDeduction > 0 || staffMeal.options?.length)
       ? {
           id: crypto.randomUUID(),
           staffId: staffMeal.staffId,

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { dbService } from '../services/db/IndexedDbService';
 import { InventoryBatch, InventoryItem, InventoryMovement, InventoryMovementType } from '../types/inventory';
-import { fifoAllocate, stockSummary } from '../utils/inventory';
+import { fifoAllocate, stockSummary, validateInventoryUnits } from '../utils/inventory';
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';
 
@@ -33,6 +33,7 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
   },
   addItem: async (input) => {
     useAuthStore.getState().assertAdminRole();
+    validateInventoryUnits(input);
     const actor = useAuthStore.getState().activeUser;
     if (!input.name.trim()) throw new Error('Ingredient name is required.');
     if (input.baseUnitsPerPurchaseUnit <= 0) throw new Error('Unit conversion must be greater than zero.');
@@ -44,6 +45,7 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
   },
   updateItem: async (item) => {
     useAuthStore.getState().assertAdminRole();
+    validateInventoryUnits(item);
     const actor = useAuthStore.getState().activeUser;
     if (!item.name.trim() || !item.baseUnit.trim() || !item.purchaseUnit.trim()) throw new Error('Name and units are required.');
     if (item.baseUnitsPerPurchaseUnit <= 0 || item.reorderLevel < 0) throw new Error('Conversion must be positive and reorder level cannot be negative.');

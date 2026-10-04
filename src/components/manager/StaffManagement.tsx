@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { DataTable } from './ConsoleUI';
 import { useAuthStore, StaffRecordCounts } from '../../store/useAuthStore';
 import { UserAccount, UserRole } from '../../types/user';
 import { STAFF_ROLES, roleLabel, roleDescription, canSignIn } from '../../utils/roles';
@@ -278,17 +279,7 @@ export const StaffManagement: React.FC = () => {
       <div>
         <h4 className="text-xs font-bold uppercase text-slate-600 mb-2">Registered Accounts Roster</h4>
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse font-mono">
-            <thead>
-              <tr className="border-b-2 border-slate-200 text-slate-500 uppercase">
-                <th className="py-2">Staff ID</th>
-                <th className="py-2">Name</th>
-                <th className="py-2">Role</th>
-                <th className="py-2">Status</th>
-                <th className="py-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
+          <DataTable headers={['Staff ID', 'Name', 'Role', 'Status', 'Free meals / day', 'Actions']}>
               {users.map(u => {
                 const isSelf = activeUser?.id === u.id;
                 const isActive = u.status === 'active';
@@ -320,6 +311,7 @@ export const StaffManagement: React.FC = () => {
                     <td className={`py-2.5 font-bold uppercase ${isActive ? 'text-emerald-600' : 'text-slate-400'}`}>
                       {u.status}
                     </td>
+                    <td className="py-2.5 font-bold">{u.dailyFoodCountLimit ?? 1}</td>
                     <td className="py-2.5">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         <RowAction onClick={() => openEdit(u)} icon={Pencil} label="Edit" />
@@ -343,8 +335,7 @@ export const StaffManagement: React.FC = () => {
                   </tr>
                 );
               })}
-            </tbody>
-          </table>
+          </DataTable>
         </div>
         <p className="text-[11px] text-slate-500 font-semibold mt-2.5">
           Deactivating blocks sign-in but keeps every record the cashier created. Deleting is

@@ -7,12 +7,17 @@ export interface InventoryItem {
   reorderLevel: number;
   /** Optional operational unit used when managers allocate production/sales to servers. */
   salesUnit?: string;
+  /** Kitchen production unit; all inventory quantities still persist in base units. */
+  cookingUnit?: string | null;
+  baseUnitsPerCookingUnit?: number | null;
+  preparationCostPerCookingUnit?: number | null;
+  profitPerCookingUnit?: number | null;
   /** Number of base units in one sales unit (for example 5 mudu in one cooler). */
   baseUnitsPerSalesUnit?: number;
   /** Standard cost of one purchase unit, used when there is no open FIFO batch yet. */
   standardPurchaseCost?: number;
   /** Direct preparation cost of one server sales unit. Falls back to the purchase conversion for legacy rows. */
-  preparationCostPerSalesUnit?: number;
+  preparationCostPerSalesUnit?: number | null;
   /** Legacy sales-value field retained only so older synced rows remain readable. */
   expectedSalesPerSalesUnit?: number;
   /** Profit expected on one server sales unit. */

@@ -96,3 +96,27 @@
     background: #ffffff !important;
   }
 }
+
+/* Phone layouts keep actions reachable and report fields labelled. */
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; min-width: 320px; }
+  input, select, textarea { max-width: 100%; }
+  button, input, select, textarea { touch-action: manipulation; }
+}
+@media screen and (max-width: 639px) {
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px !important; min-height: 44px; }
+  button { min-height: 44px; }
+  .console-content > *, .console-content section { min-width: 0; max-width: 100%; }
+  .console-content .grid-cols-2, .console-content .grid-cols-3, .console-content .grid-cols-4 { grid-template-columns: minmax(0, 1fr); }
+  .responsive-table table, .responsive-table tbody { display: block; width: 100%; }
+  .responsive-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .responsive-table tr { display: block; border: 1px solid #cbd5e1; padding: 10px; margin-bottom: 12px; background: white; }
+  .responsive-table td { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; text-align: left; overflow-wrap: anywhere; }
+  .responsive-table td::before { content: attr(data-label); font-weight: 700; color: #64748b; flex: 0 1 48%; }
+  .responsive-table td > div { max-width: 100%; }
+  .fixed.inset-0 { overflow-y: auto; overscroll-behavior: contain; }
+  .fixed.inset-0 > .bg-white { max-height: calc(100dvh - 2rem); overflow-y: auto; margin: auto; }
+  .manager-shell header { position: relative; }
+  .console-content .sticky { position: static; }
+}

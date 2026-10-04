@@ -19,7 +19,7 @@ import { PrinterSetupView } from './views/PrinterSetupView';
 import { SettingsView } from './views/SettingsView';
 import { ComingSoonView } from './views/ComingSoonView';
 import { InventoryView } from './views/InventoryView';
-import { ArrowLeft, UtensilsCrossed, Boxes, Lock } from 'lucide-react';
+import { ArrowLeft, UtensilsCrossed, Boxes, Lock, Menu, X } from 'lucide-react';
 import { useConsolePeriodStore } from '../../store/useConsolePeriodStore';
 
 const LAST_VIEW_KEY = 'ticket_pos_console_view';
@@ -52,6 +52,7 @@ interface ManagerConsoleProps {
  * tab strip does not justify adding one.
  */
 export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, onRequirePin, onLogout, onToggleShift }) => {
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const { config } = useDeviceStore();
   const { expenses } = useExpenseStore();
   const { stuckCount } = useSyncStore();
@@ -121,9 +122,10 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
   };
 
   return (
-    <div className="min-h-screen flex bg-slate-100">
+    <div className="manager-shell min-h-screen flex bg-slate-100">
+      {navigationOpen && <button aria-label="Close navigation" className="fixed inset-0 z-30 bg-slate-900/60 lg:hidden" onClick={() => setNavigationOpen(false)} />}
       {/* Sidebar */}
-      <nav className="w-60 flex-shrink-0 bg-white border-r-2 border-slate-300 h-screen sticky top-0 overflow-y-auto flex flex-col">
+      <nav aria-label="Manager navigation" className={`w-60 flex-shrink-0 bg-white border-r-2 border-slate-300 h-dvh fixed lg:sticky z-40 top-0 overflow-y-auto flex flex-col transition-transform lg:translate-x-0 ${navigationOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="px-4 py-5 border-b-2 border-slate-200">
           <div className="font-black text-base uppercase tracking-wider text-slate-900 leading-tight">
             {config.businessName || 'Danbaiwa Restraunt'}
@@ -156,7 +158,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
                 return (
                   <button
                     key={item.id}
-                    onClick={() => setView(item.id)}
+                    onClick={() => { setView(item.id); setNavigationOpen(false); }}
                     aria-current={isActive ? 'page' : undefined}
                     className={`w-full flex items-center gap-2.5 px-4 py-2 text-xs font-bold text-left transition ${
                       isActive
@@ -190,8 +192,9 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
 
       {/* Main */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-sm border-b-2 border-slate-300 px-6 py-3.5 flex items-center justify-between gap-4 flex-wrap">
-          <div>
+        <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-sm border-b-2 border-slate-300 px-3 sm:px-6 py-3.5 flex items-center justify-between gap-4 flex-wrap">
+          <button aria-label={navigationOpen ? 'Close navigation' : 'Open navigation'} aria-expanded={navigationOpen} onClick={() => setNavigationOpen(!navigationOpen)} className="lg:hidden p-2 border-2 border-slate-300">{navigationOpen ? <X /> : <Menu />}</button>
+          <div className="min-w-0 flex-1">
             <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
               {active.group}
             </div>
@@ -239,7 +242,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
           </div>
         </header>
 
-        <main className="flex-1 p-6 max-w-[1600px] w-full">{renderView()}</main>
+        <main className="console-content flex-1 p-3 sm:p-6 max-w-[1600px] w-full min-w-0">{renderView()}</main>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuthStore } from '../../store/useAuthStore';
 import { UserCheck, Mail, KeyRound, CheckCircle2, Shield, LogOut, Power } from 'lucide-react';
 
@@ -7,16 +7,19 @@ interface AdminProfileSettingsProps {
 }
 
 export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
-  const { users, updateAdminProfile, logoutUser } = useAuthStore();
-  const currentAdmin = users.find(u => u.role === 'admin');
+  const { users, activeUser, updateAdminProfile, logoutUser } = useAuthStore();
+  const currentAdmin = activeUser?.role === 'admin' ? activeUser : users.find(u => u.role === 'admin' && u.status === 'active');
 
   const [name, setName] = useState(currentAdmin ? currentAdmin.name : '');
   const [email, setEmail] = useState(currentAdmin ? currentAdmin.email || currentAdmin.username : '');
+  const [saving, setSaving] = useState(false);
+  const [currentPin, setCurrentPin] = useState('');
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => { setName(currentAdmin?.name || ''); setEmail(currentAdmin?.email || currentAdmin?.username || ''); }, [currentAdmin?.id, currentAdmin?.name, currentAdmin?.email]);
   if (!currentAdmin) return null;
 
   const handleUpdateProfile = async (e: React.FormEvent) => {
@@ -46,15 +49,17 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
       }
     }
 
-    const success = await updateAdminProfile(currentAdmin.id, name, email, newPin || undefined);
-    if (success) {
-      setMsg('Admin Profile & Security Settings updated successfully');
-      setNewPin('');
-      setConfirmPin('');
-      setTimeout(() => setMsg(null), 3000);
-    } else {
-      setError('Failed to update Admin Profile');
-    }
+    setSaving(true);
+    try {
+      const emailChanged = email.trim().toLowerCase() !== currentAdmin.email?.toLowerCase();
+      const success = await updateAdminProfile(currentAdmin.id, name, email, newPin || undefined, currentPin || undefined);
+      if (!success) throw new Error('Admin profile could not be found.');
+      setMsg(emailChanged ? 'Profile saved. For a cloud email change, confirm the messages sent to your old and new addresses. Keep using the current email until confirmed.' : 'Admin profile saved successfully.');
+      setNewPin(''); setConfirmPin(''); setCurrentPin('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the admin profile.');
+    } finally { setSaving(false); }
+
   };
 
   const handleSystemLogout = async () => {
@@ -74,7 +79,7 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
 
   return (
     <div className="bg-white border-2 border-slate-300 p-5 shadow-xs rounded-none space-y-4">
-      <div className="flex items-center justify-between border-b-2 border-slate-200 pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-slate-200 pb-3">
         <h3 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-2">
           <Shield className="w-4 h-4 text-amber-500" />
           <span>Admin Profile & Security Settings</span>
@@ -138,6 +143,9 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
           </div>
         </div>
 
+        <label className="block text-xs font-bold">Current admin PIN (for cloud security changes)
+          <input type="password" inputMode="numeric" autoComplete="current-password" value={currentPin} onChange={e => setCurrentPin(e.target.value)} className="mt-1 w-full p-3 border-2 border-slate-300" />
+        </label>
         {/* Change Admin PIN Section */}
         <div className="bg-slate-50 border-2 border-slate-200 p-4 space-y-3 rounded-none">
           <div className="text-xs font-bold uppercase text-slate-800 flex items-center gap-1.5">
@@ -176,7 +184,7 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
           </div>
         </div>
 
-        <div className="flex justify-end gap-3 pt-2 border-t">
+        <div className="flex flex-wrap justify-end gap-3 pt-2 border-t">
           <button
             type="button"
             onClick={handleSystemLogout}
@@ -188,9 +196,10 @@ export const AdminProfileSettings: React.FC<AdminProfileSettingsProps> = () => {
 
           <button
             type="submit"
+            disabled={saving}
             className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-black uppercase text-xs tracking-wider border border-amber-600 rounded-none shadow-xs transition active:scale-95"
           >
-            Save Admin Profile Changes
+            {saving ? 'Saving...' : 'Save Admin Profile Changes'}
           </button>
         </div>
       </form>
