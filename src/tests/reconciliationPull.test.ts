@@ -28,18 +28,20 @@ function makeQuery(table: string) {
   let from = 0;
   let to: number | undefined;
   let since: string | undefined;
+  let after: string | undefined;
 
   const resolve = () => {
     if (from === 0) reads.push({ table, since });
     if (failTable === table) return { data: null, error: { message: 'boom' } };
     const all = (fixtures[table] ?? []).filter(
-      (r) => since === undefined || String(r.updated_at ?? '') >= since
+      (r) => (since === undefined || String(r.updated_at ?? '') >= since) && (after === undefined || r.id > after)
     );
     const end = to === undefined ? all.length : to + 1;
     return { data: all.slice(from, Math.min(end, from + maxRows)), error: null };
   };
   const builder: any = {
     eq: () => builder,
+    gt: (_col: string, val: string) => { after = val; return builder; },
     gte: (_col: string, val: string) => {
       since = val;
       return builder;

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DataTable } from './ConsoleUI';
-import { useAuthStore, StaffRecordCounts } from '../../store/useAuthStore';
+import { useAuthStore } from '../../store/useAuthStore';
 import { UserAccount, UserRole } from '../../types/user';
 import { STAFF_ROLES, roleLabel, roleDescription, canSignIn } from '../../utils/roles';
 import {
@@ -32,7 +32,7 @@ const RowAction: React.FC<{
 export const StaffManagement: React.FC = () => {
   const {
     users, activeUser, createStaffMember, resetCashierPin,
-    updateStaffMember, setStaffStatus, countStaffRecords, deleteStaffMember,
+    updateStaffMember, setStaffStatus, deleteStaffMember,
   } = useAuthStore();
 
   const [name, setName] = useState('');
@@ -53,10 +53,8 @@ export const StaffManagement: React.FC = () => {
   const [editRole, setEditRole] = useState<UserRole>('cashier');
   const [editMealLimit, setEditMealLimit] = useState('1');
 
-  // Delete is a two-part dialog: it first counts what the account owns, then either
-  // refuses with the reason or asks the admin to type the name to confirm.
+  // Permanent removal retains credential-free attribution for the books.
   const [deleteUser, setDeleteUser] = useState<UserAccount | null>(null);
-  const [deleteCounts, setDeleteCounts] = useState<StaffRecordCounts | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
 
   const flash = (m: string) => {
@@ -141,9 +139,7 @@ export const StaffManagement: React.FC = () => {
   const openDelete = async (u: UserAccount) => {
     setError(null);
     setDeleteConfirmText('');
-    setDeleteCounts(null);
     setDeleteUser(u);
-    setDeleteCounts(await countStaffRecords(u.id));
   };
 
   const handleDelete = async () => {
@@ -158,7 +154,6 @@ export const StaffManagement: React.FC = () => {
     setDeleteUser(null);
   };
 
-  const deletable = deleteCounts !== null && deleteCounts.total === 0;
 
   return (
     <div className="bg-white border-2 border-slate-300 p-5 shadow-xs rounded-none space-y-6">
@@ -280,7 +275,7 @@ export const StaffManagement: React.FC = () => {
         <h4 className="text-xs font-bold uppercase text-slate-600 mb-2">Registered Accounts Roster</h4>
         <div className="overflow-x-auto">
           <DataTable headers={['Staff ID', 'Name', 'Role', 'Status', 'Free meals / day', 'Actions']}>
-              {users.map(u => {
+              {users.filter(u => !u.deletedAt).map(u => {
                 const isSelf = activeUser?.id === u.id;
                 const isActive = u.status === 'active';
                 return (
@@ -338,8 +333,7 @@ export const StaffManagement: React.FC = () => {
           </DataTable>
         </div>
         <p className="text-[11px] text-slate-500 font-semibold mt-2.5">
-          Deactivating blocks sign-in but keeps every record the cashier created. Deleting is
-          only possible for an account that has never recorded anything.
+          Deactivating blocks sign-in but keeps every record the cashier created. Permanent deletion removes login access and credentials. Existing sales, shifts and wages retain an audit identity.
         </p>
       </div>
 
@@ -490,7 +484,7 @@ export const StaffManagement: React.FC = () => {
         </div>
       )}
 
-      {/* Permanent delete — refuses outright when the account owns any history */}
+      {/* Permanent credential removal preserves attribution in an audit identity. */}
       {deleteUser && (
         <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-white border-4 border-rose-600 w-full max-w-md rounded-none shadow-2xl">
@@ -500,57 +494,14 @@ export const StaffManagement: React.FC = () => {
             </div>
 
             <div className="p-5 space-y-4">
-              {deleteCounts === null ? (
-                <p className="text-xs font-bold uppercase text-slate-500">Checking what this account owns…</p>
-              ) : deletable ? (
-                <>
-                  <p className="text-xs font-semibold text-slate-700 normal-case leading-relaxed">
-                    This account has never issued a ticket, opened a shift or logged an expense,
-                    so nothing is lost by removing it. It will be deleted on this till and in the
-                    cloud, on every device signed into this account.
-                  </p>
-                  <p className="text-xs font-semibold text-slate-700 normal-case leading-relaxed">
-                    This cannot be undone. Type <span className="font-mono font-black text-rose-700">{deleteUser.name}</span> to confirm.
-                  </p>
-                  <input
-                    type="text"
-                    value={deleteConfirmText}
-                    onChange={(e) => setDeleteConfirmText(e.target.value)}
-                    placeholder={deleteUser.name}
-                    autoFocus
-                    className="w-full p-2.5 border-2 border-slate-300 text-xs font-bold text-slate-900 rounded-none focus:border-rose-500 focus:outline-none"
-                  />
-                </>
-              ) : (
-                <>
-                  <div className="p-3 bg-amber-50 border-2 border-amber-400 text-amber-950 text-xs font-semibold normal-case rounded-none leading-relaxed">
-                    <span className="font-black uppercase">Cannot delete.</span> {deleteUser.name} owns
-                    records, and a ticket keeps only the cashier's id — deleting the account would
-                    strip their name off that history for good.
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="divide-y divide-slate-100">
-                      {[
-                        ['Tickets', deleteCounts.tickets],
-                        ['Shifts', deleteCounts.shifts],
-                        ['Expenses', deleteCounts.expenses],
-                        ['Assessments', deleteCounts.assessments],
-                        ['Wage ledger', deleteCounts.wageLedger],
-                        ['Audit entries', deleteCounts.auditLogs],
-                      ].map(([label, n]) => (
-                        <tr key={String(label)}>
-                          <td className="py-1.5 text-slate-600 font-medium">{label}</td>
-                          <td className="py-1.5 text-right font-mono font-bold tabular-nums">{n}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <p className="text-xs font-semibold text-slate-700 normal-case leading-relaxed">
-                    Deactivate them instead — they lose access immediately, and every record keeps
-                    their name.
-                  </p>
-                </>
-              )}
+              <p className="text-xs font-semibold text-slate-700 leading-relaxed">
+                Permanently remove this staff profile and its login credentials from every synced device.
+                Sales, shifts, expenses and salary records remain attributed to {deleteUser.name} through a credential-free audit identity.
+              </p>
+              <label className="block text-xs font-bold">Type {deleteUser.name} to confirm
+                <input value={deleteConfirmText} onChange={e => setDeleteConfirmText(e.target.value)} autoFocus
+                  className="mt-2 w-full p-2.5 border-2 border-slate-300 rounded-none" />
+              </label>
 
               <div className="flex justify-end gap-2 border-t pt-3">
                 <button
@@ -560,31 +511,11 @@ export const StaffManagement: React.FC = () => {
                 >
                   Cancel
                 </button>
-                {deletable ? (
-                  <button
-                    type="button"
-                    onClick={handleDelete}
-                    disabled={deleteConfirmText.trim() !== deleteUser.name}
-                    className="px-4 py-1.5 text-xs font-black uppercase bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white rounded-none border border-rose-700 shadow-xs"
-                  >
-                    Delete Permanently
-                  </button>
-                ) : (
-                  deleteCounts !== null && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const u = deleteUser;
-                        setDeleteUser(null);
-                        await handleToggleStatus(u);
-                      }}
-                      disabled={deleteUser.status !== 'active'}
-                      className="px-4 py-1.5 text-xs font-black uppercase bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white rounded-none shadow-xs"
-                    >
-                      Deactivate Instead
-                    </button>
-                  )
-                )}
+                <button type="button" onClick={() => void handleDelete()}
+                  disabled={deleteConfirmText.trim() !== deleteUser.name}
+                  className="px-4 py-1.5 text-xs font-black uppercase bg-rose-600 disabled:opacity-40 text-white border border-rose-700 rounded-none">
+                  Delete Permanently
+                </button>
               </div>
             </div>
           </div>

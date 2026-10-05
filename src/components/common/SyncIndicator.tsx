@@ -42,7 +42,7 @@ export const SyncIndicator: React.FC = () => {
     // The reason was recorded on the rows all along and shown nowhere, which left the
     // only actionable state in the whole badge saying "check the console".
     title = `${stuckCount} record(s) have been rejected by the cloud repeatedly. They are still retried and have not been lost, but they need attention.${
-      queueFault ? `\n\nMost common reason (${queueFault.count} record(s)):\n${queueFault.reason}` : ''
+      queueFault ? `\n\n${queueFault.sampled ? 'Sampled rejection reason (at least ' : 'Most common reason ('}${queueFault.count} record(s)):\n${queueFault.reason}` : ''
     }`;
     Icon = AlertTriangle;
   } else if (pendingCount > 0) {
@@ -54,7 +54,7 @@ export const SyncIndicator: React.FC = () => {
       : 'bg-amber-50 border-amber-400 text-amber-900';
     label = rejected ? `Sync Blocked (${pendingCount})` : `Sync (${pendingCount} pending)`;
     title = rejected
-      ? `The cloud is refusing queued records, so the count is not moving. Nothing is lost — they stay queued and keep retrying.\n\nMost common reason (${queueFault!.count} record(s)):\n${queueFault!.reason}\n\nClick to retry them all now.`
+      ? `The cloud is refusing queued records, so the count is not moving. Nothing is lost — they stay queued and keep retrying.\n\n${queueFault!.sampled ? 'Sampled rejection reason (at least ' : 'Most common reason ('}${queueFault!.count} record(s)):\n${queueFault!.reason}\n\nClick to retry them all now.`
       : 'Records are queued and on their way to the cloud.';
     Icon = rejected ? AlertTriangle : RefreshCw;
   } else {

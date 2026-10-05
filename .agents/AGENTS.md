@@ -122,7 +122,8 @@ walk past is not a lock.
 Expected cash for a shift is **not** the sum of every ticket in the store. Use
 `shiftTickets(tickets, shift)` / `shiftExpenses(...)` from `src/utils/analytics.ts`,
 which filter by `cashierId` **and** the `openedAt … closedAt` window. Both
-`useShiftStore.closeShift` and `CloseShiftModal`'s live preview must use them, or
+`useShiftStore.closeShift` and `CloseShiftModal`'s live preview must use those scopes (or
+the atomic `getShiftSummary` cache maintained with exactly those predicates), or
 every shift is reconciled against lifetime revenue.
 
 `reconcileShift` on a **closed** shift returns what the close-out *recorded*, never a
@@ -132,17 +133,19 @@ ticket syncs in.
 Also: `closeShift` must reload with the shift's own cashier
 (`loadShift(shift.cashierId)`), not an unscoped `loadShift()`.
 
-## 12. DELETES MUST REACH THE CLOUD, AND STAFF DELETION IS REFUSED, NOT WARNED
+## 12. DELETES MUST REACH THE CLOUD; STAFF HISTORY MUST KEEP ITS ATTRIBUTION
 - `useSyncStore` has an explicit **DELETE branch** (`.delete().eq('id',…).eq('account_id',…)`).
   Every queued row used to be upserted regardless of action, so deletions came back on
   the next pull. Any new destructive mutation must queue `action: 'DELETE'` and be
   handled there.
-- Staff deletion is only permitted when the person owns **no** tickets, shifts,
-  expenses or audit entries (`countRecordsForUser`). Nothing cascades, so deleting a
-  cashier with history would orphan the books. The dialog counts first and either
-  refuses — listing what they own and offering **Deactivate Instead** — or requires
-  typing the person's name. Deactivated staff stay in `users` (`loadUsers` no longer
-  filters to active); `switchCashierSession` rejects non-active accounts.
+- The owner explicitly requested permanent staff deletion even with historical
+  contributions (2026-10-05). Delete the login profile and queued credential copies,
+  and atomically queue a credential-free `staff_identity/PERMANENT_DELETE` audit
+  identity BEFORE the users DELETE. Never cascade tickets, shifts, expenses or wages.
+  Historical name/role resolution uses that identity. Tombstones prevent old pulls,
+  backups and offline clients from reviving credentials; apply the SQL migration
+  before release. Require typing the staff name. The business owner cannot be deleted
+  as staff; switch away from the active till user before deleting that login.
 
 ## 13. RECOVERY KEYS
 `src/utils/recoveryKey.ts` — format `DANB-XXXX-XXXX-XXXX`, Crockford base32

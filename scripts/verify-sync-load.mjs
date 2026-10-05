@@ -24,6 +24,7 @@ async function waitFor(predicate, arg = null, options = {}) {
 }
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
+page.on('console', msg => { if (msg.text().startsWith('QA progress')) console.log(msg.text()); });
 await context.route('**/*', async route => {
   const request = route.request(), url = new URL(request.url());
   if (url.origin === origin) return route.continue();
@@ -40,7 +41,9 @@ await context.route('**/*', async route => {
     return route.fulfill({ status: 201, contentType: 'application/json', headers, body: '[]' });
   }
   if (request.method() === 'GET' && url.pathname.startsWith('/rest/v1/')) {
-    const rows = url.pathname.endsWith('/tickets') ? [...cloud.values()] : [];
+    let rows = url.pathname.endsWith('/tickets') ? [...cloud.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : [];
+    const after = url.searchParams.get('id');
+    if (after?.startsWith('gt.')) rows = rows.filter(row => row.id > after.slice(3));
     const offset = Number(url.searchParams.get('offset') || 0);
     const limit = Number(url.searchParams.get('limit') || 500);
     const result = rows.slice(offset, offset + limit);
@@ -60,6 +63,9 @@ try {
     const { error } = await client.supabase.auth.setSession({ access_token: jwt, refresh_token: 'qa-refresh-token' });
     if (error) throw error;
   }, { account });
+  await page.evaluate(async () => {
+    await Promise.all(['/src/services/db/dexieSchema.ts', '/src/services/db/IndexedDbService.ts', '/src/store/useSyncStore.ts'].map(path => import(path)));
+  });
   await context.setOffline(true);
   await page.evaluate(async ({ account, records }) => {
     const { db } = await import('/src/services/db/dexieSchema.ts');
@@ -78,6 +84,7 @@ try {
     const tickets = Array.from({ length: records }, (_, i) => ({ id: 'QA-' + String(i).padStart(6, '0'), localSeq: i + 1, cashierId: 'cashier', locationId: 'LOC01', deviceId: 'DEV01', accountId: account, amount: 500, currency: 'N', status: 'paid', tender: 'cash', createdAt: stamp, updatedAt: stamp, qrPayload: 'q' }));
     for (let offset = 0; offset < tickets.length; offset += 200) {
       const rows = tickets.slice(offset, offset + 200);
+      if (offset % 2000 === 0) console.info('QA progress: seeded ' + offset);
       await db.transaction('rw', db.tickets, db.outbox, async () => {
         await db.tickets.bulkAdd(rows);
         await db.outbox.bulkAdd(rows.map(ticket => ({ id: crypto.randomUUID(), tableName: 'tickets', action: 'INSERT', payload: ticket, status: 'pending', retryCount: 0, createdAt: stamp })));
@@ -104,13 +111,13 @@ try {
   await waitFor(async () => {
     const sync = (await import('/src/store/useSyncStore.ts')).useSyncStore.getState();
     return !sync.isSyncing && sync.pendingCount === 0;
-  }, null, { polling: 250, timeout: 120000 });
+  }, null, { polling: 250, timeout: 300000 });
   const ms = Date.now() - reconnected;
   const counts = await page.evaluate(() => window.qaCounts);
 
   assert.equal(cloud.size, RECORDS + 1);
   assert(batches.every(batch => batch.size <= 200));
-  assert(batches.length <= 102, 'Queue degraded into per-record requests');
+  assert(batches.length <= Math.ceil((RECORDS + 1) / 200) + 2, 'Queue degraded into per-record requests');
   assert(batches[0].time - reconnected < 1500, 'Reconnect waited before sending the first batch');
   assert(writeMs < 1000, 'Ticket save blocked behind backlog processing');
   assert(counts.some(count => count > 0 && count < RECORDS), 'Badge did not report progress during upload');

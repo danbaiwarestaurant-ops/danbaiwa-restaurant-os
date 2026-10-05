@@ -5,7 +5,7 @@ import { formatCurrency, formatTimestamp } from '../../utils/currency';
 import { Pager } from '../common/Pager';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useShiftStore } from '../../store/useShiftStore';
-import { paginateByShift, shiftTickets, summariseTickets } from '../../utils/analytics';
+import { paginateByShift } from '../../utils/analytics';
 import { Ticket as TicketIcon, CheckCircle2, Ban, QrCode, Banknote, Smartphone } from 'lucide-react';
 
 interface RecentTicketsSidebarProps {
@@ -35,10 +35,10 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
    * screen entirely. Here they are always in the same place, at any width, and next to the
    * list a cashier checks them against.
    */
-  const shiftTotals = useMemo(
-    () => summariseTickets(currentShift ? shiftTickets(tickets, currentShift) : []),
-    [tickets, currentShift]
-  );
+  const shiftTotals = useTicketStore(state => state.shiftSummary?.id === currentShift?.id ? state.shiftSummary : null);
+  const hasOlderTickets = useTicketStore(state => state.hasOlderTickets);
+  const loadOlderTickets = useTicketStore(state => state.loadOlderTickets);
+  const loadTickets = useTicketStore(state => state.loadTickets);
 
   /**
    * Pages that never mix two shifts.
@@ -49,7 +49,9 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
    * Older shifts stay reachable — this changes where the breaks fall, not what is kept.
    */
   const pages = useMemo(
-    () => paginateByShift(tickets, shiftHistory, PAGE_SIZE),
+    () => paginateByShift(tickets, shiftHistory.filter(shift => shift.status === 'open' ||
+      tickets.some(ticket => ticket.shiftId === shift.id) ||
+      !!shift.closedAt && shift.closedAt >= (tickets[tickets.length - 1]?.createdAt || '')), PAGE_SIZE),
     [tickets, shiftHistory]
   );
 
@@ -85,7 +87,7 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
       <div className="grid grid-cols-2 gap-3 pb-3 mb-3 border-b-2 border-slate-200">
         <div>
           <div className="text-2xl font-black font-mono text-amber-600 leading-none tabular-nums">
-            {currentShift ? shiftTotals.ticketCount : '—'}
+            {currentShift ? shiftTotals?.ticketCount ?? '…' : '—'}
           </div>
           <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-1">
             Tickets This Shift
@@ -94,7 +96,7 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
 
         <div className="text-right min-w-0">
           <div className="text-2xl font-black font-mono text-slate-900 leading-none tabular-nums truncate">
-            {currentShift ? formatCurrency(shiftTotals.revenue, config.currencySymbol || '₦') : '—'}
+            {currentShift && shiftTotals ? formatCurrency(shiftTotals.revenue, config.currencySymbol || '₦') : '—'}
           </div>
           <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-1">
             Shift Total
@@ -237,6 +239,11 @@ export const RecentTicketsSidebar: React.FC<RecentTicketsSidebarProps> = ({
       {/* Pager — outside the scroll region so it stays reachable, and only when it earns
           its space. Previously the sidebar hard-capped at the 30 newest tickets with no
           way to reach anything older. */}
+      <div className="flex justify-between gap-2 text-[10px] font-bold uppercase mt-2">
+        <button onClick={() => activeUser && void loadTickets(activeUser.id)}>Latest tickets</button>
+        {hasOlderTickets && <button onClick={() => void loadOlderTickets().then(() => setPage(1))}>Load older tickets</button>}
+      </div>
+      {(hasOlderTickets || tickets.length >= 200) && <p className="text-[10px] text-slate-500 mt-1">Shift totals include all tickets. Use Load older tickets to browse further back.</p>}
       <Pager
         page={safePage}
         totalPages={totalPages}

@@ -28,6 +28,14 @@ import { RolePayConfig, StaffAssessment, WageLedgerEntry } from '../../types/wor
 import { InventoryBatch, InventoryItem, InventoryMovement } from '../../types/inventory';
 import { db, UserRow, AuditLogRow, computeLoginKeys, stripUserRow } from './dexieSchema';
 import { isLocalDataEmpty, restoreFromCloud } from './cloudBackup';
+import { adjustShiftSummary, emptyShiftSummary, ShiftSummary } from './shiftSummaries';
+import { Period, periodFor } from '../../utils/period';
+import { archivedStaff, STAFF_DELETION_ENTITY } from './staffIdentity';
+
+async function assertStaffNotDeleted(id: string): Promise<void> {
+  const logs = await db.auditLogs.where('entityId').equals(id).toArray();
+  if (logs.some(log => archivedStaff(log))) throw new Error('This staff profile was permanently deleted. Create a new staff account.');
+}
 
 const DEFAULT_CONFIG_KEY = 'device_config';
 const INSTALLATION_ID_KEY = 'installation_id';
@@ -171,14 +179,20 @@ export class IndexedDbService implements IDbService {
 
   async getUsers(): Promise<UserAccount[]> {
     const rows = await db.users.orderBy('createdAt').reverse().toArray();
-    return rows.map(stripUserRow);
+    const archived = (await db.auditLogs.where('entity').equals(STAFF_DELETION_ENTITY).toArray())
+      .map(archivedStaff).filter((u): u is UserAccount => !!u);
+    const identities = [...new Map(archived.sort((a, b) => (a.deletedAt || '').localeCompare(b.deletedAt || '')).map(u => [u.id, u])).values()];
+    const removed = new Set(identities.map(u => u.id));
+    return [...rows.filter(u => !removed.has(u.id)).map(stripUserRow), ...identities];
   }
 
   async findUsersByLoginKey(email: string): Promise<UserAccount[]> {
     const clean = (email || '').trim().toLowerCase();
     if (!clean) return [];
     const rows = await db.users.where('loginKeys').equals(clean).toArray();
-    return rows.map(stripUserRow);
+    const removed = new Set((await db.auditLogs.where('entity').equals(STAFF_DELETION_ENTITY).toArray())
+      .filter(log => archivedStaff(log)).map(log => log.entityId));
+    return rows.filter(row => !removed.has(row.id)).map(stripUserRow);
   }
 
   /**
@@ -207,12 +221,16 @@ export class IndexedDbService implements IDbService {
     // reconstructed profile date itself to the account's creation instead of to now,
     // so the authoritative row always wins the last-write-wins merge when it arrives.
     const stamped = { ...user, updatedAt: user.updatedAt || new Date().toISOString() };
-    await db.users.put({ ...stamped, loginKeys: computeLoginKeys(stamped), rebuiltLocally });
+    await db.transaction('rw', db.users, db.auditLogs, async () => {
+      await assertStaffNotDeleted(user.id);
+      await db.users.put({ ...stamped, loginKeys: computeLoginKeys(stamped), rebuiltLocally });
+    });
   }
 
   async saveUser(user: UserAccount): Promise<void> {
     const stamped = { ...user, updatedAt: new Date().toISOString() };
-    await db.transaction('rw', db.users, db.outbox, async () => {
+    await db.transaction('rw', db.users, db.outbox, db.auditLogs, async () => {
+      await assertStaffNotDeleted(user.id);
       const existing = await db.users.get(user.id);
       if (!existing) {
         const row: UserRow = { ...stamped, loginKeys: computeLoginKeys(stamped) };
@@ -224,7 +242,8 @@ export class IndexedDbService implements IDbService {
 
   async updateUser(user: UserAccount): Promise<void> {
     const stamped = { ...user, updatedAt: new Date().toISOString() };
-    await db.transaction('rw', db.users, db.outbox, async () => {
+    await db.transaction('rw', db.users, db.outbox, db.auditLogs, async () => {
+      await assertStaffNotDeleted(user.id);
       const row: UserRow = { ...stamped, loginKeys: computeLoginKeys(stamped) };
       await db.users.put(row);
       await db.outbox.add(queueOutboxRow('users', 'UPDATE', stamped));
@@ -237,18 +256,40 @@ export class IndexedDbService implements IDbService {
    *
    * The queued DELETE is what makes this real rather than local: without it the next
    * reconciliation pull would find the row still in Supabase and put it straight back.
-   * Callers must establish that the account owns no records first — see
-   * countRecordsForUser — because nothing here cascades, and a ticket whose cashier no
-   * longer exists loses its name for good.
+   * An immutable credential-free audit identity retains attribution. Historical
+   * records remain intact, and a deletion tombstone rejects stale login profiles.
    */
   async deleteUser(userId: string): Promise<void> {
-    await db.transaction('rw', db.users, db.outbox, async () => {
+    await db.transaction('rw', db.users, db.outbox, db.auditLogs, async () => {
+      const user = await db.users.get(userId);
+      if (!user) return;
+      if (user.role === 'admin') throw new Error('The business owner cannot be deleted as staff.');
+      const now = new Date().toISOString();
+      const identity: AuditLogRow = { id: crypto.randomUUID(), entity: STAFF_DELETION_ENTITY,
+        entityId: userId, action: 'PERMANENT_DELETE', actorId: user.accountId || '', timestamp: now,
+        accountId: user.accountId, updatedAt: now,
+        reason: JSON.stringify({ id: user.id, name: user.name, role: user.role, createdAt: user.createdAt, accountId: user.accountId }) };
+      // Archive first in queue order. No salary, ticket, expense or shift is deleted.
+      await db.auditLogs.add(identity);
+      await db.outbox.add({ ...queueOutboxRow('audit_logs', 'INSERT', identity), createdAt: now });
+      // Credentials also lived in older queued/synced profile snapshots. Remove
+      // them atomically. Unsent snapshots remain queued as non-login identities
+      // until acknowledged; their deletion successor is never silently dropped.
+      await db.outbox.where('[tableName+payload.id+status]').anyOf(
+        ['pending', 'failed', 'synced', 'syncing'].map(status => ['users', userId, status])
+      ).modify(row => {
+        if (row.action === 'DELETE') return;
+        row.payload = { id: userId, accountId: user.accountId, name: user.name, role: user.role,
+          createdAt: user.createdAt, updatedAt: now, status: 'deactivated',
+          email: null, username: null, pinHash: '', pinSalt: '', passwordHash: null, passwordSalt: null,
+          recoveryKeyHash: null, recoveryKeySalt: null };
+      });
       await db.users.delete(userId);
-      await db.outbox.add(queueOutboxRow('users', 'DELETE', { id: userId }));
+      await db.outbox.add({ ...queueOutboxRow('users', 'DELETE', { id: userId, accountId: user.accountId }), createdAt: new Date(Date.parse(now) + 1).toISOString() });
     });
   }
 
-  /** How much history a staff account owns, per table. All zero means nothing is lost by deleting it. */
+  /** How much history a staff account owns, per table. Deletion retains this history. */
   async countRecordsForUser(userId: string): Promise<{ tickets: number; shifts: number; expenses: number; assessments: number; wageLedger: number; auditLogs: number }> {
     const [tickets, shifts, expenses, assessments, wageLedger, auditLogs] = await Promise.all([
       db.tickets.filter((ticket) => ticket.cashierId === userId || ticket.staffId === userId).count(),
@@ -269,6 +310,55 @@ export class IndexedDbService implements IDbService {
         .between([userId, Dexie.minKey], [userId, Dexie.maxKey]).reverse().toArray();
     }
     return db.tickets.orderBy('createdAt').reverse().toArray();
+  }
+
+  async getTicketsInPeriod(period: Period): Promise<Ticket[]> {
+    return db.tickets.where('createdAt').between(period.start.toISOString(), period.end.toISOString(), true, false).reverse().toArray();
+  }
+
+  async getStaffMealTickets(staffIds: string[], period: Period): Promise<Ticket[]> {
+    const rows = await Promise.all(staffIds.map(id => db.tickets.where('[staffId+createdAt]').between(
+      [id, period.start.toISOString()], [id, period.end.toISOString()], true, false).toArray()));
+    return rows.flat();
+  }
+
+  /** Keyset pagination: reading page 100,000 costs the same as page 1. */
+  async getRecentTickets(userId?: string, before?: { createdAt: string; id: string }, limit = 200): Promise<Ticket[]> {
+    if (userId) return db.tickets.where('[cashierId+createdAt+id]').between(
+      [userId, Dexie.minKey, Dexie.minKey],
+      before ? [userId, before.createdAt, before.id] : [userId, Dexie.maxKey], true, !before
+    ).reverse().limit(limit).toArray();
+    // Admin's till uses the same personal cashier scope as other tills.
+    return db.tickets.orderBy('createdAt').reverse().limit(limit).toArray();
+  }
+
+  async getShiftSummary(shift: Shift): Promise<ShiftSummary> {
+    const ready = await db.shiftSummaries.get(shift.id);
+    if (ready) return ready;
+    return db.transaction('rw', db.tickets, db.shiftSummaries, async () => {
+      const cached = await db.shiftSummaries.get(shift.id);
+      if (cached) return cached;
+      const summary = emptyShiftSummary(shift);
+      // One-time legacy bootstrap for THIS shift, bounded native pages. Both modern
+      // shift IDs and legacy cashier/window membership match reconciliation rules.
+      for (const [index, lower, upper, legacy] of [
+        ['[shiftId+createdAt+id]', [shift.id, Dexie.minKey, Dexie.minKey], [shift.id, Dexie.maxKey], false],
+        ['[cashierId+createdAt+id]', [shift.cashierId, shift.openedAt, Dexie.minKey], (shift.closedAt ? [shift.cashierId, shift.closedAt, Dexie.maxKey] : [shift.cashierId, Dexie.maxKey]), true],
+      ] as const) {
+        let cursor: any = lower;
+        let inclusive = true;
+        while (true) {
+          const rows = await db.tickets.where(index).between(cursor, upper, inclusive, true).limit(500).toArray();
+          for (const row of rows) if (!legacy || !row.shiftId) adjustShiftSummary(summary, row, 1);
+          if (rows.length < 500) break;
+          const last = rows[rows.length - 1];
+          cursor = [legacy ? shift.cashierId : shift.id, last.createdAt, last.id];
+          inclusive = false;
+        }
+      }
+      await db.shiftSummaries.put(summary);
+      return summary;
+    });
   }
 
   async saveTicket(ticket: Ticket): Promise<void> {
@@ -295,7 +385,10 @@ export class IndexedDbService implements IDbService {
       if (staff && ticket.mealOptions?.length) {
         const config = (await db.config.get(DEFAULT_CONFIG_KEY))?.value as DeviceConfig | undefined;
         const day = businessDayKey(ticket.createdAt, config?.businessDayStartHour);
-        const meals = (await db.tickets.toArray()).filter(t => !staff.accountId || !t.accountId || t.accountId === staff.accountId);
+        const window = periodFor('day', new Date(ticket.createdAt), undefined, config?.businessDayStartHour);
+        const meals = (await db.tickets.where('[staffId+createdAt]').between(
+          [staff.id, window.start.toISOString()], [staff.id, window.end.toISOString()], true, false).toArray())
+          .filter(t => !staff.accountId || !t.accountId || t.accountId === staff.accountId);
         const used = staffFoodCount(meals, staff.id, day, config?.businessDayStartHour);
         const deduction = staffMealWageDeduction(ticket.mealOptions, used, staff.dailyFoodCountLimit ?? 1);
         ticket.staffMealWageDeduction = deduction;
@@ -676,27 +769,14 @@ export class IndexedDbService implements IDbService {
 
   /** Queued rows that are eligible to be pushed right now (i.e. not waiting out a backoff). */
   async getPendingOutbox(limit = Number.POSITIVE_INFINITY): Promise<OutboxItem[]> {
-    const now = Date.now();
     if (limit <= 0) return [];
-    const due: OutboxItem[] = [];
-    let after: any[] = ['pending', Dexie.minKey];
-    const pageSize = Math.min(1000, Math.max(200, limit));
-    while (due.length < limit) {
-      // Collection.filter/offset force an IPC cursor round trip per record. Native
-      // getAll reads a page in one request; id disambiguates equal timestamps.
-      const page = await db.outbox.where('[status+createdAt+id]')
-        .between(after, ['pending', Dexie.maxKey], false, false)
-        .limit(pageSize).toArray();
-      if (!page.length) break;
-      for (const row of page) {
-        if (!row.nextAttemptAt || Date.parse(row.nextAttemptAt) <= now) due.push(row);
-        if (due.length === limit) return due;
-      }
-      const last = page[page.length - 1];
-      after = ['pending', last.createdAt, last.id];
-      if (page.length < pageSize) break;
-    }
-    return due;
+    // A native due-time index skips any size of backed-off prefix in one read.
+    // Healthy rows all have readyAt='', retaining their createdAt/id order.
+    // Retries follow them and prepareOutboxRetry guards newer record versions.
+    const rows = await db.outbox.where('[status+readyAt+createdAt+id]').between(
+      ['pending', ''], ['pending', new Date().toISOString(), Dexie.maxKey], true, true
+    ).limit(limit).toArray();
+    return rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   }
 
   /** A backed-off older snapshot must never overwrite a newer acknowledged edit. */
@@ -726,25 +806,16 @@ export class IndexedDbService implements IDbService {
   async countUnsyncedOutbox(includeDiagnostics = true): Promise<{
     total: number;
     stuck: number;
-    topError?: { reason: string; count: number };
+    topError?: { reason: string; count: number; sampled?: boolean };
   }> {
-    // One read snapshot, with native requests issued together. Separate transactions
-    // both multiplied disk/IPC latency and mixed counts from different queue states.
-    const [pending, failed, stuckPending, stuckFailed] = await db.transaction('r', db.outbox, () => Promise.all([
-      db.outbox.where('status').equals('pending').count(),
-      db.outbox.where('status').equals('failed').count(),
-      db.outbox.where('[status+retryCount]').between(
-        ['pending', STUCK_AFTER_RETRIES], ['pending', Dexie.maxKey], true, true).count(),
-      db.outbox.where('[status+retryCount]').between(
-        ['failed', STUCK_AFTER_RETRIES], ['failed', Dexie.maxKey], true, true).count(),
-    ]));
-    const total = pending + failed;
-    const stuck = stuckPending + stuckFailed;
-    if (!includeDiagnostics) return { total, stuck };
-    // Healthy payloads need never be loaded to display a queue count.
+    const counts = await db.queueCounters.get('outbox');
+    const total = (counts?.pending || 0) + (counts?.failed || 0);
+    const stuck = counts?.stuck || 0;
+    if (!includeDiagnostics || total === 0) return { total, stuck };
+    // Diagnostics are a bounded sample; the queue totals remain exact.
     const rows = await db.outbox.where('[status+retryCount]').between(
-      ['pending', 1], ['pending', Dexie.maxKey], true, true).toArray();
-    rows.push(...await db.outbox.where('status').equals('failed').toArray());
+      ['pending', 1], ['pending', Dexie.maxKey], true, true).limit(100).toArray();
+    rows.push(...await db.outbox.where('status').equals('failed').limit(100).toArray());
 
     // Why the queue is not moving is recorded on every row that failed, and used to be
     // readable nowhere: the badge said "N pending" whether the cloud was busy or was
@@ -759,7 +830,7 @@ export class IndexedDbService implements IDbService {
     return {
       total,
       stuck,
-      topError: top ? { reason: top[0], count: top[1] } : undefined,
+      topError: top ? { reason: top[0], count: top[1], ...(rows.length >= 100 ? { sampled: true } : {}) } : undefined,
     };
   }
 
@@ -770,9 +841,14 @@ export class IndexedDbService implements IDbService {
   async markOutboxSyncedMany(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     await db.transaction('rw', db.outbox, async () => {
+      // Exact keys avoid scanning other due records when batches span different
+      // ready times. The transaction cache shares these before-images with counters.
       const rows = await db.outbox.bulkGet(ids);
       await db.outbox.bulkPut(rows.filter((row): row is OutboxItem => !!row)
-        .map(row => ({ ...row, status: 'synced' as const })));
+        .map(row => ({ ...row, status: 'synced' as const,
+          // Keep replay-order proof without retaining a second copy of the sale,
+          // settings or login credentials after the cloud has acknowledged it.
+          payload: { id: row.payload.id, accountId: row.payload.accountId } })));
     });
   }
 
@@ -832,9 +908,9 @@ export class IndexedDbService implements IDbService {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
     let removed = 0;
     while (true) {
-      const count = await db.transaction('rw', db.outbox, async () => {
-        if (await db.outbox.where('status').equals('pending').count()
-          || await db.outbox.where('status').equals('failed').count()) return 0;
+      const count = await db.transaction('rw', db.outbox, db.queueCounters, async () => {
+        const counters = await db.queueCounters.get('outbox');
+        if (counters && counters.pending + counters.failed > 0) return 0;
         const keys = await db.outbox.where('[status+createdAt]')
           .between(['synced', Dexie.minKey], ['synced', cutoff], true, false)
           .limit(200).primaryKeys();

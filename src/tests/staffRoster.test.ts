@@ -7,8 +7,8 @@
  *  - it must reach the cloud as a *removal*. The sync worker upserted every queued row
  *    regardless of its action, so a DELETE would have written the account straight back;
  *    and the next reconciliation pull would restore it anyway.
- *  - it must be refused whenever the account owns history, because nothing cascades and a
- *    ticket keeps only a cashierId.
+ *  - credential-free audit attribution must reach the cloud before removal. Historical
+ *    tickets, shifts and wages remain intact even when a login is permanently removed.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -111,10 +111,11 @@ describe('staff account removal', () => {
     await svc.deleteUser('cashier-1');
 
     expect(await db.users.get('cashier-1')).toBeUndefined();
-    const queued = await db.outbox.toArray();
-    expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({ tableName: 'users', action: 'DELETE' });
-    expect(queued[0].payload.id).toBe('cashier-1');
+    const queued = (await db.outbox.toArray()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    expect(queued).toHaveLength(2);
+    expect(queued[0]).toMatchObject({ tableName: 'audit_logs', action: 'INSERT' });
+    expect(queued[1]).toMatchObject({ tableName: 'users', action: 'DELETE' });
+    expect(queued[1].payload.id).toBe('cashier-1');
   });
 
   it('sends a DELETE to the cloud, not an upsert that would restore the account', async () => {
@@ -125,13 +126,14 @@ describe('staff account removal', () => {
 
     await useSyncStore.getState().triggerSyncWorker();
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0].op).toBe('delete');
-    expect(calls[0].table).toBe('users');
-    expect(calls[0].filters.id).toBe('cashier-1');
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ table: 'audit_logs', op: 'upsert' });
+    expect(calls[1].op).toBe('delete');
+    expect(calls[1].table).toBe('users');
+    expect(calls[1].filters.id).toBe('cashier-1');
     // Scoped to the tenant as well as the id, so a malformed queue entry cannot reach
     // beyond this account.
-    expect(calls[0].filters.account_id).toBe('ACCOUNT-1');
+    expect(calls[1].filters.account_id).toBe('ACCOUNT-1');
 
     const rows = await db.outbox.toArray();
     expect(rows[0].status).toBe('synced');

@@ -14,6 +14,12 @@
  */
 
 import { db, computeLoginKeys } from './dexieSchema';
+import { archivedStaff, STAFF_DELETION_ENTITY } from './staffIdentity';
+
+async function permanentlyRemovedIds(): Promise<Set<string>> {
+  const logs = await db.auditLogs.where('entity').equals(STAFF_DELETION_ENTITY).toArray();
+  return new Set(logs.filter(log => archivedStaff(log)).map(log => log.entityId));
+}
 
 /** Postgres/outbox table names — the only tables realtime/reconciliation sync touches.
  *  sequences/config/outbox stay device-local and must never be written here. */
@@ -143,8 +149,9 @@ export async function applyRemoteRow(
   // The optional snapshot is advisory only. A new local write can arrive after it.
   void dirtyIds;
   const table = db[DEXIE_TABLE[pgTable]] as any;
-  return db.transaction('rw', table, db.outbox, async () => {
+  return db.transaction('rw', table, db.outbox, db.auditLogs, db.users, async () => {
     const id = camelRow.id as string;
+    if (pgTable === 'users' && (await permanentlyRemovedIds()).has(id)) return false;
     if (!id || await isRowDirty(pgTable, id)) return false;
     if (op === 'DELETE') {
       await table.delete(id);
@@ -153,6 +160,7 @@ export async function applyRemoteRow(
     const existing = await table.get(id);
     if (!shouldApplyRemote(existing, camelRow)) return false;
     await table.put(normaliseRemote(pgTable, camelRow));
+    if (pgTable === 'audit_logs' && archivedStaff(camelRow as any)) await db.users.delete(camelRow.entityId);
     return true;
   });
 }
@@ -169,16 +177,18 @@ export async function applyRemoteRows(pgTable: SyncablePgTable, rows: Record<str
   let changed = false;
   for (let offset = 0; offset < rows.length; offset += 200) {
     const chunk = rows.slice(offset, offset + 200).filter(row => row.id);
-    changed = await db.transaction('rw', table, db.outbox, async () => {
+    changed = await db.transaction('rw', table, db.outbox, db.auditLogs, db.users, async () => {
       const [dirty, existing] = await Promise.all([
         db.outbox.where('[tableName+payload.id+status]')
           .anyOf(chunk.flatMap(row => [[pgTable, row.id, 'pending'], [pgTable, row.id, 'failed']]))
           .keys().then(keys => new Set(keys.map(key => String((key as any[])[1])))),
         table.bulkGet(chunk.map(row => row.id)),
       ]);
-      const writes = chunk.filter((row, i) => !dirty.has(row.id) && shouldApplyRemote(existing[i], row))
+      const removed = pgTable === 'users' ? await permanentlyRemovedIds() : new Set<string>();
+      const writes = chunk.filter((row, i) => !removed.has(row.id) && !dirty.has(row.id) && shouldApplyRemote(existing[i], row))
         .map(row => normaliseRemote(pgTable, row));
       if (writes.length) await table.bulkPut(writes);
+      if (pgTable === 'audit_logs') await db.users.bulkDelete(writes.filter(row => archivedStaff(row as any)).map(row => row.entityId));
       return writes.length > 0;
     }) || changed;
     await new Promise(resolve => setTimeout(resolve, 0));

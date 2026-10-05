@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Shift } from '../types/shift';
 import { dbService } from '../services/db/IndexedDbService';
 import { calculateShiftReconciliation } from '../utils/reconciliation';
-import { shiftTickets, splitByTender } from '../utils/analytics';
+
 import { useAuthStore } from './useAuthStore';
 import { useSyncStore } from './useSyncStore';
 import { useDeviceStore } from './useDeviceStore';
@@ -92,19 +92,11 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     const shift = get().currentShift;
     if (!shift) throw new Error('No active shift to close');
 
-    // Read this cashier's tickets straight from the database rather than the store: the
-    // store is scoped to whoever is signed in, which for an admin is every cashier's
-    // tickets and for a cashier may be a stale subset.
-    //
-    // Previously this summed *every* ticket in the store with no window at all, so
-    // expected cash was the account's lifetime revenue and the variance written against
-    // the shift was nonsense. shiftTickets bounds it to this cashier, this shift.
+    // Complete persisted shift totals, independent of the bounded recent-ticket page.
+    // The cache follows shiftTickets membership, including explicit shift IDs.
     // Cash only — card and transfer sales are revenue but never entered the drawer, so
     // counting them into expected cash would flag every non-cash sale as a shortage.
-    const cashierTickets = await dbService.getTickets(shift.cashierId);
-    const totalCashTickets = splitByTender(
-      shiftTickets(cashierTickets, { ...shift, closedAt: new Date().toISOString() })
-    ).cash;
+    const totalCashTickets = (await dbService.getShiftSummary(shift)).cash;
 
     const expenses = await dbService.getExpenses(shift.id);
     const approvedExpenses = expenses.filter(e => e.status === 'approved').reduce((sum, e) => sum + e.amount, 0);

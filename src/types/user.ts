@@ -33,6 +33,8 @@ export interface UserAccount {
   role: UserRole;          // See utils/roles.ts for what each one may do
   createdAt: string;       // ISO 8601 string
   status: UserStatus;
+  /** Credential-free attribution reconstructed from permanent deletion audit. */
+  deletedAt?: string;
   /** Number of free base-food selections allowed per trading day. */
   dailyFoodCountLimit?: number;
   /** Owning account: the admin's Supabase auth user id, and the tenant key the

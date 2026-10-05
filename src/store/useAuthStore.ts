@@ -331,9 +331,9 @@ interface AuthState {
    * deleteStaffMember, and what should be reached for in almost every case.
    */
   setStaffStatus: (userId: string, status: UserStatus) => Promise<StaffActionResult>;
-  /** How much history an account owns; zero everywhere is what makes deletion safe. */
+  /** How much retained history an account owns. */
   countStaffRecords: (userId: string) => Promise<StaffRecordCounts>;
-  /** Permanently remove a staff account. Refuses if it owns any record. */
+  /** Permanently remove staff credentials; keep historical attribution. */
   deleteStaffMember: (userId: string) => Promise<StaffActionResult>;
   /**
    * Reset the admin PIN offline using the master recovery key.
@@ -1204,7 +1204,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   updateStaffMember: async (userId: string, name: string, username: string, role?: UserRole, dailyFoodCountLimit?: number) => {
     get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
-    if (!user) return { ok: false, message: 'That staff account no longer exists.' };
+    if (!user || user.deletedAt) return { ok: false, message: 'That staff account no longer exists.' };
 
     const cleanName = name.trim();
     const cleanUsername = username.trim().toLowerCase();
@@ -1250,7 +1250,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   setStaffStatus: async (userId: string, status: UserStatus) => {
     get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
-    if (!user) return { ok: false, message: 'That staff account no longer exists.' };
+    if (!user || user.deletedAt) return { ok: false, message: 'That staff account no longer exists.' };
     if (user.status === status) return { ok: true };
 
     if (status === 'deactivated') {
@@ -1288,7 +1288,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   deleteStaffMember: async (userId: string) => {
     get().assertAdminRole();
     const user = get().users.find(u => u.id === userId);
-    if (!user) return { ok: false, message: 'That staff account no longer exists.' };
+    if (!user || user.deletedAt) return { ok: false, message: 'That staff account no longer exists.' };
 
     // The admin *is* the account — its id is the tenant key every synced row is scoped by.
     if (user.role === 'admin') {
@@ -1296,25 +1296,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
     if (get().activeUser?.id === userId) {
       return { ok: false, message: 'This account is signed in at the till. Switch cashier first.' };
-    }
-
-    // Nothing cascades. A ticket keeps only a cashierId, so deleting an account that took
-    // even one of them leaves that history permanently nameless — which is why this is
-    // refused outright and deactivation offered instead, rather than warned about.
-    const counts = await get().countStaffRecords(userId);
-    if (counts.total > 0) {
-      const parts = [
-        counts.tickets && `${counts.tickets} ticket${counts.tickets === 1 ? '' : 's'}`,
-        counts.shifts && `${counts.shifts} shift${counts.shifts === 1 ? '' : 's'}`,
-        counts.expenses && `${counts.expenses} expense${counts.expenses === 1 ? '' : 's'}`,
-        counts.assessments && `${counts.assessments} assessment${counts.assessments === 1 ? '' : 's'}`,
-        counts.wageLedger && `${counts.wageLedger} wage ledger entr${counts.wageLedger === 1 ? 'y' : 'ies'}`,
-        counts.auditLogs && `${counts.auditLogs} audit entr${counts.auditLogs === 1 ? 'y' : 'ies'}`,
-      ].filter(Boolean);
-      return {
-        ok: false,
-        message: `${user.name} owns ${parts.join(', ')}. Deleting the account would strip the name off those records for good — deactivate instead.`,
-      };
     }
 
     await dbService.deleteUser(userId);
@@ -1327,7 +1308,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   resetCashierPin: async (cashierId: string, newPin: string) => {
     get().assertAdminRole();
-    const user = get().users.find(u => u.id === cashierId);
+    const user = get().users.find(u => u.id === cashierId && !u.deletedAt);
     if (!user) return false;
     for (const existing of get().users.filter((u) => u.id !== cashierId && u.status === 'active')) {
       if (await verifySecret(newPin, existing.pinHash, existing.pinSalt)) throw new Error(`That PIN is already assigned to ${existing.name}.`);

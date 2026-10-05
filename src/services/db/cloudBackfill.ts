@@ -18,10 +18,11 @@
  */
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
-import { selectAllPages } from '../supabase/pagedSelect';
+import { selectPages } from '../supabase/pagedSelect';
 import { db, stripUserRow, UserRow } from './dexieSchema';
 import { getAccountId } from './accountScope';
 import { dbService } from './IndexedDbService';
+import { archivedStaff, STAFF_DELETION_ENTITY } from './staffIdentity';
 import { SyncablePgTable, SyncableDexieTable } from './remoteMerge';
 
 const BACKFILL_TABLES: { pg: SyncablePgTable; dexie: SyncableDexieTable }[] = [
@@ -67,48 +68,40 @@ export async function runBackfillPush(): Promise<number> {
 
   for (const { pg, dexie } of BACKFILL_TABLES) {
     try {
-      const localRows: any[] = (await (db as any)[dexie].toArray())
-        .filter((row: any) => !row.accountId || row.accountId === accountId);
-      if (!localRows.length) continue;
-
-      // Equal counts do not prove equal ids. Always compare ids on this infrequent
-      // recovery sweep so a lost outbox entry can be repaired even on a busy account.
-
-      // Only ids are needed for the diff, so this stays cheap even on a long history.
-      // Scoped to this account: without the filter another tenant's ids could read as
-      // "already present" and this sweep would skip uploads it needed to make.
-      //
-      // Paged, because this diff treats every id it does not see as a row the cloud is
-      // missing — and an unpaged select stops at the project's "Max rows" cap (1000 by
-      // default) without saying so. Past that point the sweep re-queued the overflow on
-      // every pass for ever, uploading rows the cloud already had, and the queue grew by
-      // one with every ticket rung up. See selectAllPages.
-      const { data, error } = await selectAllPages<{ id: string }>(() =>
-        supabase.from(pg).select('id').eq('account_id', accountId)
-      );
-      if (error) {
-        console.warn(`[cloudBackfill] could not read cloud ids for ${pg}:`, error.message);
-        continue;
+      // Ordered merge of two paged streams. A million records never become a
+      // million-payload JS array or a million-ID Set on the till.
+      const remote = selectPages<{ id: string }>(() => supabase.from(pg).select('id').eq('account_id', accountId));
+      let remotePage: { id: string }[] = [];
+      let remoteOffset = 0;
+      let remoteDone = false;
+      const peek = async (): Promise<string | undefined> => {
+        if (remoteOffset >= remotePage.length && !remoteDone) {
+          const next = await remote.next();
+          remoteDone = Boolean(next.done);
+          remotePage = next.value || [];
+          remoteOffset = 0;
+        }
+        return remotePage[remoteOffset]?.id;
+      };
+      const removed = pg === 'users' ? new Set((await db.auditLogs.where('entity').equals(STAFF_DELETION_ENTITY).toArray())
+        .filter(log => archivedStaff(log)).map(log => log.entityId)) : new Set<string>();
+      const table = db[dexie] as any;
+      let after: string | undefined;
+      while (true) {
+        const page: any[] = await (after ? table.where('id').above(after) : table.orderBy('id')).limit(500).toArray();
+        if (!page.length) break;
+        const missing: Record<string, any>[] = [];
+        for (const row of page) {
+          if ((row.accountId && row.accountId !== accountId) || row.rebuiltLocally || removed.has(row.id)) continue;
+          let cloudId = await peek();
+          while (cloudId !== undefined && cloudId < row.id) { remoteOffset++; cloudId = await peek(); }
+          if (cloudId !== row.id) missing.push(toCloudPayload(pg, row));
+        }
+        if (missing.length) queuedTotal += await dbService.enqueueBackfill(pg, missing);
+        after = page[page.length - 1].id;
+        await new Promise(resolve => setTimeout(resolve, 0));
       }
-
-      const remoteIds = new Set((data ?? []).map((r: any) => r.id));
-      const missing = localRows
-        .filter((r) => r?.id && !remoteIds.has(r.id))
-        // A profile this device rebuilt from a cloud sign-in is missing from the
-        // cloud for a reason, and is exactly the row this sweep must not send: it
-        // shares its id with the genuine profile the original till still owes, and
-        // uploading it first would make the cloud skip the real one for ever after,
-        // losing the owner's name, password hash and recovery key across every device.
-        .filter((r) => !(pg === 'users' && r.rebuiltLocally))
-        .map((r) => toCloudPayload(pg, r));
-
-      if (!missing.length) continue;
-
-      const queued = await dbService.enqueueBackfill(pg, missing);
-      queuedTotal += queued;
-      if (queued) {
-        console.info(`[cloudBackfill] queued ${queued} local ${pg} row(s) the cloud was missing`);
-      }
+      await remote.return(undefined);
     } catch (e) {
       console.warn(`[cloudBackfill] backfill sweep failed for ${pg}:`, e);
     }

@@ -16,6 +16,9 @@ import { ServerSalesEntry } from '../../types/serverSales';
 import { OutboxItem } from '../../types/sync';
 import { RolePayConfig, StaffAssessment, WageLedgerEntry } from '../../types/workforce';
 import { InventoryBatch, InventoryItem, InventoryMovement } from '../../types/inventory';
+import { installQueueCounters, QueueCounters } from './queueCounters';
+import { installShiftSummaries, ShiftSummary } from './shiftSummaries';
+import { installTransactionReadCache } from './transactionReadCache';
 
 /** Storage-only row shape: UserAccount plus a derived, indexable lookup array that
  *  powers getUserByEmail's case-insensitive match across both the email and
@@ -71,6 +74,8 @@ export class TicketPosDB extends Dexie {
   expenses!: Table<Expense, string>;
   serverSales!: Table<ServerSalesEntry, string>;
   outbox!: Table<OutboxItem, string>;
+  queueCounters!: Table<QueueCounters, string>;
+  shiftSummaries!: Table<ShiftSummary, string>;
   auditLogs!: Table<AuditLogRow, string>;
   rolePayConfigs!: Table<RolePayConfig, string>;
   staffAssessments!: Table<StaffAssessment, string>;
@@ -79,8 +84,8 @@ export class TicketPosDB extends Dexie {
   inventoryBatches!: Table<InventoryBatch, string>;
   inventoryMovements!: Table<InventoryMovement, string>;
 
-  constructor() {
-    super('ticket_pos_dexie_v1');
+  constructor(name = 'ticket_pos_dexie_v1') {
+    super(name);
     this.version(1).stores({
       config: 'key',
       users: 'id, createdAt, status, *loginKeys',
@@ -113,6 +118,43 @@ export class TicketPosDB extends Dexie {
     this.version(4).stores({
       tickets: 'id, cashierId, createdAt, status, shiftId, [cashierId+createdAt], [staffId+createdAt]',
       outbox: 'id, status, createdAt, [status+createdAt], [status+createdAt+id], [status+retryCount], [tableName+status], [tableName+payload.id+status]',
+    });
+    this.version(5).stores({ queueCounters: 'key' }).upgrade(async tx => {
+      const outbox = tx.table('outbox');
+      const [pending, failed, stuckPending, stuckFailed] = await Promise.all([
+        outbox.where('status').equals('pending').count(),
+        outbox.where('status').equals('failed').count(),
+        outbox.where('[status+retryCount]').between(['pending', 8], ['pending', Dexie.maxKey], true, true).count(),
+        outbox.where('[status+retryCount]').between(['failed', 8], ['failed', Dexie.maxKey], true, true).count(),
+      ]);
+      await tx.table('queueCounters').put({ key: 'outbox', pending, failed, stuck: stuckPending + stuckFailed });
+    });
+    installQueueCounters(this);
+    this.version(6).stores({
+      shiftSummaries: 'id',
+      tickets: 'id, cashierId, createdAt, status, shiftId, [cashierId+createdAt], [staffId+createdAt], [cashierId+createdAt+id], [shiftId+createdAt+id]',
+    });
+    installShiftSummaries(this);
+    this.version(7).stores({
+      outbox: 'id, status, createdAt, [status+createdAt], [status+createdAt+id], [status+retryCount], [tableName+status], [tableName+payload.id+status], [status+readyAt+createdAt+id]',
+    }).upgrade(async tx => {
+      // One additive migration, bounded memory; middleware fills the derived index.
+      const queue = tx.table('outbox');
+      let after: string | undefined;
+      while (true) {
+        const rows = await (after ? queue.where('id').above(after) : queue.orderBy('id')).limit(1000).toArray();
+        if (!rows.length) break;
+        const writes = rows.filter(row => row.readyAt !== (row.nextAttemptAt || '') || row.status === 'syncing');
+        if (writes.length) await queue.bulkPut(writes.map(row => ({ ...row, readyAt: row.nextAttemptAt || '', status: row.status === 'syncing' ? 'pending' : row.status })));
+        after = rows[rows.length - 1].id;
+      }
+    });
+    installTransactionReadCache(this);
+    this.version(8).stores({
+      shifts: 'id, cashierId, status, openedAt, [cashierId+status]',
+      // Replace redundant queue indexes rather than multiplying index writes on
+      // every sale/acknowledgement. Ordering/pruning use the compound indexes.
+      outbox: 'id, status, [status+createdAt], [status+retryCount], [tableName+status], [tableName+payload.id+status], [status+readyAt+createdAt+id]',
     });
   }
 }

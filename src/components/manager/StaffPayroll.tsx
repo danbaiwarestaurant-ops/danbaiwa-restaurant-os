@@ -3,12 +3,11 @@ import { Banknote, Calculator, CheckCircle2, RotateCcw, Settings2 } from 'lucide
 import { useAuthStore } from '../../store/useAuthStore';
 import { DEFAULT_PAY_CONFIGS, useWorkforceStore } from '../../store/useWorkforceStore';
 import { STAFF_ROLES, roleLabel } from '../../utils/roles';
-import { calculateAssessment, wageBalance } from '../../utils/workforce';
+import { calculateAssessment, wageStatement } from '../../utils/workforce';
 import { formatCurrency } from '../../utils/currency';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { PerformanceReward, WagePenalty } from '../../types/workforce';
 import { useConsolePeriodStore } from '../../store/useConsolePeriodStore';
-import { periodContains } from '../../utils/period';
 import { ConsoleButton, DataTable, EmptyState, Panel, StatusBadge } from './ConsoleUI';
 import { useShiftStore } from '../../store/useShiftStore';
 import { businessDayKey } from '../../utils/shiftDay';
@@ -32,6 +31,7 @@ export const StaffPayroll: React.FC<{ section: PayrollSection }> = ({ section })
   const [configDrafts, setConfigDrafts] = useState<Record<string, { metric: string; rate: string }>>({});
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [statementId, setStatementId] = useState<string | null>(null);
   const [settle, setSettle] = useState<{ staffId: string; amount: string; note: string; kind: 'payment' | 'debt_forgiveness' | 'manual_adjustment' } | null>(null);
   const currency = deviceConfig.currencySymbol || '₦';
   const penaltyRules = deviceConfig.penaltyRules || [];
@@ -121,14 +121,11 @@ export const StaffPayroll: React.FC<{ section: PayrollSection }> = ({ section })
       flash(`${roleLabel(role)} wage rule saved`);
     } catch (e) { fail(e); }
   };
-  const periodBalances = useMemo(() => staff.map((person) => ({
-    person,
-    balance: wageBalance(assessments.filter((a) => a.staffId === person.id), ledger.filter((l) => l.staffId === person.id)),
-    earned: assessments.filter((a) => {
-      if (a.staffId !== person.id || a.status !== 'finalized') return false;
-      return periodContains(period, a.businessDay);
-    }).reduce((sum, a) => sum + a.netPay, 0),
-  })), [staff, assessments, ledger, period]);
+  const balanceStaff = users.filter(u => u.role !== 'admin' && (u.status === 'active' ||
+    assessments.some(a => a.staffId === u.id) || ledger.some(row => row.staffId === u.id)));
+  const periodBalances = useMemo(() => balanceStaff.map(person => ({ person,
+    statement: wageStatement(assessments.filter(a => a.staffId === person.id), ledger.filter(row => row.staffId === person.id), period),
+  })), [users, assessments, ledger, period]);
 
   return <div className="space-y-4">
     {(message || error) && <div role="status" className={`fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,36rem)] border-2 p-3 shadow-2xl text-xs font-bold ${error ? 'bg-rose-50 border-rose-500 text-rose-900' : 'bg-emerald-50 border-emerald-500 text-emerald-900'}`}>{error || message}</div>}
@@ -187,14 +184,34 @@ export const StaffPayroll: React.FC<{ section: PayrollSection }> = ({ section })
 
     {section === 'balances' && <Panel title="Wage Balances & Settlement" subtitle={`Earnings are for ${period.label}; current balance includes carried debt and payments. Positive is payable to staff.`} icon={Banknote}>
       <DataTable headers={['Staff', 'Period earnings', 'Current balance', 'Action']} alignRight={[1, 2, 3]}>
-        {periodBalances.map(({ person, earned, balance }) => <tr key={person.id}>
+        {periodBalances.map(({ person, statement }) => { const balance = statement.current; return <React.Fragment key={person.id}><tr>
           <td className="py-2.5 pr-3 font-bold">{person.name}<div className="text-[10px] text-slate-400">{roleLabel(person.role)}</div></td>
-          <td className="py-2.5 pr-3 text-right font-mono">{formatCurrency(earned, currency)}</td>
+          <td className="py-2.5 pr-3 text-right font-mono">{formatCurrency(statement.netWages, currency)}</td>
           <td className={`py-2.5 pr-3 text-right font-mono font-black ${balance < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatCurrency(balance, currency)}</td>
-          <td className="py-2.5 text-right"><ConsoleButton onClick={() => setSettle({ staffId: person.id, amount: '', note: '', kind: balance < 0 ? 'debt_forgiveness' : 'payment' })}>{balance < 0 ? 'Adjust debt' : 'Record payment'}</ConsoleButton></td>
-        </tr>)}
+          <td className="py-2.5 text-right"><div className="flex flex-wrap justify-end gap-2"><ConsoleButton onClick={() => setStatementId(statementId === person.id ? null : person.id)}>{statementId === person.id ? 'Hide breakdown' : 'Salary breakdown'}</ConsoleButton><ConsoleButton onClick={() => setSettle({ staffId: person.id, amount: '', note: '', kind: balance < 0 ? 'debt_forgiveness' : 'payment' })}>{balance < 0 ? 'Adjust debt' : 'Record payment'}</ConsoleButton></div></td>
+        </tr>
+        {statementId === person.id && <tr><td colSpan={4} className="pb-4">
+          <div aria-label={person.name + ' salary statement'} className="border-2 border-slate-300 bg-slate-50 p-3 space-y-4">
+              <h4 className="font-black uppercase text-xs">{person.name} — {period.label}{person.deletedAt ? ' — Deleted staff' : person.status !== 'active' ? ' — Inactive staff' : ''}</h4>
+            <dl className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3">
+              {[
+                ['Opening balance', statement.opening], ['Base earnings', statement.base], ['Performance bonuses', statement.bonuses],
+                ['Penalties', -statement.penalties], ['Net wages', statement.netWages], ['Meal deductions', -statement.mealDeductions],
+                ['Other adjustments / debt forgiveness', statement.adjustments], ['Payments', -statement.payments], ['Closing balance', statement.closing],
+              ].map(([label, amount]) => <div key={String(label)}><dt className="text-[10px] font-bold uppercase text-slate-500">{label}</dt><dd className="font-mono font-black mt-1">{formatCurrency(Number(amount), currency)}</dd></div>)}
+            </dl>
+            {statement.draftCount > 0 && <p className="text-xs font-bold text-amber-800">{statement.draftCount} draft assessments are excluded until finalized.</p>}
+              <DataTable headers={['Trading day', 'Work × rate', 'Base', 'Bonuses', 'Penalties / reason', 'Net wage']}>
+                {statement.wages.map(a => <tr key={a.id}><td className="py-2 pr-3">{a.businessDay}</td><td className="py-2 pr-3">{a.output} {a.metricLabel} × {formatCurrency(a.nairaPerUnit, currency)}</td><td className="py-2 pr-3 font-mono">{formatCurrency(a.grossPay, currency)}</td><td className="py-2 pr-3">{formatCurrency(a.rewardTotal || 0, currency)}<div className="text-[10px]">{(a.rewards || []).map(r => r.label).join(', ')}</div></td><td className="py-2 pr-3">{formatCurrency(a.fixedPenaltyTotal, currency)}<div className="text-[10px]">{a.penalties.map(p => p.label).join(', ')}{a.note && <div>{a.note}</div>}</div></td><td className="py-2 font-mono font-black">{formatCurrency(a.netPay, currency)}</td></tr>)}
+            </DataTable>
+            <DataTable headers={['Trading day', 'Entry', 'Reason', 'Recorded by', 'Balance change']}>
+              {statement.entries.map(row => <tr key={row.id}><td className="py-2 pr-3">{row.businessDay}</td><td className="py-2 pr-3">{row.kind.replace(/_/g, ' ')}</td><td className="py-2 pr-3">{row.note}</td><td className="py-2 pr-3">{row.recordedByName || users.find(u => u.id === row.recordedBy)?.name || row.recordedBy}</td><td className="py-2 font-mono font-black">{formatCurrency(row.kind === 'payment' ? -Math.abs(row.amount) : row.amount, currency)}</td></tr>)}
+            </DataTable>
+          </div>
+        </td></tr>}
+        </React.Fragment>; })}
       </DataTable>
-      {settle && (() => { const person = staff.find((s) => s.id === settle.staffId)!; return <div className="mt-4 border-2 border-amber-300 bg-amber-50 p-3 grid grid-cols-1 sm:grid-cols-5 gap-2 items-end">
+      {settle && (() => { const person = balanceStaff.find((s) => s.id === settle.staffId)!; return <div className="mt-4 border-2 border-amber-300 bg-amber-50 p-3 grid grid-cols-1 sm:grid-cols-5 gap-2 items-end">
         <label className="text-[10px] font-black uppercase">Entry type<select value={settle.kind} onChange={(e) => setSettle({ ...settle, kind: e.target.value as typeof settle.kind })} className="mt-1 w-full border-2 border-slate-300 p-2 rounded-none normal-case"><option value="payment">Payment</option><option value="debt_forgiveness">Debt forgiveness</option><option value="manual_adjustment">Manual adjustment</option></select></label>
         <label className="text-[10px] font-black uppercase">Amount<input type="number" value={settle.amount} onChange={(e) => setSettle({ ...settle, amount: e.target.value })} className="mt-1 w-full border-2 border-slate-300 p-2 rounded-none normal-case" /></label>
         <label className="text-[10px] font-black uppercase sm:col-span-2">Mandatory reason<input value={settle.note} onChange={(e) => setSettle({ ...settle, note: e.target.value })} className="mt-1 w-full border-2 border-slate-300 p-2 rounded-none normal-case" /></label>

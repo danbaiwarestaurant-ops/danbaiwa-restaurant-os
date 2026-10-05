@@ -26,6 +26,27 @@
 
 const PAGE_SIZE = 500;
 
+/** Streaming keyset pages: bounded memory and no growing SQL OFFSET. Advance by
+ * the last UNIQUE key actually returned, including under a smaller server cap. */
+export async function* selectPages<T extends Record<string, any> = any>(
+  build: () => any, orderBy = 'id'
+): AsyncGenerator<T[]> {
+  let after: string | undefined;
+  while (true) {
+    let query = build();
+    if (after !== undefined) query = query.gt(orderBy, after);
+    const { data, error } = await query.order(orderBy, { ascending: true }).range(0, PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as T[];
+    if (!page.length) return;
+    const last = String(page[page.length - 1][orderBy]);
+    if (!last || last === 'undefined' || (after !== undefined && last <= after)) throw new Error('Cloud pagination did not advance its unique key.');
+    yield page;
+    after = last;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+}
+
 /**
  * @param build  Returns a *fresh* filtered query (`supabase.from(t).select(...).eq(...)`).
  *               Called once per page, because a PostgREST builder is single-use.

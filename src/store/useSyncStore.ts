@@ -799,6 +799,9 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     // Someone pressing sync is asserting the connection is good now, so the cached
     // "no session" answer from a moment ago must not be what decides this attempt.
     invalidateCloudSessionCache();
+    // Healthy work starts immediately, even if a large rejected queue needs revival.
+    await get().checkOutbox();
+    await get().triggerSyncWorker();
     // Clear every backoff first. Without this the button is a lie on exactly the
     // occasions it matters most: after a spell offline, most of the queue is sitting out
     // a multi-minute timer, so pressing sync did nothing visible and the count kept

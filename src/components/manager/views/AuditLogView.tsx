@@ -1,3 +1,4 @@
+import { archivedStaff } from '../../../services/db/staffIdentity';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useAuditStore } from '../../../store/useAuditStore';
 import { useAuthStore } from '../../../store/useAuthStore';
@@ -86,7 +87,7 @@ export const AuditLogView: React.FC = () => {
                   {log.entity} #{log.entityId}
                 </td>
                 <td className="py-2.5 pr-3 font-semibold text-slate-800">{actorName(log.actorId)}</td>
-                <td className="py-2.5 text-slate-700">{log.reason || '—'}</td>
+                <td className="py-2.5 text-slate-700">{archivedStaff(log) ? `Staff login permanently deleted: ${archivedStaff(log)!.name}. Historical records retained.` : log.reason || '—'}</td>
               </tr>
             ))}
           </DataTable>

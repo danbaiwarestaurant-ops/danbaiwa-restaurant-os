@@ -10,6 +10,7 @@ import { businessDayKey } from '../../utils/shiftDay';
 import { roleLabel } from '../../utils/roles';
 import { formatCurrency } from '../../utils/currency';
 import { staffMealWageDeduction, staffFoodCounts } from '../../utils/staffMeals';
+import { periodFor } from '../../utils/period';
 
 interface Props { isOpen: boolean; onClose: () => void; onSuccess: (msg: string) => void; onError: (msg: string) => void }
 const FALLBACK_OPTIONS = [
@@ -28,6 +29,7 @@ export const StaffMealModal: React.FC<Props> = ({ isOpen, onClose, onSuccess, on
   const [mealTickets, setMealTickets] = useState<Ticket[]>([]);
   const [countReady, setCountReady] = useState(false);
   const [clock, setClock] = useState(() => new Date());
+  const today = businessDayKey(clock, config.businessDayStartHour);
   useEffect(() => {
     if (!isOpen) return;
     setClock(new Date());
@@ -38,16 +40,16 @@ export const StaffMealModal: React.FC<Props> = ({ isOpen, onClose, onSuccess, on
     if (!isOpen) return;
     let cancelled = false;
     setCountReady(false);
-    dbService.getTickets().then(rows => { if (!cancelled) { setMealTickets(rows); setCountReady(true); } }).catch(() => { if (!cancelled) onError('Could not load staff meal allowances. Try reopening the form.'); });
+    dbService.getStaffMealTickets(users.filter(u => u.status === 'active').map(u => u.id), periodFor('day', clock, 1, config.businessDayStartHour ?? 6))
+      .then(rows => { if (!cancelled) { setMealTickets(rows); setCountReady(true); } }).catch(() => { if (!cancelled) onError('Could not load staff meal allowances. Try reopening the form.'); });
     return () => { cancelled = true; };
-  }, [isOpen, tickets]);
+  }, [isOpen, tickets, users, today, config.businessDayStartHour]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isIssuing, setIsIssuing] = useState(false);
   const options = config.staffMealOptions?.length ? config.staffMealOptions : FALLBACK_OPTIONS;
   const roster = useMemo(() => users.filter((u) => u.status === 'active').sort((a, b) => a.name.localeCompare(b.name)), [users]);
   const selected = roster.find((u) => u.id === staffId);
   const selectedOptions = options.filter((o) => selectedIds.includes(o.id));
-  const today = businessDayKey(clock, config.businessDayStartHour);
   const counts = useMemo(() => staffFoodCounts(mealTickets, today, config.businessDayStartHour), [mealTickets, today, config.businessDayStartHour]);
   const baseMealsToday = counts[staffId] || 0;
   const freeLimit = selected?.dailyFoodCountLimit ?? 1;

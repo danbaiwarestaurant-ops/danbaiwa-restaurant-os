@@ -17,7 +17,7 @@
  */
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
-import { selectAllPages } from '../supabase/pagedSelect';
+import { selectPages } from '../supabase/pagedSelect';
 import { toCamelCase } from '../../utils/caseMapping';
 import { applyRemoteRow, applyRemoteSettings, applyRemoteRows, SyncablePgTable } from './remoteMerge';
 import { useDeviceStore } from '../../store/useDeviceStore';
@@ -70,6 +70,7 @@ const DEEP_SWEEP_LOOKBACK_MS = 24 * 60 * 60_000;
 let lastDeepSweep = 0;
 
 const SYNCABLE_TABLES: SyncablePgTable[] = [
+  'audit_logs',
   'users',
   'tickets',
   'shifts',
@@ -81,7 +82,6 @@ const SYNCABLE_TABLES: SyncablePgTable[] = [
   'inventory_items',
   'inventory_batches',
   'inventory_movements',
-  'audit_logs',
 ];
 
 let channel: ReturnType<typeof supabase.channel> | null = null;
@@ -89,8 +89,8 @@ let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let onlineListenerAttached = false;
 const reloadTimers: Partial<Record<SyncablePgTable, ReturnType<typeof setTimeout>>> = {};
 
-/** Tickets/expenses show an account-wide rollup for admins, but only "my own" for
- *  cashiers — mirrors App.tsx's loading scope so realtime-triggered reloads match. */
+/** Reload the currently selected store scope: personal recent till history or
+ * account-wide console reporting. A remote event never widens a till's scope. */
 
 function scheduleStoreReload(pgTable: SyncablePgTable): void {
   if (reloadTimers[pgTable]) clearTimeout(reloadTimers[pgTable]);
@@ -131,6 +131,7 @@ function scheduleStoreReload(pgTable: SyncablePgTable): void {
         useAuthStore.getState().loadUsers();
         break;
       case 'audit_logs':
+        useAuthStore.getState().loadUsers();
         useAuditStore.getState().loadAuditLogs();
         break;
     }
@@ -206,21 +207,18 @@ export async function runReconciliationPull(
       //
       // Paged: an unpaged select silently stops at the project's "Max rows" cap, so an
       // account with more history than that could never hand a till the rest of it.
-      const { data, error } = await selectAllPages(() => {
+      let changedAny = false;
+      let newest = '';
+      for await (const page of selectPages(() => {
         const query = supabase.from(pgTable).select('*').eq('account_id', accountId);
         return since ? query.gte('updated_at', since) : query;
-      });
-
-      if (error || !data) {
-        console.warn(`[realtimeSync] reconciliation pull failed for ${pgTable}:`, error?.message);
-        continue;
+      })) {
+        changedAny = await applyRemoteRows(pgTable, page.map(row => toCamelCase(row))) || changedAny;
+        for (const row of page) {
+          const stamp = String(row.updated_at ?? '');
+          if (stamp > newest) newest = stamp;
+        }
       }
-
-      const changedAny = await applyRemoteRows(pgTable, data.map(row => toCamelCase(row)));
-      const newest = data.reduce((latest, row) => {
-        const stamp = String((row as any).updated_at ?? '');
-        return stamp > latest ? stamp : latest;
-      }, '');
 
       // Only ever advanced after the rows it covers have actually been applied, so a
       // failure part-way through re-reads them next time rather than skipping them.
@@ -296,10 +294,13 @@ async function catchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
   if (deep) lastDeepSweep = Date.now();
 
   try {
-    if (revive) await dbService.revivePendingOutbox();
     // Sending the existing queue must not wait for a full-history cloud comparison.
     await useSyncStore.getState().checkOutbox();
     await useSyncStore.getState().triggerSyncWorker();
+    if (revive) {
+      await dbService.revivePendingOutbox();
+      await useSyncStore.getState().triggerSyncWorker();
+    }
     if (deep) {
       const accountId = await getAccountId();
       if (accountId) await stampLocalRowsWithAccount(accountId);

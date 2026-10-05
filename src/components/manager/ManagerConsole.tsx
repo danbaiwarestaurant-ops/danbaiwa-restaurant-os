@@ -1,3 +1,4 @@
+import { useTicketStore } from '../../store/useTicketStore';
 import React, { useEffect, useState } from 'react';
 import { useDeviceStore } from '../../store/useDeviceStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
@@ -59,6 +60,8 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
   const { currentShift } = useShiftStore();
   const admin = useAuthStore((s) => s.users.find((u) => u.role === 'admin'));
   const setCalendar = useConsolePeriodStore((s) => s.setCalendar);
+  const period = useConsolePeriodStore((s) => s.period);
+  useEffect(() => { void useTicketStore.getState().loadTickets(); }, [period.start.getTime(), period.end.getTime()]);
 
   useEffect(() => {
     setCalendar(config.weekStartsOn ?? 1, config.businessDayStartHour ?? 6);

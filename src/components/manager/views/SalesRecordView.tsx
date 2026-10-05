@@ -74,7 +74,7 @@ export const SalesRecordView: React.FC = () => {
             className="px-2 py-1.5 border-2 border-slate-300 text-[11px] font-bold text-slate-800 bg-white rounded-none"
           >
             <option value="ALL">All Cashiers</option>
-            {users.map((u) => (
+            {users.filter(u => u.role === 'cashier').map((u) => (
               <option key={u.id} value={u.id}>{u.name}</option>
             ))}
           </select>

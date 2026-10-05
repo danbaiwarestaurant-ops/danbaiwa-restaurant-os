@@ -164,10 +164,12 @@ export function App() {
       .catch((e: any) => showError(e?.message || 'Could not open a shift for this sign-in'));
   };
 
+  useEffect(() => { void useTicketStore.getState().refreshShiftSummary(); }, [currentShift?.id]);
+
   // Reload data whenever the signed-in user or the view changes.
   //
-  // At the till, tickets and expenses roll up across the account for an admin but stay
-  // scoped to "my own" for a cashier. currentShift is never rolled up — it's a personal
+  // At the till, recent tickets and expenses are scoped to the signed-in person.
+  // currentShift is never rolled up — it's a personal
   // "is my shift open" gate, always the signed-in user's own shift regardless of role (see
   // realtimeSync.ts's scheduleStoreReload for the same distinction on the sync side).
   //
@@ -193,7 +195,7 @@ export function App() {
       return;
     }
 
-    const rollupScope = activeUser.role === 'admin' ? undefined : activeUser.id;
+    const rollupScope = activeUser.id;
     loadTickets(rollupScope);
     loadExpenses(undefined, rollupScope);
     // The sidebar breaks its pages on shift boundaries, so the till needs the shift list

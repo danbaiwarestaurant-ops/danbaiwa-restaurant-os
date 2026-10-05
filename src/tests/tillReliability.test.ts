@@ -101,7 +101,7 @@ describe('operational record safety', () => {
 
   it('a slow reload cannot erase a ticket committed while that read was in flight', async () => {
     let resolve!: (tickets: Ticket[]) => void;
-    vi.spyOn(dbService, 'getTickets').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    vi.spyOn(dbService, 'getRecentTickets').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
     const loading = useTicketStore.getState().loadTickets('cashier');
     await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
     const issued = await useTicketStore.getState().createAndPrintTicket(500, 'cashier');
@@ -112,7 +112,8 @@ describe('operational record safety', () => {
 
   it('an older scoped read cannot replace a later account-wide manager read', async () => {
     let resolve!: (tickets: Ticket[]) => void;
-    vi.spyOn(dbService, 'getTickets').mockImplementationOnce(() => new Promise(done => { resolve = done; })).mockResolvedValueOnce([ticket('account')]);
+    vi.spyOn(dbService, 'getRecentTickets').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    vi.spyOn(dbService, 'getTicketsInPeriod').mockResolvedValueOnce([ticket('account')]);
     const older = useTicketStore.getState().loadTickets('cashier');
     await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
     await useTicketStore.getState().loadTickets();

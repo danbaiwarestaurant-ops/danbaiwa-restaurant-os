@@ -11,9 +11,16 @@ import { useAuthStore } from './useAuthStore';
 import { roleLabel } from '../utils/roles';
 import { WageLedgerEntry } from '../types/workforce';
 import { businessDayKey } from '../utils/shiftDay';
+import { ShiftSummary } from '../services/db/shiftSummaries';
+import { useConsolePeriodStore } from './useConsolePeriodStore';
 
 interface TicketState {
   tickets: Ticket[];
+  hasOlderTickets: boolean;
+  browsingOlder: boolean;
+  shiftSummary: ShiftSummary | null;
+  refreshShiftSummary: () => Promise<void>;
+  loadOlderTickets: () => Promise<void>;
   isLoading: boolean;
   activeFlashingAmount: number | null;
   /**
@@ -56,36 +63,58 @@ interface TicketState {
 }
 
 /**
- * The header's counters are the *shift's*, not the store's, and are derived in Header.tsx
- * from the open shift's own tickets. There is deliberately no day-scoped total kept here:
- * a till worked by two people in a day would have shown each of them the other's takings.
+ * The till holds a bounded recent page. Its counters use complete, persisted totals
+ * for the open shift, maintained atomically with ticket writes in IndexedDB.
  */
 let ticketLoadGeneration = 0;
 let ticketWriteGeneration = 0;
+let summaryGeneration = 0;
 const committedDuringLoads = new Map<string, { version: number; ticket: Ticket }>();
 
 export const useTicketStore = create<TicketState>((set, get) => ({
   tickets: [],
+  hasOlderTickets: false,
+  browsingOlder: false,
+  shiftSummary: null,
   isLoading: false,
   activeFlashingAmount: null,
   scope: undefined,
   printError: null,
   clearPrintError: () => set({ printError: null }),
 
+  refreshShiftSummary: async () => {
+    const generation = ++summaryGeneration;
+    const shift = useShiftStore.getState().currentShift;
+    if (!shift) { set({ shiftSummary: null }); return; }
+    const summary = await dbService.getShiftSummary(shift);
+    if (generation === summaryGeneration && useShiftStore.getState().currentShift?.id === shift.id) set({ shiftSummary: summary });
+  },
+  loadOlderTickets: async () => {
+    const { tickets, scope } = get();
+    if (!scope || !tickets.length) return;
+    const last = tickets[tickets.length - 1];
+    const older = await dbService.getRecentTickets(scope, last, 201);
+    if (get().scope === scope && get().tickets === tickets) set({
+      ...(older.length ? { tickets: older.slice(0, 200), browsingOlder: true } : {}), hasOlderTickets: older.length > 200,
+    });
+  },
   loadTickets: async (userId?: string) => {
     const generation = ++ticketLoadGeneration;
     const writeVersion = ticketWriteGeneration;
     set({ isLoading: true, scope: userId });
     try {
       await dbService.init();
-      const tickets = await dbService.getTickets(userId);
+      const tickets = userId ? await dbService.getRecentTickets(userId, undefined, 201) :
+        await dbService.getTicketsInPeriod(useConsolePeriodStore.getState().period);
       if (generation !== ticketLoadGeneration) return;
       const merged = new Map(tickets.map(ticket => [ticket.id, ticket]));
       for (const { version, ticket } of committedDuringLoads.values()) {
         if (version > writeVersion && (!userId || ticket.cashierId === userId)) merged.set(ticket.id, ticket);
       }
       committedDuringLoads.clear();
-      set({ tickets: [...merged.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)), isLoading: false });
+      const sorted = [...merged.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      set({ tickets: userId ? sorted.slice(0, 200) : sorted, hasOlderTickets: !!userId && sorted.length > 200, browsingOlder: false, isLoading: false });
+      await get().refreshShiftSummary();
     } catch (error) {
       if (generation === ticketLoadGeneration) set({ isLoading: false });
       throw error;
@@ -177,9 +206,11 @@ export const useTicketStore = create<TicketState>((set, get) => ({
     // picked up the just-saved row, which would otherwise duplicate it here.
     if (get().isLoading) committedDuringLoads.set(newTicket.id, { version: ++ticketWriteGeneration, ticket: newTicket });
     else ticketWriteGeneration++;
-    const currentTickets = get().tickets.filter(t => t.id !== newTicket.id);
-    const updatedTickets = [newTicket, ...currentTickets];
-    set({ tickets: updatedTickets });
+    if (!get().scope || get().scope === newTicket.cashierId) {
+      const currentTickets = get().tickets.filter(t => t.id !== newTicket.id);
+      const updatedTickets = get().scope ? [newTicket, ...currentTickets].slice(0, 200) : [newTicket, ...currentTickets];
+      set({ tickets: updatedTickets, hasOlderTickets: !!get().scope && (get().hasOlderTickets || currentTickets.length >= 200) });
+    }
 
     // STEP 3: Visual flash effect
     get().triggerFlash(amount);
@@ -215,6 +246,9 @@ export const useTicketStore = create<TicketState>((set, get) => ({
       .catch((e: any) => {
         set({ printError: `Ticket #${newTicket.id} did not print: ${e?.message || 'unknown printer error'}` });
       });
+
+    void get().refreshShiftSummary();
+    if (get().browsingOlder) void get().loadTickets(get().scope);
 
     // Trigger outbox check and immediate cloud sync push
     useSyncStore.getState().checkOutbox().then(() => {

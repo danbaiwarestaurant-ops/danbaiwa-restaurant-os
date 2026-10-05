@@ -113,7 +113,7 @@ export interface IDbService {
   countUnsyncedOutbox(): Promise<{
     total: number;
     stuck: number;
-    topError?: { reason: string; count: number };
+    topError?: { reason: string; count: number; sampled?: boolean };
   }>;
   markOutboxSynced(id: string): Promise<void>;
   /**

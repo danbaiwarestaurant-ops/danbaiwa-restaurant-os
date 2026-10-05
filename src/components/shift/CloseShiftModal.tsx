@@ -5,7 +5,7 @@ import { useTicketStore } from '../../store/useTicketStore';
 import { useExpenseStore } from '../../store/useExpenseStore';
 import { formatCurrency } from '../../utils/currency';
 import { calculateShiftReconciliation } from '../../utils/reconciliation';
-import { shiftTickets, shiftExpenses, splitByTender, sumApprovedExpenses } from '../../utils/analytics';
+import { shiftExpenses, sumApprovedExpenses } from '../../utils/analytics';
 import { staleDayCount } from '../../utils/shiftDay';
 import { useDeviceStore } from '../../store/useDeviceStore';
 
@@ -30,11 +30,12 @@ interface CloseShiftModalProps {
 
 export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClose, onSuccess, endsSession, mandatory }) => {
   const { currentShift, closeShift } = useShiftStore();
-  const { tickets } = useTicketStore();
+  const { shiftSummary } = useTicketStore();
   const { expenses } = useExpenseStore();
   const startHour = useDeviceStore(s => s.config.businessDayStartHour);
 
   if (!isOpen || !currentShift) return null;
+  const totalsReady = shiftSummary?.id === currentShift.id;
 
   // Live shift totals, bounded to *this* shift: the cashier's own tickets, taken since the
   // shift opened, and the expenses charged to it. Summing the whole store instead — which
@@ -43,7 +44,8 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
   // Split by how the customer paid: only the cash half can be held against a drawer count.
   // Card and transfer are shown so the cashier can see their whole shift, but they are not
   // money anyone can produce at the counter.
-  const sales = splitByTender(shiftTickets(tickets, currentShift));
+  const sales = { cash: totalsReady ? shiftSummary?.cash || 0 : 0, transfer: totalsReady ? shiftSummary?.transfer || 0 : 0,
+    staff: totalsReady ? shiftSummary?.staffMealValue || 0 : 0, total: totalsReady ? shiftSummary?.revenue || 0 : 0 };
   const approvedExpenses = sumApprovedExpenses(shiftExpenses(expenses, currentShift));
 
   // How far behind this shift has fallen, and the day it actually belongs to. Shown
@@ -68,8 +70,8 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await closeShift();
-    onSuccess(`Shift closed. Expected cash is ${formatCurrency(recon.expectedCash)}; a manager can enter the physical count later in Shift History.`);
+    const closed = await closeShift();
+    onSuccess(`Shift closed. Expected cash is ${formatCurrency(closed?.expectedCash || 0)}; a manager can enter the physical count later in Shift History.`);
     onClose();
   };
 
@@ -179,9 +181,10 @@ export const CloseShiftModal: React.FC<CloseShiftModalProps> = ({ isOpen, onClos
             )}
             <button
               type="submit"
+              disabled={!totalsReady}
               className="px-4 py-2 text-xs font-black uppercase bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-none border border-amber-600 shadow-xs"
             >
-              {mandatory ? 'Close It & Start Today' : endsSession ? 'Close Shift & Log Out' : 'Close Shift'}
+              {!totalsReady ? 'Loading shift totals…' : mandatory ? 'Close It & Start Today' : endsSession ? 'Close Shift & Log Out' : 'Close Shift'}
             </button>
           </div>
         </form>

@@ -95,13 +95,19 @@ export async function stampLocalRowsWithAccount(accountId: string): Promise<numb
     if (!table) continue;
 
     try {
-      const ids = (await table.filter((row: any) => row && !row.accountId).primaryKeys()) as string[];
-      for (let offset = 0; offset < ids.length; offset += 200) {
-        stamped += await db.transaction('rw', table, async () => {
-          // Modify the CURRENT row; never put a stale snapshot over a new sale/edit.
-          return table.where('id').anyOf(ids.slice(offset, offset + 200))
-            .filter((row: any) => !row.accountId).modify({ accountId });
+      let after: string | undefined;
+      while (true) {
+        // Native pages avoid a cursor/IPC round trip for every historical row.
+        const rows = await (after ? table.where('id').above(after) : table.orderBy('id')).limit(500).toArray();
+        if (!rows.length) break;
+        const ids = rows.filter((row: any) => !row.accountId).map((row: any) => row.id);
+        if (ids.length) stamped += await db.transaction('rw', table, async () => {
+          const current = await table.bulkGet(ids);
+          const writes = current.filter((row: any) => row && !row.accountId).map((row: any) => ({ ...row, accountId }));
+          if (writes.length) await table.bulkPut(writes);
+          return writes.length;
         });
+        after = rows[rows.length - 1].id;
         await new Promise(resolve => setTimeout(resolve, 0));
       }
     } catch (e) {

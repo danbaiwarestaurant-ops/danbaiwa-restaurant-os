@@ -17,6 +17,8 @@ export interface OutboxItem {
    * abandoned on the device (see STUCK_AFTER_RETRIES for how it gets surfaced instead).
    */
   nextAttemptAt?: string;
+  /** Local, derived due-time index. Never part of the cloud payload. */
+  readyAt?: string;
 }
 
 export interface SyncState {
@@ -43,7 +45,7 @@ export interface SyncState {
    * already recorded on its own row and readable nowhere, so a queue that could never
    * drain looked exactly like a queue that was merely busy.
    */
-  queueFault: { reason: string; count: number } | null;
+  queueFault: { reason: string; count: number; sampled?: boolean } | null;
   lastSyncedAt?: string;
   isSyncing: boolean;
 }
