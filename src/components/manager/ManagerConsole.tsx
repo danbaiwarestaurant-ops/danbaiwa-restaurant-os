@@ -22,6 +22,7 @@ import { ComingSoonView } from './views/ComingSoonView';
 import { InventoryView } from './views/InventoryView';
 import { ArrowLeft, UtensilsCrossed, Boxes, Lock, Menu, X } from 'lucide-react';
 import { useConsolePeriodStore } from '../../store/useConsolePeriodStore';
+import { SyncIndicator } from '../common/SyncIndicator';
 
 const LAST_VIEW_KEY = 'ticket_pos_console_view';
 
@@ -56,7 +57,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
   const [navigationOpen, setNavigationOpen] = useState(false);
   const { config } = useDeviceStore();
   const { expenses } = useExpenseStore();
-  const { stuckCount } = useSyncStore();
+  const { stuckCount, isPulling, pullError } = useSyncStore();
   const { currentShift } = useShiftStore();
   const admin = useAuthStore((s) => s.users.find((u) => u.role === 'admin'));
   const setCalendar = useConsolePeriodStore((s) => s.setCalendar);
@@ -128,7 +129,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
     <div className="manager-shell min-h-screen flex bg-slate-100">
       {navigationOpen && <button aria-label="Close navigation" className="fixed inset-0 z-30 bg-slate-900/60 lg:hidden" onClick={() => setNavigationOpen(false)} />}
       {/* Sidebar */}
-      <nav aria-label="Manager navigation" className={`w-60 flex-shrink-0 bg-white border-r-2 border-slate-300 h-dvh fixed lg:sticky z-40 top-0 overflow-y-auto flex flex-col transition-transform lg:translate-x-0 ${navigationOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      <nav aria-label="Manager navigation" className={`w-60 flex-shrink-0 bg-white border-r-2 border-slate-300 h-dvh fixed lg:sticky z-40 lg:z-10 top-0 overflow-y-auto flex flex-col transition-transform lg:translate-x-0 ${navigationOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="px-4 py-5 border-b-2 border-slate-200">
           <div className="font-black text-base uppercase tracking-wider text-slate-900 leading-tight">
             {config.businessName || 'Danbaiwa Restraunt'}
@@ -209,6 +210,7 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
                 either live (Live Tickets), account state rather than a record (Settings,
                 Staff directory management) or not built yet. */}
             {active.periodScoped && <PeriodPicker />}
+            <SyncIndicator />
 
             {/* The shift control, moved off the till. Says whose shift it is, because from
                 here it may well be a cashier's rather than the manager's own. */}
@@ -245,7 +247,15 @@ export const ManagerConsole: React.FC<ManagerConsoleProps> = ({ onBackToTill, on
           </div>
         </header>
 
-        <main className="console-content flex-1 p-3 sm:p-6 max-w-[1600px] w-full min-w-0">{renderView()}</main>
+        <main className="console-content flex-1 p-3 sm:p-6 max-w-[1600px] w-full min-w-0">
+          {active.periodScoped && (isPulling || pullError) && (
+            <p role="status" className="mb-4 border-2 border-amber-400 bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+              {isPulling ? 'Checking incoming records. Reports may be incomplete until this finishes.'
+                : 'Incoming records could not be fully checked. Reports may be incomplete. Open sync details to retry.'}
+            </p>
+          )}
+          {renderView()}
+        </main>
       </div>
     </div>
   );

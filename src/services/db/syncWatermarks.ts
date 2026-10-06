@@ -93,15 +93,17 @@ export async function advanceWatermark(
   const at = Date.parse(updatedAt);
   if (Number.isNaN(at)) return;
 
-  const existing = await load();
-  const record: WatermarkRecord =
-    existing && existing.accountId === accountId ? existing : { accountId, tables: {} };
+  await db.transaction('rw', db.config, async () => {
+    const existing = await load();
+    const record: WatermarkRecord =
+      existing && existing.accountId === accountId ? existing : { accountId, tables: {} };
 
-  const current = record.tables[pgTable];
-  if (current && Date.parse(current) >= at) return;
+    const current = record.tables[pgTable];
+    if (current && Date.parse(current) >= at) return;
 
-  record.tables[pgTable] = updatedAt;
-  await db.config.put({ key: WATERMARK_KEY, value: record });
+    record.tables[pgTable] = updatedAt;
+    await db.config.put({ key: WATERMARK_KEY, value: record });
+  });
 }
 
 /**

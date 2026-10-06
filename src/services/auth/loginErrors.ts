@@ -48,7 +48,7 @@ export interface LoginFailure {
 
 export interface LoginSuccess {
   ok: true;
-  /** True when this machine had to pull the account down from a cloud backup. */
+  /** True when this machine verified/restored its profile from the cloud. */
   restoredFromCloud?: boolean;
 }
 

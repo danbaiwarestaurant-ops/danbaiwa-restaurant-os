@@ -12,6 +12,10 @@ const fixtures: Record<string, any[]> = {
   account_settings: [],
 };
 let failTable: string | null = null;
+let statusChanged: ((status: string) => void) | undefined;
+let holdTable: string | null = null;
+let heldRead: Promise<void> = Promise.resolve();
+let onRead: ((table: string, after?: string) => void) | undefined;
 
 /**
  * How many rows this fake API will return in one response, whatever is asked for —
@@ -29,13 +33,23 @@ function makeQuery(table: string) {
   let to: number | undefined;
   let since: string | undefined;
   let after: string | undefined;
+  let upper: string | undefined;
+  const ordering: { col: string; ascending: boolean }[] = [];
 
   const resolve = () => {
     if (from === 0) reads.push({ table, since });
     if (failTable === table) return { data: null, error: { message: 'boom' } };
+    onRead?.(table, after);
     const all = (fixtures[table] ?? []).filter(
       (r) => (since === undefined || String(r.updated_at ?? '') >= since) && (after === undefined || r.id > after)
-    );
+        && (upper === undefined || r.updated_at <= upper)
+    ).sort((a, b) => {
+      for (const { col, ascending } of ordering) {
+        const cmp = String(a[col]).localeCompare(String(b[col]));
+        if (cmp) return ascending ? cmp : -cmp;
+      }
+      return 0;
+    });
     const end = to === undefined ? all.length : to + 1;
     return { data: all.slice(from, Math.min(end, from + maxRows)), error: null };
   };
@@ -46,14 +60,15 @@ function makeQuery(table: string) {
       since = val;
       return builder;
     },
-    order: () => builder,
+    lte: (_col: string, val: string) => { upper = val; return builder; },
+    order: (col: string, opts: { ascending: boolean }) => { ordering.push({ col, ascending: opts.ascending }); return builder; },
     range: (start: number, last: number) => {
       from = start;
       to = last;
       return builder;
     },
     maybeSingle: () => Promise.resolve({ data: (fixtures[table] ?? [])[0] ?? null, error: null }),
-    then: (onFulfilled: any) => Promise.resolve(resolve()).then(onFulfilled),
+    then: (onFulfilled: any) => (holdTable === table ? heldRead.then(resolve) : Promise.resolve(resolve())).then(onFulfilled),
   };
   return builder;
 }
@@ -61,6 +76,11 @@ function makeQuery(table: string) {
 vi.mock('../services/supabase/supabaseClient', () => ({
   isSupabaseConfigured: true,
   supabase: {
+    channel: vi.fn(() => {
+      const builder = { on: () => builder, subscribe: (callback: (status: string) => void) => { statusChanged = callback; return builder; } };
+      return builder;
+    }),
+    removeChannel: vi.fn(),
     auth: {
       // The account id is the tenant key the whole pull scopes by, and it comes from
       // the session's user id — so the mocked session must carry one. Inlined rather
@@ -74,8 +94,9 @@ vi.mock('../services/supabase/supabaseClient', () => ({
   },
 }));
 
-import { runReconciliationPull } from '../services/db/realtimeSync';
-import { watermarkFor } from '../services/db/syncWatermarks';
+import { runReconciliationPull, runCloudCatchUp, startRealtimeSync, stopRealtimeSync } from '../services/db/realtimeSync';
+import { watermarkFor, advanceWatermark } from '../services/db/syncWatermarks';
+import { useSyncStore } from '../store/useSyncStore';
 
 /** A cloud ticket row, as PostgREST would hand it back. */
 function ticketRow(id: string, updatedAt: string) {
@@ -104,6 +125,8 @@ describe('runReconciliationPull', () => {
     fixtures.audit_logs = [];
     fixtures.account_settings = [];
     failTable = null;
+    holdTable = null;
+    onRead = undefined;
     maxRows = 1000;
     reads = [];
     await db.config.clear();
@@ -305,5 +328,118 @@ describe('runReconciliationPull', () => {
     expect(changed).toBe(true); // users still landed despite tickets failing
     const stored = await db.users.get('user-1');
     expect(stored?.email).toBe('remote@example.com');
+    expect(useSyncStore.getState().pullError).toContain('tickets');
+    expect(useSyncStore.getState().isPulling).toBe(false);
+  });
+
+  it('shows current till data while the phone upload is still held', async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const original = useSyncStore.getState().triggerSyncWorker;
+    const trigger = vi.fn(() => held);
+    useSyncStore.setState({ triggerSyncWorker: trigger, lastPulledAt: undefined });
+    const stamp = new Date().toISOString();
+    fixtures.tickets = [ticketRow('CURRENT', stamp), ticketRow('OLD', '2026-08-29T12:00:00.000Z')];
+    try {
+      expect(await runCloudCatchUp()).toBe(true);
+      expect(trigger).toHaveBeenCalled();
+      expect(reads[0].table).toBe('tickets');
+      expect(reads[0].since).toBeDefined();
+      expect(await db.tickets.count()).toBe(2); // preview did not skip historical rows
+      expect(await watermarkFor(TEST_ACCOUNT_ID, 'tickets')).not.toBeNull();
+      expect(useSyncStore.getState().lastPulledAt).toBeDefined();
+    } finally { release(); useSyncStore.setState({ triggerSyncWorker: original }); }
+  });
+
+  it('keeps concurrent watermark updates for different tables', async () => {
+    const stamp = new Date().toISOString();
+    await Promise.all([advanceWatermark(TEST_ACCOUNT_ID, 'tickets', stamp), advanceWatermark(TEST_ACCOUNT_ID, 'shifts', stamp)]);
+    expect(await watermarkFor(TEST_ACCOUNT_ID, 'tickets')).not.toBeNull();
+    expect(await watermarkFor(TEST_ACCOUNT_ID, 'shifts')).not.toBeNull();
+  });
+
+  it('does not advance past a new sale inserted behind the history ID cursor', async () => {
+    maxRows = 2;
+    fixtures.tickets = ['A', 'B', 'D', 'E'].map(id => ticketRow(id, '2026-08-29T12:00:00.000Z'));
+    let inserted = false;
+    onRead = (table, after) => {
+      if (table !== 'tickets' || after !== 'B' || inserted) return;
+      inserted = true;
+      fixtures.tickets.push(ticketRow('AA', '2026-08-29T12:04:00.000Z'));
+      fixtures.tickets.push(ticketRow('Z', '2026-08-29T12:08:00.000Z'));
+    };
+    await runReconciliationPull();
+    expect(inserted).toBe(true);
+    await runReconciliationPull();
+    expect(await db.tickets.get('AA')).toBeDefined();
+    expect(await db.tickets.get('Z')).toBeDefined();
+    expect(await db.tickets.count()).toBe(6);
+  });
+
+  it('previews the newest sales first without downloading the entire trading day', async () => {
+    const stamp = Date.now() - 10000;
+    fixtures.tickets = Array.from({ length: 1300 }, (_, i) => ticketRow(
+      `SALE-${String(i).padStart(5, '0')}`, new Date(stamp + i).toISOString()
+    ));
+    let release!: () => void;
+    heldRead = new Promise(resolve => { release = resolve; }); holdTable = 'audit_logs';
+    const history = runReconciliationPull({ recentFirst: true });
+    try {
+      await vi.waitFor(async () => expect(await db.tickets.get('SALE-01299')).toBeDefined());
+      await vi.waitFor(async () => expect(await db.tickets.count()).toBe(500));
+      expect(await watermarkFor(TEST_ACCOUNT_ID, 'tickets')).toBeNull();
+    } finally { holdTable = null; release(); await history; }
+    expect(await db.tickets.count()).toBe(1300);
+  });
+
+  it('refreshes a new sale while historical downloading is still blocked', async () => {
+    let release!: () => void;
+    heldRead = new Promise(resolve => { release = resolve; }); holdTable = 'audit_logs';
+    const history = runReconciliationPull();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    fixtures.tickets = [ticketRow('LIVE-DURING-HISTORY', new Date().toISOString())];
+    void runReconciliationPull({ recentFirst: true });
+    try {
+      await vi.waitFor(async () => expect(await db.tickets.get('LIVE-DURING-HISTORY')).toBeDefined());
+      expect(await watermarkFor(TEST_ACCOUNT_ID, 'tickets')).toBeNull();
+      expect(useSyncStore.getState().isPulling).toBe(true);
+    } finally { holdTable = null; release(); await history; }
+  });
+
+  it('refreshes on phone wake and socket reconnection, and removes listeners on stop', async () => {
+    const win = new EventTarget();
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    vi.stubGlobal('window', win);
+    vi.stubGlobal('document', doc);
+    vi.stubGlobal('navigator', { onLine: true });
+    const original = useSyncStore.getState().triggerSyncWorker;
+    useSyncStore.setState({ triggerSyncWorker: async () => {} });
+    const finish = async () => {
+      // startRealtimeSync resolves the account before starting its first pull.
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await runReconciliationPull();
+    };
+    try {
+      startRealtimeSync(); await finish();
+      fixtures.tickets = [ticketRow('WAKE-SALE', new Date().toISOString())];
+      doc.dispatchEvent(new Event('visibilitychange')); await finish();
+      expect(await db.tickets.get('WAKE-SALE')).toBeDefined();
+      fixtures.tickets.push(ticketRow('SOCKET-SALE', new Date().toISOString()));
+      statusChanged!('SUBSCRIBED'); await finish();
+      expect(useSyncStore.getState().realtimeConnected).toBe(true);
+      expect(await db.tickets.get('SOCKET-SALE')).toBeDefined();
+      statusChanged!('CHANNEL_ERROR');
+      expect(useSyncStore.getState().realtimeConnected).toBe(false);
+      stopRealtimeSync(); reads = [];
+      win.dispatchEvent(new Event('focus'));
+      doc.dispatchEvent(new Event('visibilitychange'));
+      statusChanged!('SUBSCRIBED');
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(reads).toHaveLength(0);
+      expect(useSyncStore.getState().realtimeConnected).toBe(false);
+    } finally {
+      stopRealtimeSync(); useSyncStore.setState({ triggerSyncWorker: original }); vi.unstubAllGlobals();
+      clearInterval((globalThis as any)._syncStoreInterval); delete (globalThis as any)._syncStoreInterval;
+    }
   });
 });

@@ -99,6 +99,22 @@ describe('operational record safety', () => {
     expect((await db.tickets.get(original.id))?.amount).toBe(500);
   });
 
+  it('merges sparse remote pages without overlooking newer rows beyond the capped local span', async () => {
+    const stamp = '2026-10-06T12:00:00Z';
+    await db.tickets.bulkAdd(Array.from({ length: 300 }, (_, i) => ({ ...ticket(String(i).padStart(5, '0')), updatedAt: stamp })));
+    const exactRead = vi.spyOn(db.tickets, 'bulkGet');
+    await applyRemoteRows('tickets', [
+      { ...ticket('00000'), amount: 1, updatedAt: '2026-10-06T11:00:00Z' },
+      { ...ticket('00299'), amount: 2, updatedAt: '2026-10-06T11:00:00Z' },
+      { ...ticket('00300'), amount: 3, updatedAt: stamp },
+    ]);
+    expect(exactRead).toHaveBeenCalled();
+    expect((await db.tickets.get('00299'))?.amount).toBe(500);
+    expect((await db.tickets.get('00000'))?.amount).toBe(500);
+    expect((await db.tickets.get('00300'))?.amount).toBe(3);
+    expect(await db.tickets.count()).toBe(301);
+  });
+
   it('a slow reload cannot erase a ticket committed while that read was in flight', async () => {
     let resolve!: (tickets: Ticket[]) => void;
     vi.spyOn(dbService, 'getRecentTickets').mockImplementationOnce(() => new Promise(done => { resolve = done; }));

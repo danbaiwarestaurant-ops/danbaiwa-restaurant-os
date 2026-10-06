@@ -17,7 +17,7 @@
  */
 
 import { supabase, isSupabaseConfigured } from '../supabase/supabaseClient';
-import { selectPages } from '../supabase/pagedSelect';
+import { selectSnapshotPages } from '../supabase/pagedSelect';
 import { toCamelCase } from '../../utils/caseMapping';
 import { applyRemoteRow, applyRemoteSettings, applyRemoteRows, SyncablePgTable } from './remoteMerge';
 import { useDeviceStore } from '../../store/useDeviceStore';
@@ -37,18 +37,9 @@ import { useWorkforceStore } from '../../store/useWorkforceStore';
 import { useInventoryStore } from '../../store/useInventoryStore';
 
 const DEVICE_CONFIG_KEY = 'device_config';
-/**
- * How often the safety-net pull runs.
- *
- * This is not how fast changes travel — realtime delivers those within a second, and the
- * sync badge pushes every local write the moment it is made. This timer only exists to
- * catch what a dropped websocket missed, so it is a backstop, not the mechanism. At 60
- * seconds it was 1,440 rounds of five requests per till per day; a till left running
- * overnight spent the night asking. Five minutes cuts that by 80% and costs nothing that
- * anyone standing at a till can perceive — and the sync badge now pulls as well as pushes,
- * so the one case where a person is actively waiting has a button that answers it.
- */
-const RECONCILIATION_INTERVAL_MS = 5 * 60_000;
+/** Visible devices reconcile every 30 seconds even if realtime is unavailable.
+ * Focus, network restoration and websocket resubscription also refresh immediately. */
+const RECONCILIATION_INTERVAL_MS = 30_000;
 const RELOAD_DEBOUNCE_MS = 150;
 
 /**
@@ -86,15 +77,27 @@ const SYNCABLE_TABLES: SyncablePgTable[] = [
 
 let channel: ReturnType<typeof supabase.channel> | null = null;
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
-let onlineListenerAttached = false;
+let lifecycle = 0;
+let wakeListener: (() => void) | null = null;
+let onlineListener: (() => void) | null = null;
 const reloadTimers: Partial<Record<SyncablePgTable, ReturnType<typeof setTimeout>>> = {};
+let ticketHistoryChanged = false;
 
 /** Reload the currently selected store scope: personal recent till history or
  * account-wide console reporting. A remote event never widens a till's scope. */
 
-function scheduleStoreReload(pgTable: SyncablePgTable): void {
-  if (reloadTimers[pgTable]) clearTimeout(reloadTimers[pgTable]);
+function scheduleStoreReload(pgTable: SyncablePgTable, currentPreview = false): void {
+  // Hydrating N historical pages must not reread/sort the whole growing report
+  // N times. Current-trading previews still refresh while history is in flight;
+  // the complete report refreshes once the pass finishes, including on errors.
+  if (pgTable === 'tickets' && !useTicketStore.getState().scope && useSyncStore.getState().isPulling && !currentPreview) {
+    ticketHistoryChanged = true;
+    return;
+  }
+  // Throttle, rather than postponing forever during a continuous stream of pages.
+  if (reloadTimers[pgTable]) return;
   reloadTimers[pgTable] = setTimeout(() => {
+    delete reloadTimers[pgTable];
     switch (pgTable) {
       case 'tickets':
         useTicketStore.getState().loadTickets(useTicketStore.getState().scope);
@@ -178,9 +181,62 @@ async function pullFrom(
  *  syncWatermarks). `full` forces the whole history — the first pull on a device has that
  *  anyway, since it has no position stored yet. `lookBackMs` widens the window behind
  *  that position without going all the way back, for the periodic deep sweep. */
-export async function runReconciliationPull(
-  opts: { full?: boolean; lookBackMs?: number } = {}
+type PullOptions = { full?: boolean; lookBackMs?: number; recentFirst?: boolean };
+let pullFlight: Promise<boolean> | null = null;
+let previewFlight: Promise<void> | null = null;
+/** Continue refreshing current trading even while a new device downloads years
+ * of history. Preview positions are ephemeral and never skip the history pass. */
+const previewPositions: Partial<Record<'tickets' | 'shifts', string>> = {};
+let previewAccount: string | null = null;
+function refreshCurrentTrading(): Promise<void> {
+  if (previewFlight) return previewFlight;
+  const generation = lifecycle;
+  const flight = (async () => {
+    const accountId = await getAccountId();
+    if (!accountId) return;
+    if (previewAccount !== accountId) {
+      delete previewPositions.tickets; delete previewPositions.shifts;
+      previewAccount = accountId;
+    }
+    const recent = new Date(Date.now() - DEEP_SWEEP_LOOKBACK_MS).toISOString();
+    for (const table of ['tickets', 'shifts'] as const) {
+      let newest = '';
+      try {
+        const since = previewPositions[table]
+          ? new Date(Date.parse(previewPositions[table]!) - 120_000).toISOString() : recent;
+        // This is a bounded preview, not the durable history cursor. Newest first
+        // means today's latest sale need not wait behind 30,000 earlier sales.
+        const { data, error } = await supabase.from(table).select('*').eq('account_id', accountId)
+          .gte('updated_at', since).order('updated_at', { ascending: false })
+          .order('id', { ascending: false }).range(0, 499);
+        if (error) throw error;
+        if (generation !== lifecycle || await getAccountId() !== accountId) return;
+        const page = data ?? [];
+        if (await applyRemoteRows(table, page.map(row => toCamelCase(row)))) scheduleStoreReload(table, true);
+        for (const row of page) if (Date.parse(row.updated_at) > (Date.parse(newest) || 0)) newest = row.updated_at;
+        if (generation === lifecycle && newest) previewPositions[table] = newest;
+      } catch (e) { console.warn(`[realtimeSync] ongoing ${table} refresh failed:`, e); }
+    }
+  })().finally(() => { if (previewFlight === flight) previewFlight = null; });
+  previewFlight = flight;
+  return flight;
+}
+export function runReconciliationPull(opts: PullOptions = {}): Promise<boolean> {
+  if (pullFlight) {
+    if (opts.recentFirst) void refreshCurrentTrading().catch(() => {});
+    return pullFlight;
+  }
+  const flight = reconcile(opts).finally(() => {
+    if (pullFlight === flight) pullFlight = null;
+  });
+  pullFlight = flight;
+  return flight;
+}
+
+async function reconcile(
+  opts: PullOptions
 ): Promise<boolean> {
+  const generation = lifecycle;
   if (!isSupabaseConfigured) return false;
 
   // Gate on the actual Supabase session, not the local Zustand `isAuthenticated` flag —
@@ -192,8 +248,19 @@ export async function runReconciliationPull(
 
   const accountId = await getAccountId();
   if (!accountId) return false;
+  const stillCurrent = async () => generation === lifecycle && await getAccountId() === accountId;
+  if (!await stillCurrent()) return false;
 
   let changedOverall = false;
+  const errors: string[] = [];
+  useSyncStore.setState({ isPulling: true, pullError: null });
+
+  // A new phone or one several days behind renders current trading first. This
+  // preview never advances a watermark: the history pass below must finish first.
+  if (opts.recentFirst) {
+    await refreshCurrentTrading();
+    if (!await stillCurrent()) return false;
+  }
 
   for (const pgTable of SYNCABLE_TABLES) {
     try {
@@ -209,19 +276,22 @@ export async function runReconciliationPull(
       // account with more history than that could never hand a till the rest of it.
       let changedAny = false;
       let newest = '';
-      for await (const page of selectPages(() => {
+      for await (const page of selectSnapshotPages(() => {
         const query = supabase.from(pgTable).select('*').eq('account_id', accountId);
         return since ? query.gte('updated_at', since) : query;
       })) {
+        if (!await stillCurrent()) return false;
         changedAny = await applyRemoteRows(pgTable, page.map(row => toCamelCase(row))) || changedAny;
+        if (changedAny) scheduleStoreReload(pgTable);
         for (const row of page) {
           const stamp = String(row.updated_at ?? '');
-          if (stamp > newest) newest = stamp;
+          if (Date.parse(stamp) > (Date.parse(newest) || 0)) newest = stamp;
         }
       }
 
       // Only ever advanced after the rows it covers have actually been applied, so a
       // failure part-way through re-reads them next time rather than skipping them.
+      if (!await stillCurrent()) return false;
       if (newest) await advanceWatermark(accountId, pgTable, newest);
 
       if (changedAny) {
@@ -229,6 +299,7 @@ export async function runReconciliationPull(
         changedOverall = true;
       }
     } catch (e) {
+      errors.push(`${pgTable}: ${(e as any)?.message ?? String(e)}`);
       console.warn(`[realtimeSync] reconciliation pull threw for ${pgTable}:`, e);
     }
   }
@@ -243,6 +314,8 @@ export async function runReconciliationPull(
       .eq('account_id', accountId)
       .maybeSingle();
 
+    if (!await stillCurrent()) return false;
+    if (error) errors.push(`account_settings: ${error.message}`);
     if (!error && data) {
       const applied = await applyRemoteSettings(toCamelCase(data));
       if (applied) {
@@ -251,9 +324,19 @@ export async function runReconciliationPull(
       }
     }
   } catch (e) {
+    errors.push(`account_settings: ${e instanceof Error ? e.message : String(e)}`);
     console.warn('[realtimeSync] settings pull failed:', e);
   }
 
+  if (await stillCurrent()) useSyncStore.setState({
+    isPulling: false,
+    pullError: errors.length ? errors.join('\n') : null,
+    ...(!errors.length ? { lastPulledAt: new Date().toISOString() } : {}),
+  });
+  if (await stillCurrent() && ticketHistoryChanged) {
+    ticketHistoryChanged = false;
+    scheduleStoreReload('tickets');
+  }
   return changedOverall;
 }
 
@@ -265,64 +348,39 @@ export async function runReconciliationPull(
  * entries are stamped when sent; older domain rows are stamped in bounded chunks
  * before deep backfill. Pulls then merge without overwriting unsent local mutations.
  */
-async function catchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+let upwardFlight: Promise<void> | null = null;
+let reviveRequested = false;
 
-  // Reviving means "clear every backoff and try the lot again", which is right when
-  // something has actually changed — a sign-in, the network returning, a person pressing
-  // sync. On the periodic tick it was wrong: it reset every rejected row's retry count
-  // once a minute, so nothing ever aged into a longer backoff or showed up as stuck, and
-  // a queue the cloud was refusing was re-sent in full every 60 seconds forever. That is
-  // the churn behind "hundreds of operations, barely moving".
-  const { revive = false } = opts;
-
-  const { data: sessionData } = await supabase.auth.getSession();
-  if (!sessionData?.session) return false;
-
-  // The expensive half of this sweep — comparing every local id against the cloud's, and
-  // reaching back behind what this device has already read — is a safety net, not the
-  // mechanism. Every ordinary write is pushed the instant it is queued, and every remote
-  // change arrives by realtime or on the next minute's incremental pull; this exists only
-  // to catch what those missed.
-  //
-  // It used to run every minute, and it re-read the account's entire history each time.
-  // For a restaurant doing 3,000 tickets a day that is ~100 MB per till per minute to
-  // learn nothing — more than a month's transfer allowance every hour. Now it runs when
-  // something has actually changed (a sign-in, the network returning) and every six hours
-  // otherwise, and even then it looks back a day rather than for ever.
-  const deep = Date.now() - lastDeepSweep >= DEEP_SWEEP_EVERY_MS;
-  if (deep) lastDeepSweep = Date.now();
-
+async function catchUpUploads(): Promise<void> {
+  const generation = lifecycle;
   try {
-    // Sending the existing queue must not wait for a full-history cloud comparison.
     await useSyncStore.getState().checkOutbox();
     await useSyncStore.getState().triggerSyncWorker();
-    if (revive) {
+    if (generation !== lifecycle) return;
+    if (reviveRequested) {
+      reviveRequested = false;
       await dbService.revivePendingOutbox();
       await useSyncStore.getState().triggerSyncWorker();
+      if (generation !== lifecycle) return;
     }
-    if (deep) {
+    if (Date.now() - lastDeepSweep >= DEEP_SWEEP_EVERY_MS) {
       const accountId = await getAccountId();
-      if (accountId) await stampLocalRowsWithAccount(accountId);
-      const queued = await runBackfillPush();
-      if (queued) await useSyncStore.getState().triggerSyncWorker();
+      if (accountId) {
+        await stampLocalRowsWithAccount(accountId);
+        if (await runBackfillPush()) await useSyncStore.getState().triggerSyncWorker();
+        lastDeepSweep = Date.now();
+      }
     }
-  } catch (e) {
-    console.warn('[realtimeSync] upward catch-up failed:', e);
-  }
-
-  // Note that even a revive pulls incrementally. A device that was offline for three days
-  // resumes from its own stored position and gets exactly the three days it missed —
-  // re-reading the whole history would cost the same whether it had missed a minute or a
-  // year, which is precisely the behaviour that made a flaky connection expensive.
-  return runReconciliationPull(deep ? { lookBackMs: DEEP_SWEEP_LOOKBACK_MS } : {});
+  } catch (e) { console.warn('[realtimeSync] upward catch-up failed:', e); }
 }
 
-let catchUpFlight: Promise<boolean> | null = null;
+/** Current trading reads never wait for this device's upload/backfill backlog. */
 export function runCloudCatchUp(opts: { revive?: boolean } = {}): Promise<boolean> {
-  if (catchUpFlight) return catchUpFlight;
-  catchUpFlight = catchUp(opts).finally(() => { catchUpFlight = null; });
-  return catchUpFlight;
+  if (!isSupabaseConfigured) return Promise.resolve(false);
+  const deep = Date.now() - lastDeepSweep >= DEEP_SWEEP_EVERY_MS;
+  reviveRequested ||= Boolean(opts.revive);
+  if (!upwardFlight) upwardFlight = catchUpUploads().finally(() => { upwardFlight = null; });
+  return runReconciliationPull({ recentFirst: true, ...(deep ? { lookBackMs: DEEP_SWEEP_LOOKBACK_MS } : {}) });
 }
 
 /** Opens one realtime channel covering all five syncable tables, plus the reconnect/
@@ -332,11 +390,13 @@ export function startRealtimeSync(): void {
   if ((globalThis as any)._realtimeSyncStarted) return;
   (globalThis as any)._realtimeSyncStarted = true;
 
+  const generation = ++lifecycle;
   (async () => {
     const accountId = await getAccountId();
+    if (generation !== lifecycle) return;
     if (!accountId) {
       // No session yet — nothing to subscribe as. Login calls this again once there is.
-      (globalThis as any)._realtimeSyncStarted = false;
+      stopRealtimeSync();
       return;
     }
 
@@ -345,42 +405,68 @@ export function startRealtimeSync(): void {
     const scope = `account_id=eq.${accountId}`;
     channel = supabase
       .channel('db-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets', filter: scope }, (p) => handleRealtimeChange('tickets', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts', filter: scope }, (p) => handleRealtimeChange('shifts', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: scope }, (p) => handleRealtimeChange('users', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs', filter: scope }, (p) => handleRealtimeChange('audit_logs', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses', filter: scope }, (p) => handleRealtimeChange('expenses', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'server_sales', filter: scope }, (p) => handleRealtimeChange('server_sales', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'role_pay_configs', filter: scope }, (p) => handleRealtimeChange('role_pay_configs', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_assessments', filter: scope }, (p) => handleRealtimeChange('staff_assessments', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wage_ledger', filter: scope }, (p) => handleRealtimeChange('wage_ledger', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_items', filter: scope }, (p) => handleRealtimeChange('inventory_items', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_batches', filter: scope }, (p) => handleRealtimeChange('inventory_batches', p))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_movements', filter: scope }, (p) => handleRealtimeChange('inventory_movements', p))
-      .subscribe();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('tickets', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('shifts', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('users', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('audit_logs', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('expenses', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'server_sales', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('server_sales', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'role_pay_configs', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('role_pay_configs', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_assessments', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('staff_assessments', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wage_ledger', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('wage_ledger', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_items', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('inventory_items', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_batches', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('inventory_batches', p); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_movements', filter: scope }, (p) => { if (generation === lifecycle) handleRealtimeChange('inventory_movements', p); })
+      .subscribe(status => {
+        if (generation !== lifecycle) return;
+        useSyncStore.setState({ realtimeConnected: status === 'SUBSCRIBED' });
+        if (status === 'SUBSCRIBED') void runReconciliationPull({ recentFirst: true });
+      });
 
     await runCloudCatchUp({ revive: true });
-  })();
+  })().catch(e => {
+    if (generation === lifecycle) {
+      stopRealtimeSync();
+      useSyncStore.setState({ pullError: String(e) });
+    }
+  });
 
-  if (!onlineListenerAttached) {
-    onlineListenerAttached = true;
-    window.addEventListener('online', () => {
-      runCloudCatchUp({ revive: true }).catch(() => {});
-    });
-  }
-
-  if (!reconciliationInterval) {
-    reconciliationInterval = setInterval(() => {
-      runCloudCatchUp().catch(() => {});
-    }, RECONCILIATION_INTERVAL_MS);
-    // Deliberately no revive here — see runCloudCatchUp.
-  }
+  wakeListener = () => {
+    if (document.visibilityState === 'hidden' || !navigator.onLine) return;
+    void runCloudCatchUp().catch(() => {});
+  };
+  onlineListener = () => { void runCloudCatchUp({ revive: true }).catch(() => {}); };
+  window.addEventListener('online', onlineListener);
+  window.addEventListener('focus', wakeListener);
+  document.addEventListener('visibilitychange', wakeListener);
+  reconciliationInterval = setInterval(() => {
+    if (document.visibilityState !== 'hidden' && navigator.onLine) void runReconciliationPull({ recentFirst: true }).catch(() => {});
+  }, RECONCILIATION_INTERVAL_MS);
 }
 
 /** Tears the channel and timers down. Call on logout so a signed-out session doesn't
  *  keep pulling/receiving data it no longer has an authenticated right to see. */
 export function stopRealtimeSync(): void {
   (globalThis as any)._realtimeSyncStarted = false;
+  lifecycle++;
+  pullFlight = null;
+  previewFlight = null;
+  previewAccount = null;
+  delete previewPositions.tickets;
+  delete previewPositions.shifts;
+  lastDeepSweep = 0;
+  ticketHistoryChanged = false;
+  useSyncStore.setState({ isPulling: false, realtimeConnected: false, lastPulledAt: undefined, pullError: null });
+  if (onlineListener) window.removeEventListener('online', onlineListener);
+  if (wakeListener) {
+    window.removeEventListener('focus', wakeListener);
+    document.removeEventListener('visibilitychange', wakeListener);
+  }
+  onlineListener = wakeListener = null;
+  for (const table of SYNCABLE_TABLES) {
+    clearTimeout(reloadTimers[table]);
+    delete reloadTimers[table];
+  }
   if (channel) {
     supabase.removeChannel(channel);
     channel = null;

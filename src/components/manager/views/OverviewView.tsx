@@ -259,10 +259,10 @@ export const OverviewView: React.FC = () => {
             </tr>
             {/* Device state, not a record of trading — a reporting window does not apply. */}
             <tr>
-              <td className="py-2.5 font-semibold text-slate-700">Records not yet in the cloud</td>
+              <td className="py-2.5 font-semibold text-slate-700">Uploads queued on this device</td>
               <td className="py-2.5 text-right">
                 <StatusBadge tone={stuckCount ? 'danger' : pendingCount ? 'warn' : 'ok'}>
-                  {stuckCount ? `${stuckCount} stuck` : pendingCount ? `${pendingCount} queued` : 'All synced'}
+                  {stuckCount ? `${stuckCount} stuck` : pendingCount ? `${pendingCount} queued` : 'None queued here'}
                 </StatusBadge>
               </td>
             </tr>

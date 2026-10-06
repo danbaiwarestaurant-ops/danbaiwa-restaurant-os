@@ -171,23 +171,44 @@ function normaliseRemote(pgTable: SyncablePgTable, row: Record<string, any>): Re
   return row;
 }
 
+/** Cloud pages usually cover adjacent IDs. Native getAll reads that span in one
+ * request instead of issuing hundreds of IndexedDB get messages. A sparse
+ * update page may cover many unrelated local IDs: cap the span and fall back to
+ * exact bulkGet so neither memory nor last-write-wins depends on that density. */
+async function existingPageRows(table: any, chunk: Record<string, any>[]): Promise<any[]> {
+  const ids = chunk.map(row => row.id).sort();
+  if (!ids.length) return [];
+  const span = await table.where('id').between(ids[0], ids[ids.length - 1], true, true)
+    .limit(ids.length + 1).toArray();
+  if (span.length > ids.length) return table.bulkGet(chunk.map(row => row.id));
+  const byId = new Map(span.map((row: any) => [row.id, row]));
+  return chunk.map(row => byId.get(row.id));
+}
+
 /** Short, atomic merge transactions; dirty checks cannot race a ticket mutation. */
 export async function applyRemoteRows(pgTable: SyncablePgTable, rows: Record<string, any>[]): Promise<boolean> {
   const table = db[DEXIE_TABLE[pgTable]] as any;
   let changed = false;
   for (let offset = 0; offset < rows.length; offset += 200) {
-    const chunk = rows.slice(offset, offset + 200).filter(row => row.id);
+    const chunk = [...new Map(rows.slice(offset, offset + 200).filter(row => row.id).map(row => [row.id, row])).values()];
     changed = await db.transaction('rw', table, db.outbox, db.auditLogs, db.users, async () => {
       const [dirty, existing] = await Promise.all([
         db.outbox.where('[tableName+payload.id+status]')
           .anyOf(chunk.flatMap(row => [[pgTable, row.id, 'pending'], [pgTable, row.id, 'failed']]))
           .keys().then(keys => new Set(keys.map(key => String((key as any[])[1])))),
-        table.bulkGet(chunk.map(row => row.id)),
+        existingPageRows(table, chunk),
       ]);
       const removed = pgTable === 'users' ? await permanentlyRemovedIds() : new Set<string>();
-      const writes = chunk.filter((row, i) => !removed.has(row.id) && !dirty.has(row.id) && shouldApplyRemote(existing[i], row))
-        .map(row => normaliseRemote(pgTable, row));
-      if (writes.length) await table.bulkPut(writes);
+      const inserts: any[] = [], updates: any[] = [];
+      chunk.forEach((row, i) => {
+        if (removed.has(row.id) || dirty.has(row.id) || !shouldApplyRemote(existing[i], row)) return;
+        (existing[i] ? updates : inserts).push(normaliseRemote(pgTable, row));
+      });
+      // A new row has no before-image. Using add preserves that fact through
+      // Dexie's index/hooks middleware, avoiding another read per inserted row.
+      if (inserts.length) await table.bulkAdd(inserts);
+      if (updates.length) await table.bulkPut(updates);
+      const writes = [...inserts, ...updates];
       if (pgTable === 'audit_logs') await db.users.bulkDelete(writes.filter(row => archivedStaff(row as any)).map(row => row.entityId));
       return writes.length > 0;
     }) || changed;

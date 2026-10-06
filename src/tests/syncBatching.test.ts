@@ -24,6 +24,7 @@ let sessionValue: any = { access_token: 'valid', user: { id: 'ACCOUNT-1' } };
 let calls: { table: string; op: 'upsert' | 'delete'; rows: any[] }[] = [];
 /** Rows (by record id) the fake cloud rejects. */
 let rejectIds = new Set<string>();
+let requireQr = false;
 
 vi.mock('../services/supabase/supabaseClient', () => ({
   isSupabaseConfigured: true,
@@ -38,6 +39,9 @@ vi.mock('../services/supabase/supabaseClient', () => ({
       upsert: vi.fn(async (rows: any) => {
         const list = Array.isArray(rows) ? rows : [rows];
         calls.push({ table, op: 'upsert', rows: list });
+        if (requireQr && table === 'tickets' && list.some(row => !row.qr_payload)) return {
+          error: { code: '23502', message: 'null value in column "qr_payload" of relation "tickets" violates not-null constraint' },
+        };
         const bad = list.find((r) => rejectIds.has(String(r.id)));
         return bad
           ? { error: { code: '23503', message: `insert or update violates foreign key constraint (${bad.id})` } }
@@ -130,6 +134,7 @@ describe('outbox batching', () => {
       await dbService.init();
       calls = [];
       rejectIds = new Set();
+      requireQr = false;
       sessionValue = { access_token: 'valid', user: { id: 'ACCOUNT-1' } };
       Object.defineProperty(globalThis, 'navigator', {
         value: { onLine: true },
@@ -173,6 +178,22 @@ describe('outbox batching', () => {
       expect(good.every((r) => r.status === 'synced')).toBe(true);
       expect(good.every((r) => r.retryCount === 0)).toBe(true);
       expect(useSyncStore.getState().pendingCount).toBe(1);
+      expect(bad[0].lastError).toContain('tickets [23503]');
+    });
+
+    it('recovers 203 tickets against an older NOT NULL QR schema without individual retries', async () => {
+      requireQr = true;
+      const stamp = new Date().toISOString();
+      await db.outbox.bulkAdd(Array.from({ length: 203 }, (_, i) => queued({ tableName: 'tickets',
+        payload: { id: `LEGACY-${i}`, amount: 500, createdAt: stamp, ...(i === 0 ? { qrPayload: 'original-qr' } : {}) },
+      })));
+      await useSyncStore.getState().triggerSyncWorker();
+      expect(calls).toHaveLength(3); // rejected 200, corrected 200, remaining 3
+      const delivered = calls.slice(1).flatMap(call => call.rows);
+      expect(delivered.find(row => row.id === 'LEGACY-0').qr_payload).toBe('original-qr');
+      expect(delivered.find(row => row.id === 'LEGACY-1').qr_payload).toBe(`TICKET|LEGACY-1|500|${stamp}`);
+      expect((await db.outbox.toArray()).every(row => row.status === 'synced' && row.retryCount === 0)).toBe(true);
+      expect(useSyncStore.getState().pendingCount).toBe(0);
     });
 
     it('gives a legacy ticket an explicit tender so it cannot poison the batch', async () => {

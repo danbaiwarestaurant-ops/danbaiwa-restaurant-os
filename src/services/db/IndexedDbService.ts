@@ -186,6 +186,11 @@ export class IndexedDbService implements IDbService {
     return [...rows.filter(u => !removed.has(u.id)).map(stripUserRow), ...identities];
   }
 
+  async getUserById(id: string): Promise<UserAccount | null> {
+    const row = await db.users.get(id);
+    return row ? stripUserRow(row) : null;
+  }
+
   async findUsersByLoginKey(email: string): Promise<UserAccount[]> {
     const clean = (email || '').trim().toLowerCase();
     if (!clean) return [];
@@ -313,7 +318,10 @@ export class IndexedDbService implements IDbService {
   }
 
   async getTicketsInPeriod(period: Period): Promise<Ticket[]> {
-    return db.tickets.where('createdAt').between(period.start.toISOString(), period.end.toISOString(), true, false).reverse().toArray();
+    // Let IndexedDB return a native bulk page. Reverse IDB queries otherwise
+    // invoke a separate cursor callback per row on many deployed browsers.
+    const rows = await db.tickets.where('createdAt').between(period.start.toISOString(), period.end.toISOString(), true, false).toArray();
+    return rows.reverse();
   }
 
   async getStaffMealTickets(staffIds: string[], period: Period): Promise<Ticket[]> {

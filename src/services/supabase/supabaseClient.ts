@@ -190,7 +190,7 @@ export async function signUpNewAdminAccount(
 /**
  * Real Supabase Cloud Email Authentication Engine
  */
-export async function authenticateAdminWithSupabase(email: string, pin: string, locationId?: string) {
+export async function authenticateAdminWithSupabase(email: string, pin: string, _locationId?: string, expectedOwnerId?: string) {
   const cleanEmail = email.trim().toLowerCase();
 
   if (!isSupabaseConfigured) {
@@ -210,12 +210,23 @@ export async function authenticateAdminWithSupabase(email: string, pin: string, 
   const derivedPassword = deriveSupabasePassword(pin);
 
   // 1. Attempt Supabase Auth Sign In first
-  const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+  // Validate on a temporary client first: a mistaken account must not replace
+  // the enrolled till's working session. Registration has its own explicit path.
+  const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+  const { data: signInData, error: signInError } = await client.auth.signInWithPassword({
     email: cleanEmail,
     password: derivedPassword,
   });
 
   if (!signInError && signInData.user) {
+    if (expectedOwnerId && signInData.user.id !== expectedOwnerId) {
+      throw new Error('This email now signs into a different cloud account. The original records and till session have been retained; recover the original admin account before reconnecting.');
+    }
+    if (!signInData.session) throw new Error('Cloud sign-in returned no session.');
+    const { error } = await supabase.auth.setSession({ access_token: signInData.session.access_token, refresh_token: signInData.session.refresh_token });
+    if (error) throw error;
     return {
       userId: signInData.user.id,
       email: signInData.user.email,
@@ -224,32 +235,7 @@ export async function authenticateAdminWithSupabase(email: string, pin: string, 
     };
   }
 
-  // 2. If Sign In failed, attempt Sign Up (New Registration)
-  const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-    email: cleanEmail,
-    password: derivedPassword,
-    options: {
-      data: {
-        role: 'admin',
-        business_name: 'Danbaiwa Restaurant',
-        location_id: locationId || 'LOC01',
-      },
-    },
-  });
-
-  if (signUpError) {
-    if (signUpError.message.toLowerCase().includes('already registered') || signUpError.message.toLowerCase().includes('already exists')) {
-      throw new Error(`An account with email "${cleanEmail}" is already registered. Please log in instead.`);
-    }
-    throw new Error(`Supabase Email Auth Error: ${signUpError.message}`);
-  }
-
-  return {
-    userId: signUpData.user?.id || crypto.randomUUID(),
-    email: signUpData.user?.email || cleanEmail,
-    session: signUpData.session,
-    isNewUser: true,
-  };
+  throw new Error(`Cloud sign-in failed: ${signInError?.message || 'no account returned'}. Reconnecting does not create a new account; the original records remain queued.`);
 }
 
 /**

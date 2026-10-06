@@ -1,11 +1,18 @@
 import { create, StoreApi } from 'zustand';
 import { SyncState, OutboxItem, SyncAction } from '../types/sync';
 import { dbService } from '../services/db/IndexedDbService';
+import { db } from '../services/db/dexieSchema';
 import { supabase, isSupabaseConfigured } from '../services/supabase/supabaseClient';
 import { useDeviceStore } from './useDeviceStore';
 import { toSnakeCase } from '../utils/caseMapping';
 import { getAccountId, getServerAccountId } from '../services/db/accountScope';
 import { restoreDeviceSession, checkDeviceEnrolment } from '../services/supabase/deviceIdentity';
+import { ticketQrPayload } from '../services/db/remoteMerge';
+import { repairLegacyDeviceScope } from '../services/db/accountRepair';
+
+function refusalReason(table: string, error: { code?: string; message?: string; hint?: string }): string {
+  return `${table}${error.code ? ` [${error.code}]` : ''}: ${error.message || 'Cloud rejected the request'}${error.hint ? ` (${error.hint})` : ''}`;
+}
 
 interface SyncStoreState extends SyncState {
   pendingItems: OutboxItem[];
@@ -426,7 +433,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
   set({ isSyncing: true, cloudConnected: true, cloudError: null });
 
   try {
-    const items = await dbService.getPendingOutbox(1000);
+    let items = await dbService.getPendingOutbox(1000);
     const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
     // Resolve the tenant for this page; verify it again before each cloud batch.
     const accountId = await getAccountId();
@@ -444,6 +451,10 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       });
       console.warn('[Sync Store] Worker skipped: no account id resolved (data stays queued)');
       return 'skipped';
+    }
+
+    if (items.some(item => item.payload.accountId && item.payload.accountId !== accountId)) {
+      items = await repairLegacyDeviceScope(items, accountId);
     }
 
     /** One row, prepared for the cloud's column names and tenant scoping. */
@@ -478,12 +489,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       // spends tens of megabytes a year storing that repetition inside a 500 MB budget, so
       // it is not sent; a till that needs it rebuilds it (see ticketQrPayload).
       //
-      // Deleted rather than nulled, which is the difference between the column being left
-      // out of the INSERT entirely and being written as NULL. Note the ordering that
-      // follows from it: the schema migration that makes qr_payload nullable has to be
-      // applied BEFORE this build reaches a till, or every ticket is refused (23502). The
-      // reverse pairing is harmless — an older till still sending the text writes it, and
-      // a stored payload is always preferred over a rebuilt one.
+      // Legacy NOT NULL schemas are retried with the QR value by pushRows below.
       if (item.tableName === 'tickets') delete supabasePayload.qr_payload;
 
       return supabasePayload;
@@ -498,6 +504,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
      * account_id as well as id so a malformed queue entry can never reach beyond this
      * tenant.
      */
+    let includeTicketQr = false;
     const push = async (batch: OutboxBatch, rows: OutboxItem[]) => {
       if (batch.action === 'DELETE') {
         return supabase
@@ -527,7 +534,13 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
 
       return supabase
         .from(batch.tableName)
-        .upsert(rows.map(toCloudRow), { onConflict: conflictKey, ignoreDuplicates });
+        .upsert(rows.map(item => {
+          const row = toCloudRow(item);
+          if (batch.tableName === 'tickets' && includeTicketQr) {
+            row.qr_payload = item.payload.qrPayload || ticketQrPayload(item.payload as any);
+          }
+          return row;
+        }), { onConflict: conflictKey, ignoreDuplicates });
     };
 
     /**
@@ -537,14 +550,19 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
      * fault, and the immediate retry is the same request with the right target.
      */
     const pushRows = async (batch: OutboxBatch, rows: OutboxItem[]) => {
-      const result = await push(batch, rows);
-      if (batch.tableName !== 'tickets' || !isConflictTargetMismatch(result.error)) return result;
-
-      ticketConflictKey = ticketConflictKey === 'id' ? 'account_id,id' : 'id';
-      console.info(
-        `[Sync Store] Cloud does not accept that ticket conflict target; using "${ticketConflictKey}" from here on`
-      );
-      return push(batch, rows);
+      let result = await push(batch, rows);
+      if (batch.tableName !== 'tickets' || batch.action === 'DELETE') return result;
+      if (isConflictTargetMismatch(result.error)) {
+        ticketConflictKey = ticketConflictKey === 'id' ? 'account_id,id' : 'id';
+        result = await push(batch, rows);
+      }
+      // A pre-migration database requires the redundant QR value. Supply it only
+      // when that exact constraint rejects the request; retain all business fields.
+      if (!includeTicketQr && result.error?.code === '23502' && /column\s+["']qr_payload["']/i.test(result.error.message ?? '')) {
+        includeTicketQr = true;
+        result = await push(batch, rows);
+      }
+      return result;
     };
 
     /**
@@ -589,13 +607,13 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       return 'retry-soon';
     };
 
-    const fail = async (item: OutboxItem, error: { message?: string }, quiet = false) => {
+    const fail = async (item: OutboxItem, error: { code?: string; message?: string; hint?: string }, quiet = false) => {
       // One genuinely rejected record (schema mismatch, missing FK, etc.) must never
       // block every other queued ticket/shift/expense behind it. Back it off
       // exponentially and carry on — it keeps its place in the queue and is surfaced as
       // "stuck" rather than being dropped. Only real rejections reach here: a dropped
       // connection is caught by isTransientFailure above and charged to nobody.
-      const reason = error?.message ?? String(error);
+      const reason = refusalReason(item.tableName, error);
       // `quiet` is for a whole run refused for one reason: naming each of 400 rows
       // individually says nothing the one summary line above did not, and buries every
       // other message in the console under hundreds of identical lines.
@@ -615,7 +633,17 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       }
       const foreign = batch.items.filter(item => item.payload.accountId && item.payload.accountId !== accountId);
       if (foreign.length) {
-        for (const item of foreign) await fail(item, { message: 'Queued record belongs to another account; retained on this device.' }, true);
+        const byAccount = new Map<string, OutboxItem[]>();
+        for (const item of foreign) {
+          const source = String(item.payload.accountId);
+          byAccount.set(source, [...(byAccount.get(source) ?? []), item]);
+        }
+        for (const [source, rows] of byAccount) {
+          const originalOwner = await db.users.get(source);
+          const connectedOwner = await db.users.get(accountId);
+          const reason = `Account mismatch: these ${batch.tableName} records belong to ${originalOwner?.email || source}; this till is connected to ${connectedOwner?.email || accountId}. Sign into the original admin account to send them. If both accounts belong to this restaurant, preserve the data and use an account recovery; retrying alone cannot change ownership.`;
+          await dbService.markOutboxAttemptsFailedMany(rows, reason);
+        }
         batch.items = batch.items.filter(item => !foreign.includes(item));
         if (!batch.items.length) continue;
       }
@@ -663,7 +691,7 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
               `${ids.join(', ')}${send.length > ids.length ? `, +${send.length - ids.length} more` : ''}`
           );
         }
-        await dbService.markOutboxAttemptsFailedMany(send, error.message || String(error));
+        await dbService.markOutboxAttemptsFailedMany(send, refusalReason(batch.tableName, error));
         continue;
       }
 
@@ -795,6 +823,10 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
   },
 
   forceSyncNow: async () => {
+    // Incoming records must not wait for queued uploads or rejected rows.
+    void import('../services/db/realtimeSync')
+      .then(({ runReconciliationPull }) => runReconciliationPull({ recentFirst: true }))
+      .catch(e => console.warn('[Sync Store] Incoming refresh failed:', e));
     await dbService.init();
     // Someone pressing sync is asserting the connection is good now, so the cached
     // "no session" answer from a moment ago must not be what decides this attempt.
@@ -813,18 +845,7 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     await get().checkOutbox();
     await get().triggerSyncWorker();
 
-    // And pull, not just push. Someone pressing sync means "make this till agree with the
-    // others *now*", which is a two-way statement — but this button only ever sent, so
-    // whatever the other tills had written was still waiting on the background timer.
-    //
-    // Started, not awaited: the queue count is what the person is watching and it is
-    // already accurate, so holding the button's spinner open for a pull of somebody else's
-    // records would only make a working sync look slow. Imported here rather than at the
-    // top of the file because realtimeSync imports this store, and a static import back
-    // would close the loop.
-    void import('../services/db/realtimeSync')
-      .then(({ runCloudCatchUp }) => runCloudCatchUp())
-      .catch((e) => console.warn('[Sync Store] Manual sync could not pull from the cloud:', e));
+
   },
 
   startBackgroundLoop: () => {

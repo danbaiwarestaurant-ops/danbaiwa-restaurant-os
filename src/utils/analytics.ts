@@ -143,21 +143,22 @@ export interface DayPoint {
  * a quiet day must be a zero column rather than a missing one.
  */
 export function bucketRevenue(tickets: Ticket[], buckets: Bucket[]): DayPoint[] {
-  return buckets.map((b) => {
-    const from = b.start.getTime();
-    const to = b.end.getTime();
-    const inBucket = tickets.filter((t) => {
-      if (!isRevenueTicket(t)) return false;
-      const at = Date.parse(t.createdAt);
-      return !Number.isNaN(at) && at >= from && at < to;
-    });
-    return {
-      day: b.key,
-      label: b.label,
-      revenue: inBucket.reduce((sum, t) => sum + (t.amount || 0), 0),
-      ticketCount: inBucket.length,
-    };
-  });
+  const points = buckets.map(b => ({ day: b.key, label: b.label, revenue: 0, ticketCount: 0 }));
+  const bounds = buckets.map(b => ({ from: b.start.getTime(), to: b.end.getTime() }));
+  // Parse each sale once, rather than once per chart column. At 150,000 sales
+  // a monthly chart otherwise parses 4.65 million timestamps on the UI thread.
+  for (const ticket of tickets) {
+    if (!isRevenueTicket(ticket)) continue;
+    const at = Date.parse(ticket.createdAt);
+    if (Number.isNaN(at)) continue;
+    for (let i = 0; i < bounds.length; i++) {
+      if (at >= bounds[i].from && at < bounds[i].to) {
+        points[i].revenue += ticket.amount || 0;
+        points[i].ticketCount++;
+      }
+    }
+  }
+  return points;
 }
 
 /**

@@ -26,6 +26,20 @@
 
 const PAGE_SIZE = 500;
 
+/** Freeze the upper server timestamp before an ID-keyset history scan. A row
+ * arriving behind an already-read ID must remain eligible for the NEXT pull;
+ * otherwise a later arrival ahead of the cursor can move the watermark past it. */
+export async function* selectSnapshotPages<T extends Record<string, any> = any>(
+  build: () => any
+): AsyncGenerator<T[]> {
+  const { data, error } = await build().order('updated_at', { ascending: false }).range(0, 0);
+  if (error) throw error;
+  if (!data?.length) return;
+  const upper = data[0].updated_at;
+  if (!upper || !Number.isFinite(Date.parse(upper))) throw new Error('Cloud row has no valid server update timestamp.');
+  yield* selectPages<T>(() => build().lte('updated_at', upper));
+}
+
 /** Streaming keyset pages: bounded memory and no growing SQL OFFSET. Advance by
  * the last UNIQUE key actually returned, including under a smaller server cap. */
 export async function* selectPages<T extends Record<string, any> = any>(

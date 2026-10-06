@@ -47,5 +47,10 @@ export interface SyncState {
    */
   queueFault: { reason: string; count: number; sampled?: boolean } | null;
   lastSyncedAt?: string;
+  /** Last successful incoming reconciliation, independent of uploads. */
+  lastPulledAt?: string;
+  isPulling?: boolean;
+  pullError?: string | null;
+  realtimeConnected?: boolean;
   isSyncing: boolean;
 }

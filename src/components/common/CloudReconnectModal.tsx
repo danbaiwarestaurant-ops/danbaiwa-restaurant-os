@@ -6,6 +6,8 @@ import { useSyncStore } from '../../store/useSyncStore';
 interface CloudReconnectModalProps {
   isOpen: boolean;
   onClose: () => void;
+  originalAdminId?: string;
+  originalAdminEmail?: string;
 }
 
 /**
@@ -17,7 +19,7 @@ interface CloudReconnectModalProps {
  * be read: that reason used to live only in the browser console, which is no use to
  * whoever is actually standing at the till.
  */
-export const CloudReconnectModal: React.FC<CloudReconnectModalProps> = ({ isOpen, onClose }) => {
+export const CloudReconnectModal: React.FC<CloudReconnectModalProps> = ({ isOpen, onClose, originalAdminId, originalAdminEmail }) => {
   const [pin, setPin] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -33,7 +35,7 @@ export const CloudReconnectModal: React.FC<CloudReconnectModalProps> = ({ isOpen
       setSucceeded(false);
       setSubmitting(false);
     }
-  }, [isOpen]);
+  }, [isOpen, originalAdminId]);
 
   if (!isOpen) return null;
 
@@ -42,7 +44,7 @@ export const CloudReconnectModal: React.FC<CloudReconnectModalProps> = ({ isOpen
     setSubmitting(true);
     setFailure(null);
 
-    const result = await reconnectCloudSession(pin);
+    const result = await reconnectCloudSession(pin, originalAdminId);
     setSubmitting(false);
 
     if (result.ok) {
@@ -81,6 +83,7 @@ export const CloudReconnectModal: React.FC<CloudReconnectModalProps> = ({ isOpen
             </div>
           ) : (
             <>
+              {originalAdminEmail && <p className="text-sm font-bold break-all">Reconnect original account: {originalAdminEmail}</p>}
               {/* What is actually queued, so the stakes are concrete. */}
               {pendingCount > 0 && (
                 <div className="p-3 bg-amber-50 border-2 border-amber-400 text-amber-950 text-xs font-bold uppercase rounded-none">

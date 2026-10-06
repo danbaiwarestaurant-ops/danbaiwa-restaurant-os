@@ -24,6 +24,7 @@ import {
   isTillSession,
 } from '../services/supabase/deviceIdentity';
 import { getAccountId } from '../services/db/accountScope';
+import { applyRemoteRow } from '../services/db/remoteMerge';
 import { generateRecoveryKey, normaliseRecoveryKey } from '../utils/recoveryKey';
 import {
   LoginFailure,
@@ -76,9 +77,7 @@ async function adoptAccountFromCloud(
     return buildLoginFailure('unknown_account_offline', { email: cleanEmail });
   }
 
-  // Deliberately NOT authenticateAdminWithSupabase(): that helper signs the user UP when
-  // sign-in fails, which here would mint a brand-new cloud account out of a typo'd email.
-  //
+  // Adoption verifies cloud credentials before a local owner identity is known.
   // Two passwords are tried because a machine that has never held this account has no way
   // to tell which secret the operator typed. The cloud password is normally derived from
   // the till PIN, but an account whose password was reset from the Supabase dashboard (or
@@ -127,22 +126,25 @@ async function adoptAccountFromCloud(
     });
   }
 
-  // Authenticated — pull this account's data down onto the machine.
-  const restored = await runCloudCatchUp({ revive: true });
-  let user = await dbService.getUserByEmail(cleanEmail);
+  // Authenticate the owner profile before starting background history hydration.
+  // Awaiting the entire account here held a new phone on the login screen while
+  // hundreds of thousands of unrelated records downloaded.
+  let restored = false;
+  let user = await dbService.getUserById(data.user.id);
 
-  // Nothing came down (brand-new account, or the pull came up empty): fall back to the
-  // synced users row directly, which RLS always lets an account read for itself
-  // (id = auth.uid()).
-  if (!user) {
-    const { data: row } = await supabase
+  // Fetch the verified owner's profile directly (id = auth.uid()). This also
+  // refreshes stale credentials without awaiting unrelated operational records.
+  {
+    const { data: row, error: profileError } = await supabase
       .from('users')
       .select('*')
       .eq('id', data.user.id)
       .maybeSingle();
 
+    if (profileError) return buildLoginFailure('cloud_lookup_failed', { email: cleanEmail, detail: profileError.message });
+
     if (row?.pin_hash && row?.pin_salt) {
-      user = {
+      const cloudUser: UserAccount = {
         id: row.id,
         name: row.name || 'Admin',
         email: row.email || cleanEmail,
@@ -156,8 +158,13 @@ async function adoptAccountFromCloud(
         role: row.role || 'cashier',
         createdAt: row.created_at || new Date().toISOString(),
         status: row.status || 'active',
+        accountId: row.account_id || data.user.id,
+        updatedAt: row.updated_at,
       };
-      await dbService.saveUser(user);
+      if (user) await applyRemoteRow('users', cloudUser, 'UPDATE');
+      else await dbService.saveUserLocalOnly(cloudUser);
+      user = await dbService.getUserById(data.user.id);
+      restored = true;
     }
   }
 
@@ -378,7 +385,7 @@ interface AuthState {
    * PIN specifically (deriveSupabasePassword), so a password login — or any cashier
    * login — leaves the till with no cloud session and no way to get one back.
    */
-  reconnectCloudSession: (pin: string) => Promise<{ ok: boolean; message?: string }>;
+  reconnectCloudSession: (pin: string, originalAdminId?: string) => Promise<{ ok: boolean; message?: string }>;
 
   openPinModal: (
     purpose: string,
@@ -669,7 +676,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     runCloudCatchUp({ revive: true }).catch(() => {});
     if (isSupabaseConfigured && user.role === 'admin' && user.email) {
       const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
-      authenticateAdminWithSupabase(user.email, pin, locationId).then(() => { enrolThisTill(); startRealtimeSync(); }).catch(() => {});
+      authenticateAdminWithSupabase(user.email, pin, locationId, user.id).then(() => { enrolThisTill(); stopRealtimeSync(); startRealtimeSync(); }).catch(e => { useSyncStore.setState({ cloudError: e?.message || 'Cloud sign-in failed.' }); });
     }
     return { ok: true };
   },
@@ -808,9 +815,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // let this block or fail the actual local login — this is best-effort healing.
       if (isSupabaseConfigured && user.role === 'admin' && isPinValid) {
         const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
-        authenticateAdminWithSupabase(cleanEmail, passwordOrPin, locationId)
+        authenticateAdminWithSupabase(cleanEmail, passwordOrPin, locationId, user.id)
           .then(async () => {
             enrolThisTill();
+            stopRealtimeSync();
             startRealtimeSync();
             const changed = await runCloudCatchUp({ revive: true });
             if (changed) {
@@ -902,7 +910,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
   },
 
-  reconnectCloudSession: async (pin: string) => {
+  reconnectCloudSession: async (pin: string, originalAdminId?: string) => {
     const user = get().activeUser;
 
     if (!user) {
@@ -923,14 +931,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     // The cloud identity belongs to the admin account. A cashier PIN can't unlock it,
     // and saying so is more useful than a generic failure.
-    const admin =
-      user.role === 'admin' ? user : get().users.find((u) => u.role === 'admin' && u.status === 'active');
+    const admin = originalAdminId
+      ? await dbService.getUserById(originalAdminId)
+      : user.role === 'admin' ? user : get().users.find((u) => u.role === 'admin' && u.status === 'active');
 
-    if (!admin) {
+    if (!admin || admin.role !== 'admin' || admin.status !== 'active') {
       return {
         ok: false,
         message: 'Only the admin account can reconnect this till to the cloud, and no admin account exists on this device.',
       };
+    }
+
+    if (originalAdminId && user.role !== 'admin' && user.accountId && user.accountId !== originalAdminId) {
+      return { ok: false, message: 'The signed-in cashier belongs to a different account. Restore the original cashier account before reconnecting this till to that business.' };
     }
 
     const pinMatches = await verifySecret(pin, admin.pinHash, admin.pinSalt);
@@ -940,13 +953,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const locationId = useDeviceStore.getState().config.locationId || 'LOC01';
-      await authenticateAdminWithSupabase(admin.email, pin, locationId);
+      await authenticateAdminWithSupabase(admin.email, pin, locationId, admin.id);
 
       // Re-enrol a till whose access was revoked, or that never got an identity, so this
       // is the last time anyone has to type a PIN to get it syncing again.
       enrolThisTill();
 
       useSyncStore.setState({ cloudConnected: true, cloudError: null });
+      stopRealtimeSync();
       startRealtimeSync();
       await runCloudCatchUp({ revive: true });
       await get().loadUsers();

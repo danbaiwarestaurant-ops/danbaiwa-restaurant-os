@@ -1,5 +1,61 @@
 # Bug Fix Log
 
+## 2026-10-06 ? Large receiving-device catch-up hid current activity and repeated growing report scans
+
+**What the business saw:** an online phone showed last week's records while the till continued trading. Roughly 150,000 records were reported missing from the phone; only about 200 queue operations were rejected. A queue operation count is not proof that all other records reached the correct cloud account or the phone.
+
+**Confirmed source issues:** first-time cloud sign-in awaited all operational history before opening the dashboard. The current-day preview read oldest IDs first and downloaded the entire day before moving on, hiding the latest sale behind tens of thousands of earlier rows. Each history page reloaded the growing reporting period, causing repeated database reads, sorting and chart work. Reverse IndexedDB period reads used row cursors rather than a native bulk read on the tested browser path. Incoming merge before-image reads issued hundreds of exact-key requests per batch, including for entirely new data.
+
+**Fix:** verify the owner profile directly and open the app before background history hydration. Profile read failures remain explicit; incoming profiles do not generate an outgoing credential overwrite. Preview at most 500 recent records ordered by newest server update, while the complete historical pass independently retrieves every page. Current-trading refreshes continue during hydration. Defer whole manager-report reloads until history finishes, keep bounded cashier reloads, and use native ascending period reads followed by in-memory reversal. Read bounded adjacent-ID spans for remote merge before-images; sparse spans fall back to exact keys, and genuinely new rows use transactional bulkAdd. Dirty local edits, staff deletion identities and cached shift totals retain their existing protections. Chart timestamps are parsed once per sale rather than once per day column. Reports explicitly indicate incoming checks or failures while their data may be incomplete.
+
+**Concurrent-write correctness:** freeze each history table's upper server update timestamp before ID paging. Previously, a new sale inserted behind the ID cursor could be missed while a newer row ahead of it advanced the watermark past that sale. The bounded snapshot leaves later writes eligible for the next pull. A regression reproduces the behind-cursor insert and verifies it is received on the next pass.
+
+**Verification:** the large real-UI test uses an isolated shared mock cloud with 150,000 additional five-day records, an existing 204-record phone and 200 independently rejected till operations. Run against the fake-cloud Vite configuration with LARGE_SYNC_QA=1 and LIVE_SYNC_QA_BROWSER=msedge. It checks cloud/local identity equality, complete report data, visible latest sales, a fresh phone sign-in during hydration, and preservation of the cashier's shift. Results are saved in artifacts/large-sync-result.json. This measures local test conditions, not production network/server throughput.
+
+**Latest completed checks:** all 150,204 cloud/local ticket IDs matched, including the phone's 204 existing records. The 200 rejected till operations remained queued and the active cashier shift was unchanged. Full incoming catch-up took 45.35 seconds; the latest sale rendered in 1.214 seconds. A fresh phone opened its dashboard in 410 ms, displayed that sale in 883 ms, and completed its full recovery. Complete reporting ticket counts and revenue were verified through the store and the latest record was visible in the Sales Record Book UI. All 438 unit tests across 55 files and the production build passed. The separate reconnect/UI lifecycle test also passed. These timings are from Edge against the isolated mock cloud.
+
+**Production scope:** the actual restaurant account and affected till have not been inspected with authenticated live access. These source defects are established independently of the 200 rejections; neither those rejections nor the mock-cloud test proves the live five-day gap's exact cause or that its records have been recovered. The changes have not been deployed.
+
+**Files:** src/services/db/realtimeSync.ts, src/services/supabase/pagedSelect.ts, src/services/db/remoteMerge.ts, src/services/db/IndexedDbService.ts, src/store/useAuthStore.ts, src/components/auth/AuthPage.tsx, src/services/auth/loginErrors.ts, src/components/manager/ManagerConsole.tsx, src/utils/analytics.ts, src/tests/reconciliationPull.test.ts, src/tests/tillReliability.test.ts, src/tests/phoneLoginHydration.test.ts, scripts/verify-live-sync.mjs.
+
+## 2026-10-06 — Account mismatch stranded till records and hid current sales from phones
+
+**What the business saw:** 210 queued operations reported that they belonged to another account. Repeatedly pressing sync could not resolve those operations. Separately, the owner reported approximately 150,000 records made over five days were unavailable on another device. The 210 rejections do not establish why that much larger set was missing.
+
+**Root cause:** the worker correctly refused to send another account's data, but its generic message did not identify the original and connected accounts. Earlier device-ID stamping could also leave records under a till's authentication ID. In addition, the existing-account sign-in helper tried signup after failed authentication and never checked the returned owner ID against the saved owner; reconnecting could therefore create or adopt a different tenant while retaining the original account's queue.
+
+**Fix:** existing-owner authentication verifies the saved owner ID on a temporary client, never falls back to signup, and only then changes the enrolled session. Successful reconnects rebuild the account-scoped subscription without ending the cashier's local session. Queued records stamped with a known device ID are corrected atomically with their local domain rows only after both cloud membership and current server scope prove ownership. Genuine other-owner records remain queued; their diagnostic identifies both accounts and explains why retries cannot reassign them. Account mismatch rejection metadata is written in batches.
+
+**Recovery action:** sync details sample rejected queue rows and offer reconnect buttons for original, active admin identities retained locally. The original PIN and cloud owner ID must both verify before reconnecting. The cashier's local login and shift remain open. A cashier explicitly belonging to another business cannot switch the till to that account through this action. The full two-device browser test also reproduces a wrong cloud login, reconnects the original account through this PIN form, and verifies the held sale reaches the cloud while the shift remains unchanged.
+
+**Scope:** the reported till's original/connected IDs have not been inspected on the live device. This fix does not claim that those specific 210 records have already been recovered, nor does it merge separate admin accounts automatically.
+
+**Files:** `src/services/db/accountRepair.ts`, `src/services/db/IndexedDbService.ts`, `src/store/useSyncStore.ts`, `src/store/useAuthStore.ts`, `src/services/supabase/supabaseClient.ts`, `src/components/common/CloudReconnectModal.tsx`, `src/components/common/SyncIndicator.tsx`, `src/tests/accountRepair.test.ts`, `src/tests/cloudReconnectIdentity.test.ts`.
+
+## 2026-10-06 — Mobile cloud reads waited behind uploads and historical maintenance
+
+**What the manager saw:** returning to the phone could show old trading figures even while online. A stalled upload or lengthy historical sweep delayed incoming records; a suspended or disconnected websocket did not trigger gap repair on wake.
+
+**Root cause:** two-way catch-up awaited the full upload/backfill path before downloading. Only startup, an online event, and a five-minute interval pulled missing changes. Subscription status was ignored. Store reload debouncing could keep postponing rendering during continuous history pages, and the phone's empty local queue was described as all records being synced.
+
+**Fix:** upload maintenance and incoming reconciliation run independently. Devices behind on history read current trading first without advancing historical watermarks; another bounded current-trading reader continues during a long historical pull. Focus, visibility, network restoration, and realtime subscription restoration trigger gap repair. Visible devices have a 30-second fallback. Reloads are throttled per table, and watermark updates are atomic. Lifecycle guards and listener cleanup prevent old sessions from maintaining subscriptions after stop. The manager header now exposes incoming freshness and readable sync details in a viewport modal. Overview labels clearly describe this device's queue. Desktop sidebar stacking no longer intercepts account-menu clicks after header wrapping.
+
+**Verification:** regression tests cover held uploads, held historical reads, phone wake, socket resubscription, stop cleanup, and concurrent watermarks. `scripts/verify-live-sync.mjs` drives real signup, staff creation, cashier login and sale issuance, plus separate phone login against an isolated shared mock cloud. It recovers 203 proven device-scoped records, preserves seven genuine other-account records, renders the new sale on the phone, and verifies the cashier shift remains open. This is local browser verification; production latency is not inferred from it.
+
+**Files:** `src/services/db/realtimeSync.ts`, `src/services/db/syncWatermarks.ts`, `src/types/sync.ts`, `src/components/common/SyncIndicator.tsx`, `src/components/manager/ManagerConsole.tsx`, `src/components/manager/views/OverviewView.tsx`, `src/tests/reconciliationPull.test.ts`, `src/tests/tenantIsolation.test.ts`, `scripts/verify-live-sync.mjs`.
+
+## 2026-10-06 — Older cloud QR constraint rejected entire ticket batches
+
+**What staff saw:** every ticket could remain blocked even though its business values were valid.
+
+**Root cause:** uploads omitted the redundant QR payload while pre-migration databases still required that column. PostgreSQL rejected each batch with 23502, followed by needless individual retries.
+
+**Fix:** the uploader recognizes only the specific QR-column NOT NULL refusal and immediately retries the batch with original or deterministically rebuilt QR values. It also supports the existing ticket conflict-key migration fallback. No business fields are stripped and no retry is charged for successful compatibility recovery. Rejection diagnostics now retain the table and PostgreSQL code.
+
+**Verification:** 203 queued tickets upload in three requests against a QR-required mock schema, with original QR text preserved and no failed-attempt counts. Other constraint failures remain isolated and queued.
+
+**Files:** `src/store/useSyncStore.ts`, `src/tests/syncBatching.test.ts`.
+
 Every bug we find and fix gets an entry here — what broke, what it looked like to a
 user, why it happened, and how it was fixed. See rule 6 in `.agents/AGENTS.md`.
 

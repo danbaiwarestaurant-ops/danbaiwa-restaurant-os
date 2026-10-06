@@ -106,7 +106,7 @@ export const AuthPage: React.FC = () => {
         return;
       }
       if (result.restoredFromCloud) {
-        setResetSuccessMsg('Account restored to this till from the cloud backup. Signing in...');
+        setResetSuccessMsg('Account verified. Opening the app while records download in the background...');
       }
     } catch (err: any) {
       showError(err?.message || 'Login failed for an unexpected reason.', 'Check the browser console for details.');
