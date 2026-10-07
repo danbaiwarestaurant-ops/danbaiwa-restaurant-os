@@ -11,6 +11,8 @@ const cloud = new Map();
 const sortedCloud = new Map();
 let registered = false;
 let qrRefusals = 0;
+let missingSchema = false;
+let schemaRefusals = 0;
 const legacyDevice = '00000000-0000-4000-8000-000000000002';
 const errors = [];
 let largeCatchUp;
@@ -47,6 +49,10 @@ async function setup(context) {
     const rows = cloud.get(table) || new Map(); cloud.set(table, rows);
     if (req.method() === 'POST') {
       const data = req.postDataJSON(), list = Array.isArray(data) ? data : [data];
+      if (missingSchema && ['tickets', 'shifts'].includes(table)) {
+        schemaRefusals++;
+        return send({ code: 'PGRST204', message: `Could not find the '${table === 'tickets' ? 'shift_id' : 'installation_id'}' column of '${table}' in the schema cache` }, 400);
+      }
       if (table === 'tickets' && list.some(row => !row.qr_payload)) {
         qrRefusals++;
         return send({ code: '23502', message: 'null value in column "qr_payload" of relation "tickets" violates not-null constraint' }, 400);
@@ -135,6 +141,67 @@ try {
   await phone.locator('form input[type=password]').fill('9876');
   await phone.getByRole('button', { name: /log in to terminal/i }).click();
   await phone.getByRole('heading', { name: 'Overview', exact: true }).waitFor();
+  if (process.env.SCHEMA_SYNC_QA === '1') {
+    missingSchema = true;
+    await tillContext.setOffline(true);
+    // Actual cashier login/open shift, plus the photographed backlog size. The
+    // final ticket is issued through the real UI rather than injected as a fixture.
+    await till.evaluate(async ({ account, shift }) => {
+      const { db } = await import('/src/services/db/dexieSchema.ts');
+      const { dbService } = await import('/src/services/db/IndexedDbService.ts');
+      const current = (await import('/src/store/useShiftStore.ts')).useShiftStore.getState().currentShift;
+      const stamp = new Date(Date.now() - 5 * 86400000).toISOString();
+      const rows = Array.from({ length: 1834 }, (_, i) => ({ id: `SCHEMA-${String(i).padStart(5, '0')}`, accountId: account,
+        shiftId: shift, cashierId: current.cashierId, deviceId: current.deviceId, locationId: 'LOC01', localSeq: i,
+        amount: 500, currency: 'N', status: 'paid', tender: 'cash', createdAt: stamp, updatedAt: stamp, qrPayload: 'retained-qr' }));
+      await db.transaction('rw', db.tickets, db.outbox, async () => {
+        await db.tickets.bulkAdd(rows);
+        await db.outbox.bulkAdd(rows.map(row => ({ id: crypto.randomUUID(), tableName: 'tickets', action: 'INSERT', payload: row,
+          status: 'pending', retryCount: 0, createdAt: stamp })));
+      });
+      await dbService.saveShift(current);
+    }, { account, shift });
+    await till.getByRole('button', { name: /500/ }).first().click();
+    await wait(till, async () => (await import('/src/services/db/dexieSchema.ts')).db.tickets.count().then(n => n === 1835));
+    const issuedId = await till.evaluate(async () => (await import('/src/services/db/dexieSchema.ts')).db.tickets.orderBy('createdAt').last().then(row => row.id));
+    await tillContext.setOffline(false);
+    await till.getByRole('button', { name: /Database Update Required/ }).waitFor();
+    await wait(till, async () => !(await import('/src/store/useSyncStore.ts')).useSyncStore.getState().isSyncing);
+    assert.equal(cloud.get('tickets')?.size || 0, 0);
+    assert.equal(await till.evaluate(async () => (await import('/src/services/db/dexieSchema.ts')).db.outbox.where('status').equals('pending').count()), 1836);
+    await till.getByRole('button', { name: /Database Update Required/ }).click();
+    await till.getByRole('dialog', { name: 'Cloud sync details' }).getByText(/Apply the database migration before retrying/).waitFor();
+    await till.getByRole('button', { name: 'Close', exact: true }).click();
+    // Reproduce the operator's refresh: neither unsent records nor the shift vanish.
+    await till.reload();
+    await till.getByRole('button', { name: 'Staff Meal', exact: true }).waitFor();
+    await till.getByRole('button', { name: /Database Update Required/ }).waitFor();
+    assert.equal(await till.evaluate(async () => (await import('/src/services/db/dexieSchema.ts')).db.tickets.count()), 1835);
+    assert.equal(await till.evaluate(async () => (await import('/src/store/useShiftStore.ts')).useShiftStore.getState().currentShift.id), shift);
+    // Mock only the externally applied SQL; recovery uses the real retry UI/worker.
+    missingSchema = false;
+    const repairedAt = Date.now();
+    await till.getByRole('button', { name: /Database Update Required/ }).click();
+    await till.getByRole('button', { name: 'Retry sync now', exact: true }).click();
+    await wait(till, async () => (await import('/src/store/useSyncStore.ts')).useSyncStore.getState().pendingCount === 0);
+    assert.equal(cloud.get('tickets').size, 1835);
+    assert.ok([...cloud.get('tickets').values()].every(row => row.account_id === account && row.shift_id === shift));
+    assert.equal(cloud.get('shifts').get(shift).status, 'open');
+    assert.ok(cloud.get('shifts').get(shift).installation_id);
+    await phone.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await wait(phone, async () => (await import('/src/services/db/dexieSchema.ts')).db.tickets.count().then(n => n === 1835));
+    await nav(phone, 'Sales Record Book');
+    await phone.getByText(`#${issuedId}`, { exact: true }).waitFor();
+    assert.equal(await till.evaluate(async () => (await import('/src/store/useShiftStore.ts')).useShiftStore.getState().currentShift.id), shift);
+    assert.deepEqual(errors, []);
+    await mkdir('artifacts', { recursive: true });
+    const result = { queuedTicketsRecovered: 1835, openShiftRecovered: true, metadataPreserved: true,
+      refreshRetainedAllRecords: true, newestTicketVisibleOnPhone: true, schemaRefusals, recoveryMs: Date.now() - repairedAt };
+    await writeFile('artifacts/schema-sync-result.json', JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(result));
+    await browser.close();
+    process.exit(0);
+  }
   await phoneContext.setOffline(true);
   await tillContext.setOffline(true);
   // Supplemental five-day backlog, alongside an actual new sale through the UI.

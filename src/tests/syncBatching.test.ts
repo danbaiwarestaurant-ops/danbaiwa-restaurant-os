@@ -25,6 +25,7 @@ let calls: { table: string; op: 'upsert' | 'delete'; rows: any[] }[] = [];
 /** Rows (by record id) the fake cloud rejects. */
 let rejectIds = new Set<string>();
 let requireQr = false;
+let missingSchema = false;
 
 vi.mock('../services/supabase/supabaseClient', () => ({
   isSupabaseConfigured: true,
@@ -39,6 +40,9 @@ vi.mock('../services/supabase/supabaseClient', () => ({
       upsert: vi.fn(async (rows: any) => {
         const list = Array.isArray(rows) ? rows : [rows];
         calls.push({ table, op: 'upsert', rows: list });
+        if (missingSchema && ['tickets', 'shifts'].includes(table)) return {
+          error: { code: 'PGRST204', message: `Could not find the '${table === 'tickets' ? 'shift_id' : 'installation_id'}' column of '${table}' in the schema cache` },
+        };
         if (requireQr && table === 'tickets' && list.some(row => !row.qr_payload)) return {
           error: { code: '23502', message: 'null value in column "qr_payload" of relation "tickets" violates not-null constraint' },
         };
@@ -135,6 +139,7 @@ describe('outbox batching', () => {
       calls = [];
       rejectIds = new Set();
       requireQr = false;
+      missingSchema = false;
       sessionValue = { access_token: 'valid', user: { id: 'ACCOUNT-1' } };
       Object.defineProperty(globalThis, 'navigator', {
         value: { onLine: true },
@@ -210,9 +215,52 @@ describe('outbox batching', () => {
       await useSyncStore.getState().triggerSyncWorker();
 
       expect(calls).toHaveLength(1);
-      expect(calls[0].rows.map((r) => r.tender)).toEqual(['cash', 'transfer']);
+      expect(calls[0].rows.find(row => row.id === 'T-legacy').tender).toBe('cash');
+      expect(calls[0].rows.find(row => row.id === 'T-new').tender).toBe('transfer');
       expect(useSyncStore.getState().pendingCount).toBe(0);
     });
+
+    it('retains an entire multi-page schema-blocked backlog, sends unrelated work, and recovers with ownership intact', async () => {
+      missingSchema = true;
+      // Smaller real IndexedDB pages exercise multiple worker passes without making
+      // fake-indexeddb pay native-browser scale costs in a correctness regression.
+      const readPending = dbService.getPendingOutbox.bind(dbService);
+      const pageSize = vi.spyOn(dbService, 'getPendingOutbox').mockImplementation(limit => readPending(Math.min(limit ?? 1000, 100)));
+      const payloads = Array.from({ length: 201 }, (_, i) => ({ id: `SCHEMA-${i}`, accountId: 'ACCOUNT-1', shiftId: 'SHIFT-1', amount: 500 }));
+      try {
+        const rows = payloads.map(payload => queued({ tableName: 'tickets', payload }));
+        await db.outbox.bulkAdd([
+          queued({ tableName: 'shifts', payload: { id: 'SHIFT-1', accountId: 'ACCOUNT-1', installationId: 'TILL-A', status: 'open' } }),
+          ...rows,
+          queued({ tableName: 'users', payload: { id: 'USER-1', accountId: 'ACCOUNT-1' } }),
+        ]);
+        await useSyncStore.getState().triggerSyncWorker();
+        expect(calls.filter(call => call.table === 'tickets')).toHaveLength(1);
+        expect(calls.filter(call => call.table === 'shifts')).toHaveLength(1);
+        expect(calls.find(call => call.table === 'users')).toBeTruthy();
+        const retained = await db.outbox.where('status').equals('pending').toArray();
+        expect(retained).toHaveLength(202);
+        expect(retained.every(row => row.retryCount === 1 && row.lastError?.includes('Database update required'))).toBe(true);
+        expect(retained.filter(row => row.tableName === 'tickets').map(row => row.payload).sort((a, b) => a.id.localeCompare(b.id)))
+          .toEqual([...payloads].sort((a, b) => a.id.localeCompare(b.id)));
+        expect(useSyncStore.getState().queueFault?.reason).toContain('20261007_sync_schema_repair.sql');
+        expect(useSyncStore.getState().cloudConnected).toBe(true);
+        // Another failed cycle must not increment retry counts or keep increasing delays.
+        await dbService.revivePendingOutbox();
+        await useSyncStore.getState().triggerSyncWorker();
+        expect((await db.outbox.where('status').equals('pending').toArray()).every(row => row.retryCount === 1)).toBe(true);
+        // Simulate applying the additive database migration, without changing local data.
+        missingSchema = false;
+        calls = [];
+        await dbService.revivePendingOutbox();
+        await useSyncStore.getState().triggerSyncWorker();
+        expect(useSyncStore.getState().pendingCount).toBe(0);
+        const delivered = calls.filter(call => call.table === 'tickets').flatMap(call => call.rows);
+        expect(delivered).toHaveLength(201);
+        expect(delivered.every(row => row.account_id === 'ACCOUNT-1' && row.shift_id === 'SHIFT-1')).toBe(true);
+        expect(calls.find(call => call.table === 'shifts')!.rows[0]).toMatchObject({ installation_id: 'TILL-A', status: 'open' });
+      } finally { pageSize.mockRestore(); }
+    }, 60000);
 
     it('sends removals as removals even when batched', async () => {
       await db.outbox.add(queued({ tableName: 'users', action: 'DELETE', payload: { id: 'U1' } }));
@@ -223,7 +271,7 @@ describe('outbox batching', () => {
 
       expect(calls).toHaveLength(1);
       expect(calls[0].op).toBe('delete');
-      expect(calls[0].rows.map((r) => r.id)).toEqual(['U1', 'U2']);
+      expect(calls[0].rows.map((r) => r.id).sort()).toEqual(['U1', 'U2']);
       expect(useSyncStore.getState().pendingCount).toBe(0);
     });
   });

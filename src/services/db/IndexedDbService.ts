@@ -899,6 +899,17 @@ export class IndexedDbService implements IDbService {
     });
   }
 
+  /** A missing cloud column must not earn an ever-growing row retry delay. */
+  async markOutboxSchemaBlockedMany(items: OutboxItem[], reason: string): Promise<void> {
+    await db.transaction('rw', db.outbox, async () => {
+      const current = await db.outbox.bulkGet(items.map(item => item.id));
+      const nextAttemptAt = new Date(Date.now() + 30_000).toISOString();
+      await db.outbox.bulkPut(current.filter((row): row is OutboxItem => !!row && row.status !== 'synced')
+        .map(row => ({ ...row, status: 'pending' as const, retryCount: Math.max(1, row.retryCount),
+          lastError: reason, nextAttemptAt })));
+    });
+  }
+
   /**
    * Drops acknowledged outbox rows older than the retention window.
    *

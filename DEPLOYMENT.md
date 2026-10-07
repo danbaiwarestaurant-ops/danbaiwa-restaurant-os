@@ -14,7 +14,9 @@ npm install
 npm run build      # also refreshes public/print-agent/ (see PRINTING.md)
 ```
 
-Vercel builds from the repository. Nothing else is needed for the app itself.
+Vercel builds from the repository. Database migrations must be applied to the same
+Supabase project before releasing a client that writes new columns. A frontend deploy
+does not run SQL migrations.
 
 ### Environment variables — set these in Vercel, not in a file
 
@@ -46,6 +48,30 @@ reached at an address other than the one that should receive them.
 
 Safe to re-run: it creates nothing twice and deletes nothing. **Re-run it after updating
 the app** — it is also how schema changes reach a live project.
+
+### Required schema check before release
+
+Run `npm run check:cloud-schema` with the same Supabase environment variables as the
+deployment. It uses the public app key and `limit=0` queries, reads no business records,
+and exits unsuccessfully if required shift, ticket or kitchen-unit columns are missing.
+Use `npm run check:cloud-schema && npm run build` as the Vercel build command to enforce
+this check on deployments. The ordinary local build remains usable for offline tests.
+This checks column availability; it does not prove account access or successful delivery.
+
+### Repair for missing `tickets.shift_id` / `shifts.installation_id`
+
+If the sync details or console report PGRST204 or 42703 for these columns, run
+`scripts/migrations/20261007_sync_schema_repair.sql` in the **affected project's** SQL
+Editor. This adds the two nullable columns and reloads the PostgREST schema cache. It
+does not modify existing tickets, shift states, credentials or access policies. If the
+five-second lock timeout is hit, the transaction rolls back; rerun when it can acquire
+the table locks. Do not remove those fields from uploads to disguise the error.
+
+Then rerun the schema check and use **Retry sync now** on the affected till. Existing
+clients may have backed the rejected records off; the retry clears those timers.
+Keep that till's browser storage intact. Verify the queued count decreases and an actual
+new ticket, plus older queued tickets, appear in the phone's Sales Record Book. An empty
+phone queue does not establish that the till's records have reached the cloud.
 
 ### 2b. Auth URL configuration — the reset-link trap
 

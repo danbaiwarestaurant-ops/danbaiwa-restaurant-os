@@ -45,6 +45,7 @@ export const SyncIndicator: React.FC = () => {
   // Being disconnected is the one state the operator can actually act on, so clicking
   // opens the fix rather than uselessly re-running a sync that has nowhere to go.
   const needsReconnect = isOnline && !cloudConnected;
+  const schemaBlocked = /Database update required|\[(PGRST204|PGRST205|42703|42P01)\]/i.test(queueFault?.reason ?? '');
 
   let tone: string;
   let label: string;
@@ -61,6 +62,11 @@ export const SyncIndicator: React.FC = () => {
     label = pendingCount > 0 ? `Not Signed In to Cloud (${pendingCount})` : 'Not Signed In to Cloud';
     title = `${cloudError ?? 'This till is online but has no cloud session, so nothing can reach your other devices.'}\n\nClick to reconnect with the admin PIN.`;
     Icon = CloudOff;
+  } else if (schemaBlocked) {
+    tone = 'bg-amber-100 border-amber-500 text-amber-950';
+    label = `Database Update Required (${pendingCount})`;
+    title = queueFault!.reason;
+    Icon = AlertTriangle;
   } else if (stuckCount > 0) {
     tone = 'bg-amber-100 border-amber-500 text-amber-950';
     label = `${stuckCount} Stuck • ${pendingCount} Queued`;
@@ -121,6 +127,7 @@ export const SyncIndicator: React.FC = () => {
             <p className="mt-2 text-sm">Last successful incoming check: {lastPulledAt ? new Date(lastPulledAt).toLocaleString() : 'Not completed yet'}</p>
             <p className="mt-2 text-sm">{realtimeConnected ? 'Live connection established.' : 'Live connection unavailable; checking for changes every 30 seconds while this app is visible.'}</p>
             <p className="mt-2 text-sm">Records still queued on another till cannot appear here until that till uploads them.</p>
+            {schemaBlocked && <p className="mt-3 text-sm font-bold">The cloud database is missing a required column or table. Apply the database migration before retrying. PIN resets and refreshing the till cannot repair it.</p>}
             {(queueFault || cloudError || pullError || retryError) && <pre className="mt-4 whitespace-pre-wrap break-words text-xs bg-amber-50 border border-amber-300 p-3">{[queueFault?.reason, cloudError, pullError, retryError].filter(Boolean).join('\n\n')}</pre>}
             <div className="mt-5 flex flex-wrap gap-3">
               {originalAdmins.map(admin => <button key={admin.id} className="border border-amber-500 bg-amber-50 px-4 py-3 text-sm font-bold break-all" onClick={() => { setReconnectAdmin(admin); setDetailsOpen(false); setIsReconnectOpen(true); }}>Reconnect {admin.email}</button>)}

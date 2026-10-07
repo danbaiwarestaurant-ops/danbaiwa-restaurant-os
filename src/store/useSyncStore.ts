@@ -9,6 +9,7 @@ import { getAccountId, getServerAccountId } from '../services/db/accountScope';
 import { restoreDeviceSession, checkDeviceEnrolment } from '../services/supabase/deviceIdentity';
 import { ticketQrPayload } from '../services/db/remoteMerge';
 import { repairLegacyDeviceScope } from '../services/db/accountRepair';
+import { CloudRequestError, cloudSchemaRepairMessage, isCloudSchemaError } from '../services/supabase/schemaErrors';
 
 function refusalReason(table: string, error: { code?: string; message?: string; hint?: string }): string {
   return `${table}${error.code ? ` [${error.code}]` : ''}: ${error.message || 'Cloud rejected the request'}${error.hint ? ` (${error.hint})` : ''}`;
@@ -403,7 +404,7 @@ type SyncGet = StoreApi<SyncStoreState>['getState'];
  * finishes, without recursing through the store, and so the reason a pass ended is a
  * value the caller can act on rather than a bare `return`.
  */
-async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
+async function runSyncPass(set: SyncSet, get: SyncGet, schemaFaults: Map<string, CloudRequestError>): Promise<PassOutcome> {
   if (get().isSyncing) return 'skipped';
 
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
@@ -654,6 +655,13 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       batch.items = current;
       if (!batch.items.length) continue;
       const { send, superseded } = dedupeBatch(batch.items);
+      // A missing column refuses every write to this table. Reuse that diagnosis
+      // across this drain's bounded queue pages, while unrelated tables still send.
+      const knownSchemaFault = batch.action !== 'DELETE' && schemaFaults.get(batch.tableName);
+      if (knownSchemaFault) {
+        await dbService.markOutboxSchemaBlockedMany(batch.items, cloudSchemaRepairMessage(batch.tableName, knownSchemaFault));
+        continue;
+      }
       const { error } = await pushRows(batch, send);
 
       if (!error) {
@@ -671,6 +679,15 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
 
       if (isTransientFailure(error)) return abortTransient(error);
       if ((await classify(error, batch.tableName)) === 'session-lost') return 'session-lost';
+
+      if (isCloudSchemaError(error)) {
+        const reason = cloudSchemaRepairMessage(batch.tableName, error);
+        if (batch.action !== 'DELETE') schemaFaults.set(batch.tableName, error);
+        console.warn(`[Sync Store] ${reason}`);
+        // Keep superseded snapshots too until their replacement is acknowledged.
+        await dbService.markOutboxSchemaBlockedMany(batch.items, reason);
+        continue;
+      }
 
       // Nothing about this rejection points at a particular row, so every row in the run
       // would fail it identically. Charge the run once and move on: splitting it up
@@ -759,7 +776,6 @@ async function runSyncPass(set: SyncSet, get: SyncGet): Promise<PassOutcome> {
       queueFault: topError ?? null,
       pendingItems: [],
       isSyncing: false,
-      lastSyncedAt: new Date().toISOString(),
     });
     return 'drained';
   } catch (e: any) {
@@ -802,10 +818,12 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     // Latch BEFORE any await, including cloud session restoration.
     if (workerRunning) { resyncRequested = true; return; }
     workerRunning = true;
+    // Reset on each worker invocation so a repaired schema recovers automatically.
+    const schemaFaults = new Map<string, CloudRequestError>();
     const drain = async () => {
       do {
         resyncRequested = false;
-        if (await runSyncPass(set, get) !== 'drained') break;
+        if (await runSyncPass(set, get, schemaFaults) !== 'drained') break;
         // Keep draining bounded pages immediately, including writes made mid-pass.
         const due = await dbService.getPendingOutbox(1);
         if (!due.length && !resyncRequested) break;
